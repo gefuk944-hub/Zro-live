@@ -1,0 +1,114 @@
+name: Build & Release Zro Live APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: "Optional release tag (e.g. v1.0.1). Leave blank for auto-versioning."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build APK & Publish GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Install Android SDK 36 & accept licenses
+        run: |
+          SDKMANAGER="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0" || true
+          "$SDKMANAGER" "platforms;android-36.1" || true
+
+      - name: Prepare debug signing keystore & env file
+        run: |
+          if [ ! -f debug.keystore ]; then
+            if [ -f debug.keystore.base64 ]; then
+              base64 -d debug.keystore.base64 > debug.keystore
+            else
+              keytool -genkeypair -v \
+                -keystore debug.keystore \
+                -storepass android \
+                -alias androiddebugkey \
+                -keypass android \
+                -keyalg RSA \
+                -keysize 2048 \
+                -validity 10000 \
+                -dname "CN=Android Debug,O=Android,C=US"
+            fi
+          fi
+          if [ ! -f .env ] && [ -f .env.example ]; then
+            cp .env.example .env
+          fi
+
+      - name: Build Debug APK
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Determine release version & rename APK
+        id: release_meta
+        env:
+          INPUT_TAG: ${{ inputs.version_tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          elif [ "$REF_TYPE" = "tag" ]; then
+            TAG="$REF_NAME"
+          else
+            TAG="v1.0.${RUN_NUMBER}"
+          fi
+          APK_SOURCE="app/build/outputs/apk/debug/app-debug.apk"
+          APK_TARGET="Zro-Live-${TAG}.apk"
+          cp "$APK_SOURCE" "$APK_TARGET"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "apk_path=${APK_TARGET}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zro-Live-${{ steps.release_meta.outputs.tag }}
+          path: ${{ steps.release_meta.outputs.apk_path }}
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          name: "Zro Live ${{ steps.release_meta.outputs.tag }}"
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## Zro Live ${{ steps.release_meta.outputs.tag }}
+            - Compatible with **Android 7.0 (API 24)** through **Android 16 (API 36)**
+            - Download the attached **${{ steps.release_meta.outputs.apk_path }}** file below to install on Android.
+          files: |
+            ${{ steps.release_meta.outputs.apk_path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
