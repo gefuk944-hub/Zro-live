@@ -14,7 +14,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [29, 36])
+@Config(sdk = [24, 29, 36])
 class MainActivityLaunchTest {
 
     @get:Rule

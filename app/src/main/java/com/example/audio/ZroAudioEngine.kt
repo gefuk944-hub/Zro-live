@@ -232,27 +232,7 @@ object ZroAudioEngine {
         }
         releaseGameAudioRecord()
         try {
-            val config = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
-                .addMatchingUsage(AudioAttributes.USAGE_GAME)
-                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-                .build()
-            val format = AudioFormat.Builder()
-                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                .setSampleRate(SAMPLE_RATE)
-                .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
-                .build()
-            val minBuf = AudioRecord.getMinBufferSize(
-                SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-            ).coerceAtLeast(FRAME_SAMPLES * 4)
-
-            val record = AudioRecord.Builder()
-                .setAudioFormat(format)
-                .setBufferSizeInBytes(minBuf * 2)
-                .setAudioPlaybackCaptureConfig(config)
-                .build()
+            val record = Api29GameAudioHelper.createGameAudioRecord(mediaProjection, SAMPLE_RATE, FRAME_SAMPLES)
             if (record.state == AudioRecord.STATE_INITIALIZED) {
                 record.startRecording()
                 gameAudioRecord = record
@@ -264,6 +244,38 @@ object ZroAudioEngine {
         } catch (e: Exception) {
             Log.w(TAG, "Game audio playback capture unavailable: ${e.message}")
             _gameCaptureStatus.value = "Blocked by device or game manifest restriction"
+        }
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
+    private object Api29GameAudioHelper {
+        @SuppressLint("MissingPermission")
+        fun createGameAudioRecord(
+            mediaProjection: MediaProjection,
+            sampleRate: Int,
+            frameSamples: Int
+        ): AudioRecord {
+            val config = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
+                .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                .build()
+            val format = AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(sampleRate)
+                .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                .build()
+            val minBuf = AudioRecord.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            ).coerceAtLeast(frameSamples * 4)
+
+            return AudioRecord.Builder()
+                .setAudioFormat(format)
+                .setBufferSizeInBytes(minBuf * 2)
+                .setAudioPlaybackCaptureConfig(config)
+                .build()
         }
     }
 
