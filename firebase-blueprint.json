@@ -1,0 +1,94 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated streamer profile and aggregate broadcast statistics.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the owner." },
+        "displayName": { "type": "string", "description": "Public streamer handle." },
+        "avatarUrl": { "type": "string", "description": "Optional Google profile photo URL." },
+        "totalStreamDurationSec": { "type": "integer", "description": "Cumulative streamed seconds." },
+        "totalSessions": { "type": "integer", "description": "Total completed stream sessions." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation (FieldValue.serverTimestamp())." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update (FieldValue.serverTimestamp())." }
+      },
+      "required": ["userId", "displayName", "totalStreamDurationSec", "totalSessions", "createdAt", "updatedAt"]
+    },
+    "StreamSession": {
+      "title": "StreamSession",
+      "description": "Record of a user's YouTube Live streaming session with telemetry metrics.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "title": { "type": "string", "description": "Broadcast title." },
+        "description": { "type": "string", "description": "Optional stream description." },
+        "visibility": { "type": "string", "enum": ["PUBLIC", "UNLISTED", "PRIVATE"], "description": "Broadcast privacy visibility." },
+        "resolutionLabel": { "type": "string", "description": "Encoded resolution label (e.g. 720p, 1080p)." },
+        "fps": { "type": "integer", "description": "Target frame rate (30 or 60)." },
+        "bitrateKbps": { "type": "integer", "description": "Configured video bitrate in Kbps." },
+        "durationSec": { "type": "integer", "description": "Total stream duration in seconds." },
+        "droppedFrames": { "type": "integer", "description": "Dropped frame count during broadcast." },
+        "peakBitrateKbps": { "type": "integer", "description": "Peak achieved bitrate in Kbps." },
+        "status": { "type": "string", "enum": ["LIVE", "PAUSED", "ENDED"], "description": "Session lifecycle status." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update." }
+      },
+      "required": ["userId", "title", "visibility", "resolutionLabel", "fps", "bitrateKbps", "durationSec", "droppedFrames", "peakBitrateKbps", "status", "createdAt", "updatedAt"]
+    },
+    "VoiceRoom": {
+      "title": "VoiceRoom",
+      "description": "Real-time squad voice room supporting public discovery and private invite codes.",
+      "type": "object",
+      "properties": {
+        "hostUid": { "type": "string", "description": "UID of the room creator." },
+        "roomCode": { "type": "string", "description": "Short join code matching the document ID." },
+        "name": { "type": "string", "description": "Voice room display title." },
+        "visibility": { "type": "string", "enum": ["PUBLIC", "PRIVATE"], "description": "Room visibility mode." },
+        "active": { "type": "boolean", "description": "Whether the room is open for joining." },
+        "maxParticipants": { "type": "integer", "description": "Maximum allowed teammates (2..12)." },
+        "memberUids": { "type": "array", "description": "Bounded list of active member UIDs (<= 12)." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update." }
+      },
+      "required": ["hostUid", "roomCode", "name", "visibility", "active", "maxParticipants", "memberUids", "createdAt", "updatedAt"]
+    },
+    "VoiceParticipant": {
+      "title": "VoiceParticipant",
+      "description": "Live state of a teammate inside a voice room, including mute, speaking level, and stream broadcast consent.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Participant Firebase Auth UID." },
+        "displayName": { "type": "string", "description": "Participant display name." },
+        "avatarUrl": { "type": "string", "description": "Optional avatar URL." },
+        "muted": { "type": "boolean", "description": "Whether the participant muted their own mic." },
+        "speaking": { "type": "boolean", "description": "Whether the participant is currently speaking." },
+        "audioLevel": { "type": "integer", "description": "Normalized voice level 0..100." },
+        "streamConsent": { "type": "boolean", "description": "Whether teammate consents to being included in the host's livestream." },
+        "connectionQuality": { "type": "string", "enum": ["EXCELLENT", "GOOD", "FAIR", "POOR"], "description": "Participant network quality tier." },
+        "udpEndpoint": { "type": "string", "description": "Optional LAN UDP ip:port for direct low-latency voice relay." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on join." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on state update." }
+      },
+      "required": ["userId", "displayName", "muted", "speaking", "audioLevel", "streamConsent", "connectionQuality", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Owner-isolated user profile and aggregate stream statistics."
+    },
+    "/users/{userId}/stream_sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/StreamSession" },
+      "description": "Owner-isolated history of YouTube Live streaming sessions."
+    },
+    "/voice_rooms/{roomId}": {
+      "schema": { "$ref": "#/entities/VoiceRoom" },
+      "description": "Squad voice rooms for mobile gaming communication."
+    },
+    "/voice_rooms/{roomId}/participants/{participantUid}": {
+      "schema": { "$ref": "#/entities/VoiceParticipant" },
+      "description": "Per-member real-time voice room state, protected by Parent Gate membership check."
+    }
+  }
+}

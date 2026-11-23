@@ -1,0 +1,23 @@
+<resources>
+    <string name="app_name">Zro live</string>
+    <string name="brand_tagline">Studio-grade mobile gaming broadcast &amp; unified squad voice</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_live">Live</string>
+    <string name="nav_voice">Voice</string>
+    <string name="nav_settings">Settings</string>
+    <string name="action_start_streaming">Go Live</string>
+    <string name="action_end_stream">End Stream</string>
+    <string name="action_pause_stream">Pause</string>
+    <string name="action_resume_stream">Resume</string>
+    <string name="action_sign_in_google">Sign in with Google</string>
+    <string name="action_sign_out">Sign Out</string>
+    <string name="permission_mic_title">Microphone Access</string>
+    <string name="permission_mic_desc">Captures your voice for team voice rooms and YouTube Live commentary with real-time noise cancellation.</string>
+    <string name="permission_notif_title">Live Stream Notifications</string>
+    <string name="permission_notif_desc">Displays a persistent live indicator, duration timer, and quick mute/stop controls while you game.</string>
+    <string name="permission_overlay_title">Floating Gaming Overlay</string>
+    <string name="permission_overlay_desc">Shows a compact, movable live badge and control drawer over your games without leaving gameplay.</string>
+    <string name="permission_screen_title">Screen &amp; Game Audio Capture</string>
+    <string name="permission_screen_desc">Requested by Android only when you tap Go Live. Captures gameplay video and internal game audio (Android 10+ where games permit).</string>
+    <string name="privacy_guarantee">Zro live never secretly records your screen or microphone. A persistent LIVE badge and Android status indicator are always visible whenever capture is active.</string>
+</resources>

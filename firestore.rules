@@ -1,0 +1,229 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- GLOBAL HARDENED PRIMITIVES ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidTimestamp(val) {
+      return val is timestamp && val <= request.time;
+    }
+
+    // --- ENTITY VALIDATION BLUEPRINTS ---
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['userId', 'displayName', 'totalStreamDurationSec', 'totalSessions', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['userId', 'displayName', 'avatarUrl', 'totalStreamDurationSec', 'totalSessions', 'createdAt', 'updatedAt']) &&
+             data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
+             (!('avatarUrl' in data) || data.avatarUrl == null || (data.avatarUrl is string && data.avatarUrl.size() <= 500)) &&
+             data.totalStreamDurationSec is int && data.totalStreamDurationSec >= 0 && data.totalStreamDurationSec <= 100000000 &&
+             data.totalSessions is int && data.totalSessions >= 0 && data.totalSessions <= 1000000 &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidStreamSession(data) {
+      return data.keys().hasAll(['userId', 'title', 'visibility', 'resolutionLabel', 'fps', 'bitrateKbps', 'durationSec', 'droppedFrames', 'peakBitrateKbps', 'status', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['userId', 'title', 'description', 'visibility', 'resolutionLabel', 'fps', 'bitrateKbps', 'durationSec', 'droppedFrames', 'peakBitrateKbps', 'status', 'createdAt', 'updatedAt']) &&
+             data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+             (!('description' in data) || data.description == null || (data.description is string && data.description.size() <= 500)) &&
+             data.visibility in ['PUBLIC', 'UNLISTED', 'PRIVATE'] &&
+             data.resolutionLabel is string && data.resolutionLabel.size() >= 2 && data.resolutionLabel.size() <= 20 &&
+             data.fps is int && data.fps >= 15 && data.fps <= 120 &&
+             data.bitrateKbps is int && data.bitrateKbps >= 250 && data.bitrateKbps <= 25000 &&
+             data.durationSec is int && data.durationSec >= 0 && data.durationSec <= 604800 &&
+             data.droppedFrames is int && data.droppedFrames >= 0 && data.droppedFrames <= 10000000 &&
+             data.peakBitrateKbps is int && data.peakBitrateKbps >= 0 && data.peakBitrateKbps <= 30000 &&
+             data.status in ['LIVE', 'PAUSED', 'ENDED'] &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidVoiceRoom(data) {
+      return data.keys().hasAll(['hostUid', 'roomCode', 'name', 'visibility', 'active', 'maxParticipants', 'memberUids', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['hostUid', 'roomCode', 'name', 'visibility', 'active', 'maxParticipants', 'memberUids', 'createdAt', 'updatedAt']) &&
+             data.hostUid is string && data.hostUid.size() >= 1 && data.hostUid.size() <= 128 &&
+             data.roomCode is string && data.roomCode.size() >= 4 && data.roomCode.size() <= 16 && data.roomCode.matches('^[A-Z0-9\\-]+$') &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 60 &&
+             data.visibility in ['PUBLIC', 'PRIVATE'] &&
+             data.active is bool &&
+             data.maxParticipants is int && data.maxParticipants >= 2 && data.maxParticipants <= 12 &&
+             data.memberUids is list && data.memberUids.size() <= 12 &&
+             (data.memberUids.size() == 0 || data.memberUids[0] is string) &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidVoiceParticipant(data) {
+      return data.keys().hasAll(['userId', 'displayName', 'muted', 'speaking', 'audioLevel', 'streamConsent', 'connectionQuality', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['userId', 'displayName', 'avatarUrl', 'muted', 'speaking', 'audioLevel', 'streamConsent', 'connectionQuality', 'udpEndpoint', 'createdAt', 'updatedAt']) &&
+             data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
+             (!('avatarUrl' in data) || data.avatarUrl == null || (data.avatarUrl is string && data.avatarUrl.size() <= 500)) &&
+             data.muted is bool &&
+             data.speaking is bool &&
+             data.audioLevel is int && data.audioLevel >= 0 && data.audioLevel <= 100 &&
+             data.streamConsent is bool &&
+             data.connectionQuality in ['EXCELLENT', 'GOOD', 'FAIR', 'POOR'] &&
+             (!('udpEndpoint' in data) || data.udpEndpoint == null || (data.udpEndpoint is string && data.udpEndpoint.size() <= 64)) &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    // --- COLLECTION RULES ---
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().userId == request.auth.uid &&
+                       isValidUserProfile(incoming());
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       isValidUserProfile(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'avatarUrl', 'totalStreamDurationSec', 'totalSessions', 'updatedAt']);
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      // Owner-isolated streaming session history
+      match /stream_sessions/{sessionId} {
+        allow get: if isOwner(userId) && isValidId(sessionId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(sessionId) &&
+                         incoming().userId == request.auth.uid &&
+                         isValidStreamSession(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(sessionId) &&
+                         isValidStreamSession(incoming()) &&
+                         existing().status != 'ENDED' &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'visibility', 'durationSec', 'droppedFrames', 'peakBitrateKbps', 'status', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(sessionId);
+      }
+    }
+
+    match /voice_rooms/{roomId} {
+      // Allow reading a specific room by its ID/code (private rooms require knowing the code or being a member)
+      allow get: if isSignedIn() && isValidId(roomId);
+      // List queries strictly restricted to PUBLIC rooms or rooms where user is a member
+      allow list: if isSignedIn() && (
+        resource.data.visibility == 'PUBLIC' ||
+        request.auth.uid in resource.data.memberUids
+      );
+
+      allow create: if isSignedIn() &&
+                       isValidId(roomId) &&
+                       incoming().hostUid == request.auth.uid &&
+                       incoming().roomCode == roomId &&
+                       request.auth.uid in incoming().memberUids &&
+                       incoming().memberUids.size() == 1 &&
+                       isValidVoiceRoom(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(roomId) &&
+                       isValidVoiceRoom(incoming()) &&
+                       incoming().hostUid == existing().hostUid &&
+                       incoming().roomCode == existing().roomCode &&
+                       incoming().createdAt == existing().createdAt && (
+                         // Action 1: Host updates room metadata or closes room
+                         (existing().hostUid == request.auth.uid &&
+                          existing().active == true &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'visibility', 'active', 'maxParticipants', 'memberUids', 'updatedAt'])) ||
+                         // Action 2: Authenticated user joins active room
+                         (existing().active == true &&
+                          !(request.auth.uid in existing().memberUids) &&
+                          request.auth.uid in incoming().memberUids &&
+                          incoming().memberUids.size() <= existing().maxParticipants &&
+                          incoming().memberUids.size() == existing().memberUids.size() + 1 &&
+                          incoming().memberUids.hasAll(existing().memberUids) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt'])) ||
+                         // Action 3: Member leaves room
+                         (request.auth.uid in existing().memberUids &&
+                          !(request.auth.uid in incoming().memberUids) &&
+                          incoming().memberUids.size() == existing().memberUids.size() - 1 &&
+                          existing().memberUids.hasAll(incoming().memberUids) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt']))
+                       );
+
+      allow delete: if isSignedIn() &&
+                       isValidId(roomId) &&
+                       existing().hostUid == request.auth.uid;
+
+      // Parent-Gate protected participant presence documents
+      match /participants/{participantUid} {
+        allow get: if isSignedIn() &&
+                      isValidId(roomId) &&
+                      isValidId(participantUid) &&
+                      exists(/databases/$(database)/documents/voice_rooms/$(roomId)) && (
+                        request.auth.uid in get(/databases/$(database)/documents/voice_rooms/$(roomId)).data.memberUids ||
+                        get(/databases/$(database)/documents/voice_rooms/$(roomId)).data.visibility == 'PUBLIC'
+                      );
+        // Never allow unfiltered listing; clients fetch per-member docs using parent memberUids
+        allow list: if false;
+
+        allow create: if isSignedIn() &&
+                         isValidId(roomId) &&
+                         isValidId(participantUid) &&
+                         request.auth.uid == participantUid &&
+                         incoming().userId == request.auth.uid &&
+                         isValidVoiceParticipant(incoming()) &&
+                         existsAfter(/databases/$(database)/documents/voice_rooms/$(roomId)) &&
+                         request.auth.uid in getAfter(/databases/$(database)/documents/voice_rooms/$(roomId)).data.memberUids;
+
+        allow update: if isSignedIn() &&
+                         isValidId(roomId) &&
+                         isValidId(participantUid) &&
+                         request.auth.uid == participantUid &&
+                         isValidVoiceParticipant(incoming()) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'avatarUrl', 'muted', 'speaking', 'audioLevel', 'streamConsent', 'connectionQuality', 'udpEndpoint', 'updatedAt']) &&
+                         exists(/databases/$(database)/documents/voice_rooms/$(roomId)) &&
+                         request.auth.uid in get(/databases/$(database)/documents/voice_rooms/$(roomId)).data.memberUids;
+
+        allow delete: if isSignedIn() &&
+                         isValidId(roomId) &&
+                         isValidId(participantUid) && (
+                           request.auth.uid == participantUid ||
+                           (exists(/databases/$(database)/documents/voice_rooms/$(roomId)) &&
+                            get(/databases/$(database)/documents/voice_rooms/$(roomId)).data.hostUid == request.auth.uid)
+                         );
+      }
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Zro live",
+  "description": "Premium Android mobile gaming live streaming app with YouTube Live RTMP broadcasting, real-time audio DSP & mixer, integrated team voice rooms, live chat, and floating gaming overlay.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
