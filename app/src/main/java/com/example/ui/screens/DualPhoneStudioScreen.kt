@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -268,7 +270,8 @@ fun DualPhoneStudioScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        val remotePreviewMaxHeight = (maxHeight * 0.28f).coerceIn(106.dp, 158.dp)
+        val isCompactHeight = maxHeight < 460.dp
+        val remotePreviewMaxHeight = if (isCompactHeight) 52.dp else (maxHeight * 0.24f).coerceIn(110.dp, 158.dp)
     Column(
         modifier = Modifier.fillMaxSize()
     ) {
@@ -294,7 +297,7 @@ fun DualPhoneStudioScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                    .padding(horizontal = 14.dp, vertical = if (isCompactHeight) 3.dp else 6.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -305,18 +308,20 @@ fun DualPhoneStudioScreen(
                         fontWeight = FontWeight.SemiBold,
                         color = Color.White
                     )
-                    Text(
-                        text = when (dualTelemetry.linkState) {
-                            DualLinkState.CONNECTED -> "${dualTelemetry.connectedDeviceName} • ${dualTelemetry.latencyMs} ms • ${dualTelemetry.mirroredResolution}"
-                            DualLinkState.HOSTING -> "Hosting on ${dualTelemetry.localIp}:${dualTelemetry.hostPort}"
-                            else -> dualTelemetry.role.label
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = JetBrainsMonoFontFamily,
-                        color = if (dualTelemetry.linkState == DualLinkState.CONNECTED) ZroEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    if (!isCompactHeight) {
+                        Text(
+                            text = when (dualTelemetry.linkState) {
+                                DualLinkState.CONNECTED -> "${dualTelemetry.connectedDeviceName} • ${dualTelemetry.latencyMs} ms • ${dualTelemetry.mirroredResolution}"
+                                DualLinkState.HOSTING -> "Hosting on ${dualTelemetry.localIp}:${dualTelemetry.hostPort}"
+                                else -> dualTelemetry.role.label
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = if (dualTelemetry.linkState == DualLinkState.CONNECTED) ZroEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
                 LiveStatusBadge(
                     isLive = isLive,
@@ -332,13 +337,12 @@ fun DualPhoneStudioScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 8.dp),
+                .padding(horizontal = 14.dp, vertical = if (isCompactHeight) 2.dp else 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             DualStudioSection.entries.forEach { sec ->
                 val selected = activeSection == sec
                 Surface(
-                    onClick = { activeSection = sec },
                     shape = RoundedCornerShape(6.dp),
                     color = if (selected) ZroCobalt.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceContainer,
                     border = BorderStroke(
@@ -347,6 +351,7 @@ fun DualPhoneStudioScreen(
                     ),
                     modifier = Modifier
                         .weight(1f)
+                        .clickable { activeSection = sec }
                         .testTag("dual_tab_${sec.name.lowercase()}")
                 ) {
                     Text(
@@ -355,7 +360,7 @@ fun DualPhoneStudioScreen(
                         fontWeight = FontWeight.SemiBold,
                         color = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(vertical = 8.dp)
+                        modifier = Modifier.padding(vertical = if (isCompactHeight) 3.dp else 5.dp)
                     )
                 }
             }
@@ -366,8 +371,8 @@ fun DualPhoneStudioScreen(
                 .weight(1f)
                 .fillMaxWidth()
                 .testTag("dual_studio_list"),
-            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             if (activeSection == DualStudioSection.REMOTE_DECK) {
                 // One-Touch BRB Active Recovery Banner
@@ -449,21 +454,23 @@ fun DualPhoneStudioScreen(
                                     modifier = Modifier.weight(1f)
                                 )
                                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    OutlinedButton(
-                                        onClick = onOpenSceneEditor,
-                                        shape = RoundedCornerShape(5.dp),
-                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 1.dp),
-                                        modifier = Modifier.height(24.dp)
+                                    Box(
+                                        modifier = Modifier
+                                            .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(5.dp))
+                                            .clickable(onClick = onOpenSceneEditor)
+                                            .padding(horizontal = 7.dp, vertical = 3.dp),
+                                        contentAlignment = Alignment.Center
                                     ) {
-                                        Text("Studio", fontSize = 9.sp)
+                                        Text("Studio", fontSize = 9.sp, lineHeight = 12.sp, color = Color.White)
                                     }
-                                    OutlinedButton(
-                                        onClick = onOpenCameraSettings,
-                                        shape = RoundedCornerShape(5.dp),
-                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 1.dp),
-                                        modifier = Modifier.height(24.dp)
+                                    Box(
+                                        modifier = Modifier
+                                            .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(5.dp))
+                                            .clickable(onClick = onOpenCameraSettings)
+                                            .padding(horizontal = 7.dp, vertical = 3.dp),
+                                        contentAlignment = Alignment.Center
                                     ) {
-                                        Text("Cam", fontSize = 9.sp)
+                                        Text("Cam", fontSize = 9.sp, lineHeight = 12.sp, color = Color.White)
                                     }
                                 }
                             }
@@ -477,9 +484,6 @@ fun DualPhoneStudioScreen(
                                     val selected = workspace.activeSceneSlot == slot
                                     val sceneName = workspace.scenes[slot]?.name ?: slot.defaultName
                                     Surface(
-                                        onClick = {
-                                            onDispatchRemote(DualRemoteCommand(DualPhoneProtocol.CMD_SWITCH_SCENE, stringArg = slot.name))
-                                        },
                                         shape = RoundedCornerShape(5.dp),
                                         color = if (selected) ZroCobalt.copy(alpha = 0.24f) else MaterialTheme.colorScheme.surfaceContainer,
                                         border = BorderStroke(
@@ -488,17 +492,21 @@ fun DualPhoneStudioScreen(
                                         ),
                                         modifier = Modifier
                                             .weight(1f)
+                                            .clickable {
+                                                onDispatchRemote(DualRemoteCommand(DualPhoneProtocol.CMD_SWITCH_SCENE, stringArg = slot.name))
+                                            }
                                             .testTag("remote_preview_scene_${slot.name.lowercase()}")
                                     ) {
                                         Text(
                                             text = "${slot.shortLabel} • $sceneName",
                                             fontSize = 9.sp,
+                                            lineHeight = 12.sp,
                                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                                             color = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                             textAlign = TextAlign.Center,
-                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)
+                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 3.dp)
                                         )
                                     }
                                 }
@@ -533,61 +541,62 @@ fun DualPhoneStudioScreen(
                                 horizontalArrangement = Arrangement.spacedBy(5.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Surface(
-                                    onClick = { editLayersInRemote = !editLayersInRemote },
-                                    shape = RoundedCornerShape(5.dp),
-                                    color = if (editLayersInRemote) ZroCobalt.copy(alpha = 0.24f) else MaterialTheme.colorScheme.surfaceContainer,
-                                    border = BorderStroke(1.dp, if (editLayersInRemote) ZroCobalt else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
-                                    modifier = Modifier.testTag("remote_edit_layers_toggle")
+                                Box(
+                                    modifier = Modifier
+                                        .testTag("remote_edit_layers_toggle")
+                                        .background(
+                                            if (editLayersInRemote) ZroCobalt.copy(alpha = 0.24f) else MaterialTheme.colorScheme.surfaceContainer,
+                                            RoundedCornerShape(5.dp)
+                                        )
+                                        .clickable { editLayersInRemote = !editLayersInRemote }
+                                        .padding(horizontal = 7.dp, vertical = 4.dp)
                                 ) {
                                     Row(
-                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(3.dp)
                                     ) {
                                         Icon(Icons.Rounded.Layers, contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp))
-                                        Text(if (editLayersInRemote) "Edit: ON" else "Edit: OFF", fontSize = 9.sp, color = Color.White)
+                                        Text(if (editLayersInRemote) "Edit: ON" else "Edit: OFF", fontSize = 9.sp, lineHeight = 12.sp, color = Color.White)
                                     }
                                 }
-                                Surface(
-                                    onClick = { if (editLayersInRemote) cropModeInRemote = !cropModeInRemote },
-                                    shape = RoundedCornerShape(5.dp),
-                                    color = if (cropModeInRemote && editLayersInRemote) ZroAmber.copy(alpha = 0.24f) else MaterialTheme.colorScheme.surfaceContainer,
-                                    border = BorderStroke(
-                                        1.dp,
-                                        if (cropModeInRemote && editLayersInRemote) ZroAmber else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
-                                    ),
-                                    modifier = Modifier.testTag("remote_crop_mode_toggle")
+                                Box(
+                                    modifier = Modifier
+                                        .testTag("remote_crop_mode_toggle")
+                                        .background(
+                                            if (cropModeInRemote && editLayersInRemote) ZroAmber.copy(alpha = 0.24f) else MaterialTheme.colorScheme.surfaceContainer,
+                                            RoundedCornerShape(5.dp)
+                                        )
+                                        .clickable { if (editLayersInRemote) cropModeInRemote = !cropModeInRemote }
+                                        .padding(horizontal = 7.dp, vertical = 4.dp)
                                 ) {
                                     Row(
-                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(3.dp)
                                     ) {
                                         Icon(Icons.Rounded.Crop, contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp))
-                                        Text(if (cropModeInRemote) "Crop ON" else "Crop", fontSize = 9.sp, color = Color.White)
+                                        Text(if (cropModeInRemote) "Crop ON" else "Crop", fontSize = 9.sp, lineHeight = 12.sp, color = Color.White)
                                     }
                                 }
-                                Surface(
-                                    onClick = { showRenameCaptureDialog = true },
-                                    shape = RoundedCornerShape(5.dp),
-                                    color = MaterialTheme.colorScheme.surfaceContainer,
-                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
-                                    modifier = Modifier.testTag("remote_rename_capture_btn")
+                                Box(
+                                    modifier = Modifier
+                                        .testTag("remote_rename_capture_btn")
+                                        .widthIn(max = 126.dp)
+                                        .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(5.dp))
+                                        .clickable { showRenameCaptureDialog = true }
+                                        .padding(horizontal = 7.dp, vertical = 4.dp)
                                 ) {
                                     Row(
-                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(3.dp)
                                     ) {
                                         Icon(Icons.Rounded.Edit, contentDescription = "Rename screen capture", tint = Color.White, modifier = Modifier.size(12.dp))
-                                        Text("Capture: $screenCaptureName", fontSize = 9.sp, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text("Capture: $screenCaptureName", fontSize = 9.sp, lineHeight = 12.sp, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     }
                                 }
                             }
 
                             // Selected Layer Quick Actions (Rename / Lock / Hide)
-                            if (selectedLayer != null) {
+                            if (selectedLayer != null && !isCompactHeight) {
                                 Surface(
                                     shape = RoundedCornerShape(6.dp),
                                     color = MaterialTheme.colorScheme.surfaceContainer,
@@ -597,62 +606,58 @@ fun DualPhoneStudioScreen(
                                         .testTag("remote_selected_layer_bar")
                                 ) {
                                     Row(
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = selectedLayer.name,
-                                                style = MaterialTheme.typography.labelMedium,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = Color.White,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            Text(
-                                                text = if (cropModeInRemote) "Drag amber edges to crop • ${selectedLayer.type.label}"
-                                                else "Drag to move or pull 4 corners • ${selectedLayer.type.label}",
-                                                fontSize = 9.sp,
-                                                fontFamily = JetBrainsMonoFontFamily,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-                                        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                                            IconButton(
-                                                onClick = { renameTargetLayer = selectedLayer },
+                                        Text(
+                                            text = "${selectedLayer.name} • ${selectedLayer.type.label}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = Color.White,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            Box(
                                                 modifier = Modifier
-                                                    .size(30.dp)
-                                                    .testTag("remote_rename_selected_layer_btn")
+                                                    .size(24.dp)
+                                                    .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(4.dp))
+                                                    .clickable { renameTargetLayer = selectedLayer }
+                                                    .testTag("remote_rename_selected_layer_btn"),
+                                                contentAlignment = Alignment.Center
                                             ) {
-                                                Icon(Icons.Rounded.Edit, contentDescription = "Rename selected layer", tint = Color.White, modifier = Modifier.size(15.dp))
+                                                Icon(Icons.Rounded.Edit, contentDescription = "Rename selected layer", tint = Color.White, modifier = Modifier.size(13.dp))
                                             }
-                                            IconButton(
-                                                onClick = { onToggleLayerVisibility(selectedLayer.id) },
+                                            Box(
                                                 modifier = Modifier
-                                                    .size(30.dp)
-                                                    .testTag("remote_vis_selected_layer_btn")
+                                                    .size(24.dp)
+                                                    .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(4.dp))
+                                                    .clickable { onToggleLayerVisibility(selectedLayer.id) }
+                                                    .testTag("remote_vis_selected_layer_btn"),
+                                                contentAlignment = Alignment.Center
                                             ) {
                                                 Icon(
                                                     if (selectedLayer.visible) Icons.Rounded.Visibility else Icons.Rounded.VisibilityOff,
                                                     contentDescription = "Toggle visibility",
                                                     tint = if (selectedLayer.visible) ZroEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    modifier = Modifier.size(15.dp)
+                                                    modifier = Modifier.size(13.dp)
                                                 )
                                             }
-                                            IconButton(
-                                                onClick = { onToggleLayerLock(selectedLayer.id) },
+                                            Box(
                                                 modifier = Modifier
-                                                    .size(30.dp)
-                                                    .testTag("remote_lock_selected_layer_btn")
+                                                    .size(24.dp)
+                                                    .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(4.dp))
+                                                    .clickable { onToggleLayerLock(selectedLayer.id) }
+                                                    .testTag("remote_lock_selected_layer_btn"),
+                                                contentAlignment = Alignment.Center
                                             ) {
                                                 Icon(
                                                     if (selectedLayer.locked) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
                                                     contentDescription = "Toggle lock",
                                                     tint = if (selectedLayer.locked) ZroAmber else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    modifier = Modifier.size(15.dp)
+                                                    modifier = Modifier.size(13.dp)
                                                 )
                                             }
                                         }
@@ -670,35 +675,37 @@ fun DualPhoneStudioScreen(
                         trailing = {
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 if (editDeckMode) {
-                                    OutlinedButton(
-                                        onClick = onResetRemoteDeck,
-                                        shape = RoundedCornerShape(6.dp),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    Box(
                                         modifier = Modifier
-                                            .height(28.dp)
+                                            .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(6.dp))
+                                            .clickable(onClick = onResetRemoteDeck)
+                                            .padding(horizontal = 8.dp, vertical = 4.dp)
                                             .testTag("remote_deck_reset_btn")
                                     ) {
-                                        Icon(Icons.Rounded.RestartAlt, contentDescription = null, modifier = Modifier.size(13.dp))
-                                        Spacer(modifier = Modifier.width(3.dp))
-                                        Text("Default", fontSize = 10.sp)
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(Icons.Rounded.RestartAlt, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
+                                            Spacer(modifier = Modifier.width(3.dp))
+                                            Text("Default", fontSize = 10.sp, color = Color.White)
+                                        }
                                     }
                                 }
-                                OutlinedButton(
-                                    onClick = { editDeckMode = !editDeckMode },
-                                    shape = RoundedCornerShape(6.dp),
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                Box(
                                     modifier = Modifier
-                                        .height(28.dp)
+                                        .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(6.dp))
+                                        .clickable { editDeckMode = !editDeckMode }
+                                        .padding(horizontal = 8.dp, vertical = 4.dp)
                                         .testTag("remote_deck_customize_btn")
                                 ) {
-                                    Icon(Icons.Rounded.Tune, contentDescription = null, modifier = Modifier.size(13.dp))
-                                    Spacer(modifier = Modifier.width(3.dp))
-                                    Text(if (editDeckMode) "Done" else "Customize", fontSize = 10.sp)
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Rounded.Tune, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
+                                        Spacer(modifier = Modifier.width(3.dp))
+                                        Text(if (editDeckMode) "Done" else "Customize", fontSize = 10.sp, color = Color.White)
+                                    }
                                 }
                             }
                         }
                     )
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(5.dp))
 
                     val tiles = workspace.remoteTileOrder.ifEmpty { RemoteControlTileId.DEFAULT_ORDER }
                     val rows = tiles.chunked(3)
@@ -1354,6 +1361,5 @@ private fun RemoteDeckButton(
                 }
             }
         }
-    }
     }
 }

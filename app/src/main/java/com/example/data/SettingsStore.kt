@@ -8,7 +8,9 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.datastore.preferences.preferencesDataStore
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.preferencesDataStoreFile
+import java.util.WeakHashMap
 import com.example.data.model.AudioOutputRoute
 import com.example.data.model.AudioSettings
 import com.example.data.model.CaptureMode
@@ -39,7 +41,19 @@ import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 import org.json.JSONObject
 
-private val Context.zroDataStore: DataStore<Preferences> by preferencesDataStore(name = "zro_live_settings")
+private val zroDataStoreCache = WeakHashMap<Context, DataStore<Preferences>>()
+
+private val Context.zroDataStore: DataStore<Preferences>
+    get() {
+        val appContext = applicationContext
+        return synchronized(zroDataStoreCache) {
+            zroDataStoreCache.getOrPut(appContext) {
+                PreferenceDataStoreFactory.create(
+                    produceFile = { appContext.preferencesDataStoreFile("zro_live_settings") }
+                )
+            }
+        }
+    }
 
 class SettingsStore(private val context: Context) {
 

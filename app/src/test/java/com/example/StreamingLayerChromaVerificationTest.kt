@@ -7,6 +7,7 @@ import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import com.example.data.model.AudioMeterState
 import com.example.data.model.AudioSettings
@@ -554,7 +555,7 @@ class StreamingLayerChromaVerificationTest {
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("obs_studio_list")
             .performScrollToNode(hasTestTag("graphic_cat_chroma_key"))
-        composeRule.onNodeWithTag("graphic_cat_chroma_key").performClick()
+        composeRule.onNodeWithTag("graphic_cat_chroma_key").performScrollTo().performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("obs_studio_list")
             .performScrollToNode(hasTestTag("chroma_key_enable_switch"))
