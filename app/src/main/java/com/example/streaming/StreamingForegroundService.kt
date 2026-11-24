@@ -13,6 +13,8 @@ import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
@@ -92,6 +94,7 @@ class StreamingForegroundService : Service() {
     private var monitorJob: Job? = null
 
     private val isStreaming = AtomicBoolean(false)
+    private val isLiveConfirmed = AtomicBoolean(false)
     private val isPaused = AtomicBoolean(false)
     private val isPrivacyShieldActive = AtomicBoolean(false)
     private val isVoiceForeground = AtomicBoolean(false)
@@ -108,9 +111,14 @@ class StreamingForegroundService : Service() {
     private var activeSessionVisibility = "PUBLIC"
     private var activeSessionResolutionLabel = "720p"
     private var activeSessionFps = 30
+    private var activeStreamWidth = 1280
+    private var activeStreamHeight = 720
+    private var activeStereoAudio = true
     private var cachedSps: ByteArray? = null
     private var cachedPps: ByteArray? = null
     private var cachedAsc: ByteArray? = null
+    private var firstVideoPtsUs = -1L
+    private var firstAudioPtsUs = -1L
 
     override fun onCreate() {
         super.onCreate()
@@ -262,9 +270,15 @@ class StreamingForegroundService : Service() {
             }
 
             isPrivacyShieldActive.set(false)
+            val readyConfig = RtmpPublisher.validateConfig(
+                primaryUrl = settings.effectivePrimaryServerUrl(),
+                backupUrl = settings.effectiveBackupServerUrl(),
+                streamKey = settings.streamKey
+            ).valid
             ZroStreamCoordinator.updateTelemetry {
                 it.copy(
-                    state = StreamLifecycleState.IDLE,
+                    state = if (readyConfig) StreamLifecycleState.READY else StreamLifecycleState.IDLE,
+                    statusDetail = if (readyConfig) "Game capture ready. Press START LIVE to broadcast." else "Game capture active. Configure Stream Key in Live Setup.",
                     captureActive = true,
                     capturePreviewActive = true,
                     captureMode = activeCaptureMode,
@@ -369,6 +383,20 @@ class StreamingForegroundService : Service() {
         }
 
         val settings = ZroStreamCoordinator.currentStreamSettings
+        val primaryUrl = settings.effectivePrimaryServerUrl()
+        val backupUrl = settings.effectiveBackupServerUrl()
+
+        // Step 1: Validate streaming configuration & network BEFORE initializing encoders or connecting
+        val configValidation = RtmpPublisher.validateConfig(primaryUrl, backupUrl, settings.streamKey)
+        if (!configValidation.valid) {
+            ZroStreamCoordinator.resetToIdle(configValidation.errorMessage ?: "Invalid RTMP stream configuration.")
+            return
+        }
+        if (!hasActiveInternetConnection()) {
+            ZroStreamCoordinator.resetToIdle("No active internet connection detected. Connect to Wi-Fi or mobile data and try again.")
+            return
+        }
+
         val perf = ZroStreamCoordinator.currentPerfSettings
         val profileCap = perf.profile.maxBitrateCapKbps
         val lowRamCap = if (perf.lowRamMode) 4500 else 15000
@@ -387,6 +415,7 @@ class StreamingForegroundService : Service() {
             settings.fps
         }
         activeBitrateKbps = effectiveInitialBitrate
+        activeStereoAudio = ZroStreamCoordinator.currentAudioSettings.stereoOutput
         if (existingProjection == null) {
             activeCaptureMode = ZroStreamCoordinator.pendingCaptureMode
         }
@@ -395,10 +424,14 @@ class StreamingForegroundService : Service() {
         encodedVideoFrames.set(0L)
         droppedVideoFrames.set(0L)
         framesInLastSecond.set(0)
+        isLiveConfirmed.set(false)
         isPaused.set(false)
+        streamStartEpochMs = 0L
         cachedSps = null
         cachedPps = null
         cachedAsc = null
+        firstVideoPtsUs = -1L
+        firstAudioPtsUs = -1L
 
         val sourceLabel = if (activeCaptureMode == CaptureMode.GAME_APP_ONLY) {
             "Selected Game / App Window (Private)"
@@ -409,6 +442,12 @@ class StreamingForegroundService : Service() {
         ZroStreamCoordinator.updateTelemetry {
             it.copy(
                 state = StreamLifecycleState.CONNECTING,
+                statusDetail = "Initializing encoders & connecting to server…",
+                activeServerUrl = primaryUrl,
+                usingBackupServer = false,
+                videoEncoderReady = false,
+                audioEncoderReady = false,
+                bytesSentTotal = 0L,
                 durationSec = 0L,
                 actualBitrateKbps = 0,
                 targetBitrateKbps = activeBitrateKbps,
@@ -433,7 +472,7 @@ class StreamingForegroundService : Service() {
 
         serviceScope.launch {
             try {
-                // 1. Obtain or reuse MediaProjection
+                // Obtain or reuse MediaProjection
                 val projection = existingProjection ?: run {
                     val projMgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                     val p = projMgr.getMediaProjection(resultCode, resultData!!)
@@ -445,25 +484,23 @@ class StreamingForegroundService : Service() {
                     p
                 }
 
-                // 2. Connect to YouTube Live RTMP ingest first so invalid key/offline errors fail honestly
-                val publisher = RtmpPublisher()
-                rtmpPublisher = publisher
-                val connectResult = publisher.connect(settings.rtmpUrl, settings.streamKey)
-                if (connectResult.isFailure) {
-                    val msg = connectResult.exceptionOrNull()?.localizedMessage
-                        ?: "Unable to connect to YouTube RTMP server. Verify your Stream Key and internet connection."
-                    stopAllCaptureAndBroadcast(error = msg)
-                    return@launch
-                }
-
-                // 3. Configure Hardware Video Encoder & bind VirtualDisplay to encoder Surface
+                // Step 2: Initialize Hardware Video Encoder & bind VirtualDisplay
                 val (width, height) = resolveDimensions(settings.resolution.width, settings.resolution.height, settings.orientation)
+                activeStreamWidth = width
+                activeStreamHeight = height
                 val encoderName = setupVideoEncoder(width, height, activeSessionFps, activeBitrateKbps)
                 createOrUpdateVirtualDisplay(projection, width, height, videoInputSurface)
                 startDualPhoneMirrorCaptureIfNeeded(projection)
+                ZroStreamCoordinator.updateTelemetry {
+                    it.copy(
+                        activeEncoderName = encoderName,
+                        videoEncoderReady = true,
+                        statusDetail = "Video encoder ready ($encoderName). Starting audio mixer…"
+                    )
+                }
 
-                // 4. Configure AAC Audio Encoder & attach unified ZroAudioEngine mixer
-                setupAudioEncoder(ZroStreamCoordinator.currentAudioSettings.stereoOutput)
+                // Step 3: Initialize AAC Audio Encoder & attach unified ZroAudioEngine mixer
+                setupAudioEncoder(activeStereoAudio)
                 ZroAudioEngine.applyPerformanceSettings(perf)
                 ZroAudioEngine.startStreamingAudio(this@StreamingForegroundService, projection)
                 ZroAudioEngine.setBroadcastPcmConsumer { pcmBytes, length, ptsUs ->
@@ -471,19 +508,68 @@ class StreamingForegroundService : Service() {
                         feedPcmToAacEncoder(pcmBytes, length, ptsUs)
                     }
                 }
-
-                isStreaming.set(true)
-                streamStartEpochMs = System.currentTimeMillis()
                 ZroStreamCoordinator.updateTelemetry {
                     it.copy(
-                        state = StreamLifecycleState.LIVE,
-                        activeEncoderName = encoderName,
+                        audioEncoderReady = true,
                         gameAudioCaptureActive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q,
-                        gameAudioCaptureNote = ZroAudioEngine.gameCaptureStatus.value
+                        gameAudioCaptureNote = ZroAudioEngine.gameCaptureStatus.value,
+                        statusDetail = "Encoders ready. Handshaking with streaming server…"
+                    )
+                }
+
+                // Step 4: Connect to Primary (or Backup failover) RTMP/RTMPS server with real AMF0 confirmation
+                val publisher = RtmpPublisher()
+                rtmpPublisher = publisher
+                val connectResult = publisher.connectWithFailover(
+                    primaryUrl = primaryUrl,
+                    backupUrl = backupUrl,
+                    streamKey = settings.streamKey,
+                    preferBackup = settings.useBackupServer
+                )
+                if (connectResult.isFailure) {
+                    val msg = connectResult.exceptionOrNull()?.localizedMessage
+                        ?: "Unable to connect to RTMP server. Verify your Server URL, Stream Key, and internet connection."
+                    stopAllCaptureAndBroadcast(error = msg)
+                    return@launch
+                }
+
+                val connInfo = connectResult.getOrThrow()
+                ZroStreamCoordinator.updateTelemetry {
+                    it.copy(
+                        state = StreamLifecycleState.CONNECTED,
+                        activeServerUrl = connInfo.serverUrl,
+                        usingBackupServer = connInfo.usedBackup,
+                        statusDetail = "Connected (${connInfo.latencyMs} ms). Sending stream metadata & video…"
                     )
                 }
                 refreshNotification()
 
+                // Step 5: Send onMetaData & start real encoded video/audio transmission
+                publisher.sendMetaData(
+                    width = width,
+                    height = height,
+                    fps = activeSessionFps,
+                    videoBitrateKbps = activeBitrateKbps,
+                    audioSampleRate = ZroAudioEngine.SAMPLE_RATE,
+                    audioBitrateKbps = if (activeStereoAudio) 128 else 96,
+                    stereo = activeStereoAudio
+                )
+                // Proactively send AAC sequence header so audio decoder initializes immediately
+                val fallbackAsc = RtmpPublisher.buildAacAudioSpecificConfig(ZroAudioEngine.SAMPLE_RATE, activeStereoAudio)
+                cachedAsc = fallbackAsc
+                publisher.sendAacSequenceHeader(fallbackAsc)
+
+                isStreaming.set(true)
+                ZroStreamCoordinator.updateTelemetry {
+                    it.copy(
+                        state = StreamLifecycleState.SENDING_VIDEO,
+                        statusDetail = "Sending video & audio packets to server…"
+                    )
+                }
+                refreshNotification()
+
+                // Request an immediate keyframe so YouTube Studio locks signal quickly
+                requestVideoKeyFrame()
                 startVideoDrainLoop()
                 startAudioDrainLoop()
                 startTelemetryAndStabilityLoop()
@@ -491,6 +577,17 @@ class StreamingForegroundService : Service() {
                 Log.e(TAG, "Failed to start broadcast: ${e.message}", e)
                 stopAllCaptureAndBroadcast(error = e.localizedMessage ?: "Broadcast initialization failed.")
             }
+        }
+    }
+
+    private fun hasActiveInternetConnection(): Boolean {
+        return try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
+            val network = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(network) ?: return false
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        } catch (_: Exception) {
+            true
         }
     }
 
@@ -625,7 +722,6 @@ class StreamingForegroundService : Service() {
     private fun startVideoDrainLoop() {
         videoDrainJob = serviceScope.launch {
             val bufferInfo = MediaCodec.BufferInfo()
-            // Single reusable buffer eliminates 30-60 heap allocations per second!
             var reusableNalBuf = ByteArray(256 * 1024)
             var consecutiveCodecErrors = 0
 
@@ -636,36 +732,46 @@ class StreamingForegroundService : Service() {
                     consecutiveCodecErrors = 0
                     when {
                         outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                            val fmt = codec.outputFormat
-                            val spsBuf = fmt.getByteBuffer("csd-0")
-                            val ppsBuf = fmt.getByteBuffer("csd-1")
-                            if (spsBuf != null && ppsBuf != null) {
-                                val sps = extractNalWithoutStartCode(spsBuf)
-                                val pps = extractNalWithoutStartCode(ppsBuf)
-                                cachedSps = sps
-                                cachedPps = pps
-                                rtmpPublisher?.sendAvcSequenceHeader(sps, pps)
-                            }
+                            extractAndSendAvcConfigFromFormat(codec.outputFormat)
                         }
                         outIdx >= 0 -> {
                             val outBuf = codec.getOutputBuffer(outIdx)
                             val size = bufferInfo.size
-                            if (outBuf != null && size > 0 && (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
-                                // Privacy Shield: skip sending video frames whenever paused OR captured game is hidden!
-                                if (!isPaused.get() && !isPrivacyShieldActive.get()) {
-                                    if (reusableNalBuf.size < size) {
-                                        reusableNalBuf = ByteArray(maxOf(size, reusableNalBuf.size * 2))
-                                    }
-                                    outBuf.position(bufferInfo.offset)
-                                    outBuf.limit(bufferInfo.offset + size)
-                                    outBuf.get(reusableNalBuf, 0, size)
+                            if (outBuf != null && size > 0) {
+                                if (reusableNalBuf.size < size) {
+                                    reusableNalBuf = ByteArray(maxOf(size, reusableNalBuf.size * 2))
+                                }
+                                outBuf.position(bufferInfo.offset)
+                                outBuf.limit(bufferInfo.offset + size)
+                                outBuf.get(reusableNalBuf, 0, size)
 
+                                val isCodecConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                                if (isCodecConfig) {
+                                    // Many Android encoders deliver combined SPS+PPS via BUFFER_FLAG_CODEC_CONFIG
+                                    val (sps, pps) = RtmpPublisher.extractSpsPpsFromBuffer(reusableNalBuf, size)
+                                    if (sps != null) cachedSps = sps
+                                    if (pps != null) cachedPps = pps
+                                    if (cachedSps != null && cachedPps != null) {
+                                        rtmpPublisher?.sendAvcSequenceHeader(cachedSps!!, cachedPps!!)
+                                    }
+                                } else if (!isPaused.get() && !isPrivacyShieldActive.get()) {
                                     val isKey = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
-                                    val tsMs = (System.currentTimeMillis() - streamStartEpochMs).toInt()
+                                    val tsMs = computeRelativeVideoTimestampMs(bufferInfo.presentationTimeUs)
                                     val sent = rtmpPublisher?.sendVideoFrame(reusableNalBuf, size, isKey, tsMs) ?: false
                                     encodedVideoFrames.incrementAndGet()
                                     if (sent) {
                                         framesInLastSecond.incrementAndGet()
+                                        // Step 6 & 7: Confirm LIVE and start live timer ONLY after real video frames transmit!
+                                        if (isLiveConfirmed.compareAndSet(false, true)) {
+                                            streamStartEpochMs = System.currentTimeMillis()
+                                            ZroStreamCoordinator.updateTelemetry { prev ->
+                                                prev.copy(
+                                                    state = StreamLifecycleState.LIVE,
+                                                    statusDetail = "Live — transmitting H.264 video & AAC audio"
+                                                )
+                                            }
+                                            refreshNotification()
+                                        }
                                     } else {
                                         droppedVideoFrames.incrementAndGet()
                                     }
@@ -693,10 +799,48 @@ class StreamingForegroundService : Service() {
         }
     }
 
+    private fun extractAndSendAvcConfigFromFormat(fmt: MediaFormat) {
+        val csd0 = fmt.getByteBuffer("csd-0")
+        val csd1 = fmt.getByteBuffer("csd-1")
+        if (csd0 != null) {
+            val bytes0 = duplicateToBytes(csd0)
+            val (spsFrom0, ppsFrom0) = RtmpPublisher.extractSpsPpsFromBuffer(bytes0, bytes0.size)
+            if (spsFrom0 != null) cachedSps = spsFrom0
+            if (ppsFrom0 != null) cachedPps = ppsFrom0
+        }
+        if (csd1 != null) {
+            val bytes1 = duplicateToBytes(csd1)
+            val (spsFrom1, ppsFrom1) = RtmpPublisher.extractSpsPpsFromBuffer(bytes1, bytes1.size)
+            if (ppsFrom1 != null) cachedPps = ppsFrom1
+            else if (cachedPps == null && bytes1.isNotEmpty()) cachedPps = extractNalWithoutStartCode(csd1)
+            if (spsFrom1 != null && cachedSps == null) cachedSps = spsFrom1
+        }
+        if (cachedSps != null && cachedPps != null) {
+            rtmpPublisher?.sendAvcSequenceHeader(cachedSps!!, cachedPps!!)
+        }
+    }
+
+    private fun computeRelativeVideoTimestampMs(ptsUs: Long): Int {
+        if (ptsUs > 0L) {
+            if (firstVideoPtsUs < 0L) firstVideoPtsUs = ptsUs
+            return ((ptsUs - firstVideoPtsUs) / 1000L).coerceAtLeast(0L).toInt()
+        }
+        val base = if (streamStartEpochMs > 0L) streamStartEpochMs else System.currentTimeMillis()
+        return (System.currentTimeMillis() - base).coerceAtLeast(0L).toInt()
+    }
+
+    private fun computeRelativeAudioTimestampMs(ptsUs: Long): Int {
+        if (ptsUs > 0L) {
+            if (firstAudioPtsUs < 0L) firstAudioPtsUs = ptsUs
+            return ((ptsUs - firstAudioPtsUs) / 1000L).coerceAtLeast(0L).toInt()
+        }
+        val base = if (streamStartEpochMs > 0L) streamStartEpochMs else System.currentTimeMillis()
+        return (System.currentTimeMillis() - base).coerceAtLeast(0L).toInt()
+    }
+
     private fun startAudioDrainLoop() {
         audioDrainJob = serviceScope.launch {
             val bufferInfo = MediaCodec.BufferInfo()
-            // Single reusable AAC buffer (zero per-frame heap allocation)
             var reusableAacBuf = ByteArray(8 * 1024)
 
             while (isActive && isStreaming.get()) {
@@ -707,24 +851,33 @@ class StreamingForegroundService : Service() {
                         outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                             val csd = codec.outputFormat.getByteBuffer("csd-0")
                             if (csd != null) {
-                                val asc = ByteArray(csd.remaining())
-                                csd.get(asc)
-                                cachedAsc = asc
-                                rtmpPublisher?.sendAacSequenceHeader(asc)
+                                val asc = duplicateToBytes(csd)
+                                if (asc.isNotEmpty()) {
+                                    cachedAsc = asc
+                                    rtmpPublisher?.sendAacSequenceHeader(asc)
+                                }
                             }
                         }
                         outIdx >= 0 -> {
                             val outBuf = codec.getOutputBuffer(outIdx)
                             val size = bufferInfo.size
-                            if (outBuf != null && size > 0 && (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
-                                if (!isPaused.get()) {
+                            if (outBuf != null && size > 0) {
+                                val isCodecConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                                if (isCodecConfig) {
+                                    val asc = ByteArray(size)
+                                    outBuf.position(bufferInfo.offset)
+                                    outBuf.limit(bufferInfo.offset + size)
+                                    outBuf.get(asc, 0, size)
+                                    cachedAsc = asc
+                                    rtmpPublisher?.sendAacSequenceHeader(asc)
+                                } else if (!isPaused.get()) {
                                     if (reusableAacBuf.size < size) {
                                         reusableAacBuf = ByteArray(maxOf(size, reusableAacBuf.size * 2))
                                     }
                                     outBuf.position(bufferInfo.offset)
                                     outBuf.limit(bufferInfo.offset + size)
                                     outBuf.get(reusableAacBuf, 0, size)
-                                    val tsMs = (System.currentTimeMillis() - streamStartEpochMs).toInt()
+                                    val tsMs = computeRelativeAudioTimestampMs(bufferInfo.presentationTimeUs)
                                     rtmpPublisher?.sendAudioFrame(reusableAacBuf, size, tsMs)
                                 }
                             }
@@ -742,19 +895,36 @@ class StreamingForegroundService : Service() {
         monitorJob = serviceScope.launch {
             var tick = 0
             var lastDropped = 0L
+            var ticksWithoutVideoSignal = 0
             while (isActive && isStreaming.get()) {
                 delay(1000L)
                 tick++
-                val elapsedSec = (System.currentTimeMillis() - streamStartEpochMs) / 1000L
-                val bytes = rtmpPublisher?.consumeBytesSentSinceLast() ?: 0L
+
+                val pub = rtmpPublisher
+                pub?.pollServerControlMessages()
+
+                val elapsedSec = if (isLiveConfirmed.get() && streamStartEpochMs > 0L) {
+                    (System.currentTimeMillis() - streamStartEpochMs) / 1000L
+                } else {
+                    0L
+                }
+                val bytes = pub?.consumeBytesSentSinceLast() ?: 0L
+                val totalBytes = pub?.totalBytesSent ?: 0L
                 val kbps = ((bytes * 8L) / 1000L).toInt()
                 if (kbps > peakBitrateKbps.get()) peakBitrateKbps.set(kbps)
                 val fpsNow = framesInLastSecond.getAndSet(0)
                 val dropped = droppedVideoFrames.get()
                 val total = encodedVideoFrames.get()
 
+                // If encoder is connected but produces no video frames within 4s, request a sync frame
+                if (!isLiveConfirmed.get() && !isPaused.get() && !isPrivacyShieldActive.get()) {
+                    ticksWithoutVideoSignal++
+                    if (ticksWithoutVideoSignal == 3 || ticksWithoutVideoSignal == 6) {
+                        requestVideoKeyFrame()
+                    }
+                }
+
                 // Auto-reconnect on transient RTMP socket drop
-                val pub = rtmpPublisher
                 if (pub != null && !pub.isConnected && !isPaused.get()) {
                     attemptReconnect(pub)
                 }
@@ -801,6 +971,7 @@ class StreamingForegroundService : Service() {
                         actualFps = fpsNow,
                         droppedFrames = dropped,
                         totalFrames = total,
+                        bytesSentTotal = totalBytes,
                         streamHealth = health,
                         thermalThrottled = thermalStepApplied,
                         gameAudioCaptureNote = ZroAudioEngine.gameCaptureStatus.value
@@ -828,29 +999,70 @@ class StreamingForegroundService : Service() {
 
     private suspend fun attemptReconnect(publisher: RtmpPublisher) {
         val settings = ZroStreamCoordinator.currentStreamSettings
+        val primaryUrl = settings.effectivePrimaryServerUrl()
+        val backupUrl = settings.effectiveBackupServerUrl()
         for (attempt in 1..4) {
             if (!isStreaming.get()) return
             ZroStreamCoordinator.updateTelemetry {
-                it.copy(state = StreamLifecycleState.RECONNECTING, reconnectAttempt = attempt, streamHealth = StreamHealth.POOR)
+                it.copy(
+                    state = StreamLifecycleState.RECONNECTING,
+                    statusDetail = "Connection dropped. Reconnecting (attempt $attempt/4)…",
+                    reconnectAttempt = attempt,
+                    streamHealth = StreamHealth.POOR
+                )
             }
             refreshNotification()
             delay(attempt * 2000L)
-            val res = publisher.connect(settings.rtmpUrl, settings.streamKey)
+            if (!hasActiveInternetConnection()) continue
+
+            val res = publisher.connectWithFailover(
+                primaryUrl = primaryUrl,
+                backupUrl = backupUrl,
+                streamKey = settings.streamKey,
+                preferBackup = settings.useBackupServer || (attempt % 2 == 0 && backupUrl.isNotBlank())
+            )
             if (res.isSuccess) {
+                val info = res.getOrThrow()
+                publisher.sendMetaData(
+                    width = activeStreamWidth,
+                    height = activeStreamHeight,
+                    fps = activeSessionFps,
+                    videoBitrateKbps = activeBitrateKbps,
+                    audioSampleRate = ZroAudioEngine.SAMPLE_RATE,
+                    audioBitrateKbps = if (activeStereoAudio) 128 else 96,
+                    stereo = activeStereoAudio
+                )
                 val sps = cachedSps
                 val pps = cachedPps
-                val asc = cachedAsc
+                val asc = cachedAsc ?: RtmpPublisher.buildAacAudioSpecificConfig(ZroAudioEngine.SAMPLE_RATE, activeStereoAudio)
                 if (sps != null && pps != null) publisher.sendAvcSequenceHeader(sps, pps)
-                if (asc != null) publisher.sendAacSequenceHeader(asc)
+                publisher.sendAacSequenceHeader(asc)
                 requestVideoKeyFrame()
                 ZroStreamCoordinator.updateTelemetry {
-                    it.copy(state = if (isPaused.get()) StreamLifecycleState.PAUSED else StreamLifecycleState.LIVE, reconnectAttempt = 0)
+                    it.copy(
+                        state = when {
+                            isPaused.get() -> StreamLifecycleState.PAUSED
+                            isLiveConfirmed.get() -> StreamLifecycleState.LIVE
+                            else -> StreamLifecycleState.SENDING_VIDEO
+                        },
+                        activeServerUrl = info.serverUrl,
+                        usingBackupServer = info.usedBackup,
+                        statusDetail = if (info.usedBackup) "Reconnected via Backup server" else "Reconnected to Primary server",
+                        reconnectAttempt = 0
+                    )
                 }
                 refreshNotification()
                 return
             }
         }
-        stopAllCaptureAndBroadcast(error = "Stream disconnected after 4 reconnection attempts. Check your network stability.")
+        stopAllCaptureAndBroadcast(error = "Stream disconnected after 4 reconnection attempts. Check your network stability and YouTube Studio ingest status.")
+    }
+
+    private fun duplicateToBytes(buf: ByteBuffer): ByteArray {
+        val dup = buf.duplicate()
+        val arr = ByteArray(dup.remaining())
+        dup.get(arr)
+        return arr
     }
 
     private fun applyDynamicVideoBitrate(newBitrateKbps: Int) {
@@ -969,6 +1181,7 @@ class StreamingForegroundService : Service() {
 
     private fun stopAllCaptureAndBroadcast(error: String?) {
         val wasStreaming = isStreaming.getAndSet(false)
+        isLiveConfirmed.set(false)
         isPaused.set(false)
         isPrivacyShieldActive.set(false)
 

@@ -76,7 +76,11 @@ enum class ResizeCorner {
     TOP_LEFT,
     TOP_RIGHT,
     BOTTOM_LEFT,
-    BOTTOM_RIGHT
+    BOTTOM_RIGHT,
+    TOP_CENTER,
+    BOTTOM_CENTER,
+    CENTER_LEFT,
+    CENTER_RIGHT
 }
 
 enum class CropEdge {
@@ -166,6 +170,11 @@ enum class LayerSourceType(val label: String, val category: String) {
     DECORATIVE_FRAME("Frame Border", "Graphics"),
     MERGED_GROUP("Merged Layer", "Composite");
 
+    fun supportsChromaKey(): Boolean = when (this) {
+        IMAGE, LOGO, VIDEO_OVERLAY, WEBCAM, GAMEPLAY_SCREEN, BACKGROUND -> true
+        else -> false
+    }
+
     companion object {
         fun fromName(raw: String?): LayerSourceType =
             entries.firstOrNull { it.name == raw } ?: TEXT
@@ -234,7 +243,10 @@ data class SceneLayer(
     val subUseExternalWidget: Boolean = false,
     val presetTag: String = "",
     val graphicAdjustment: LayerGraphicAdjustment = LayerGraphicAdjustment(),
-    val mergedChildren: List<SceneLayer> = emptyList()
+    val mergedChildren: List<SceneLayer> = emptyList(),
+    val sourceMediaWidth: Int = 0,
+    val sourceMediaHeight: Int = 0,
+    val webReloadNonce: Int = 0
 )
 
 data class StudioScene(

@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import android.graphics.Bitmap
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -76,7 +77,8 @@ enum class GraphicCategoryTab(val label: String) {
     COLOR("Color"),
     RGB("RGB"),
     DETAIL("Detail"),
-    EFFECTS("Effects")
+    EFFECTS("Effects"),
+    CHROMA_KEY("Chroma Key")
 }
 
 private val EFFECT_COLOR_SWATCHES = listOf(
@@ -114,7 +116,8 @@ fun LazyListScope.graphicAdjustmentDockItems(
     onSaveCustomPreset: (String, LayerGraphicAdjustment) -> Unit,
     onDeleteCustomPreset: (String) -> Unit,
     onResetSelectedLayer: (String) -> Unit,
-    onCopyToLayer: (sourceLayerId: String, targetLayerId: String) -> Unit
+    onCopyToLayer: (sourceLayerId: String, targetLayerId: String) -> Unit,
+    mirroredFrame: Bitmap? = null
 ) {
     if (selectedLayer == null) {
         item(key = "graphic_adj_empty") {
@@ -180,6 +183,7 @@ fun LazyListScope.graphicAdjustmentDockItems(
             adj = adj,
             editable = editable,
             activeCategory = activeCategory,
+            mirroredFrame = mirroredFrame,
             onSelectCategory = onSelectCategory,
             onUpdateAdjustmentLive = onUpdateAdjustmentLive,
             onCommitAdjustment = onCommitAdjustment
@@ -561,40 +565,40 @@ private fun GraphicAdjustmentSlidersCard(
     adj: LayerGraphicAdjustment,
     editable: Boolean,
     activeCategory: GraphicCategoryTab,
+    mirroredFrame: Bitmap? = null,
     onSelectCategory: (GraphicCategoryTab) -> Unit,
     onUpdateAdjustmentLive: (String, (LayerGraphicAdjustment) -> LayerGraphicAdjustment) -> Unit,
     onCommitAdjustment: () -> Unit
 ) {
     GlassCard {
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
         ) {
             GraphicCategoryTab.entries.forEach { cat ->
                 val selected = activeCategory == cat
+                val isChromaTab = cat == GraphicCategoryTab.CHROMA_KEY
+                val accent = if (isChromaTab && adj.chromaKey.enabled) ZroEmerald else ZroCobalt
                 Surface(
                     onClick = { onSelectCategory(cat) },
                     shape = RoundedCornerShape(5.dp),
-                    color = if (selected) ZroCobalt.copy(alpha = 0.22f) else MaterialTheme.colorScheme.surfaceContainerLow,
+                    color = if (selected) accent.copy(alpha = 0.22f) else MaterialTheme.colorScheme.surfaceContainerLow,
                     border = BorderStroke(
                         1.dp,
-                        if (selected) ZroCobalt else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+                        if (selected) accent else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
                     ),
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("graphic_cat_${cat.name.lowercase()}")
+                    modifier = Modifier.testTag("graphic_cat_${cat.name.lowercase()}")
                 ) {
                     Text(
-                        text = cat.label,
+                        text = if (isChromaTab && adj.chromaKey.enabled) "Chroma • ON" else cat.label,
                         fontSize = 11.sp,
                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                         color = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .padding(vertical = 6.dp, horizontal = 2.dp)
-                            .fillMaxWidth(),
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        modifier = Modifier.padding(vertical = 6.dp, horizontal = 9.dp)
                     )
                 }
             }
@@ -990,6 +994,18 @@ private fun GraphicAdjustmentSlidersCard(
                         }
                     )
                 }
+            }
+
+            GraphicCategoryTab.CHROMA_KEY -> {
+                ChromaKeyControlsSection(
+                    selectedLayer = selectedLayer,
+                    adj = adj,
+                    editable = editable,
+                    controlsEnabled = controlsEnabled,
+                    mirroredFrame = mirroredFrame,
+                    onUpdateAdjustmentLive = onUpdateAdjustmentLive,
+                    onCommitAdjustment = onCommitAdjustment
+                )
             }
         }
     }

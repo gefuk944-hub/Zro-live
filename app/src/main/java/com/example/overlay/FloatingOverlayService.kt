@@ -369,10 +369,14 @@ class FloatingOverlayService : Service() {
         drawerStatusText?.text = when {
             tel.privacyShieldActive && isLive -> "PRIVACY SHIELD • Game Hidden"
             tel.state == StreamLifecycleState.LIVE -> "LIVE (${tel.captureMode.shortLabel}) • ${ZroStreamCoordinator.formatDuration(tel.durationSec)}"
+            tel.state == StreamLifecycleState.SENDING_VIDEO -> "SENDING VIDEO…"
+            tel.state == StreamLifecycleState.CONNECTED -> "CONNECTED TO SERVER…"
+            tel.state == StreamLifecycleState.CONNECTING -> "CONNECTING…"
             tel.state == StreamLifecycleState.PAUSED -> "PAUSED • ${ZroStreamCoordinator.formatDuration(tel.durationSec)}"
             tel.state == StreamLifecycleState.RECONNECTING -> "RECONNECTING…"
+            tel.state == StreamLifecycleState.ERROR -> "ERROR • Check Live Setup"
             tel.capturePreviewActive -> "PREVIEW • ${tel.captureMode.shortLabel}"
-            else -> "STANDBY • ${tel.resolutionLabel} ${tel.targetFps}fps"
+            else -> "${tel.state.displayLabel} • ${tel.resolutionLabel} ${tel.targetFps}fps"
         }
 
         drawerStreamBtn?.text = if (isLive || isPaused) "End Stream" else "Open Live Studio"

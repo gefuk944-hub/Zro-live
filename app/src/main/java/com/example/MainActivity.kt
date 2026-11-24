@@ -87,6 +87,7 @@ import com.example.data.model.YouTubeChatState
 import com.example.data.model.ZroAppSettings
 import com.example.dualphone.DualPhoneProtocol
 import com.example.dualphone.DualRemoteCommand
+import com.example.streaming.RtmpPublisher
 import com.example.streaming.StreamNotificationManager
 import com.example.streaming.ZroStreamCoordinator
 import com.example.studio.DualLinkState
@@ -243,6 +244,9 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
     val dualTelemetry by viewModel.dualTelemetry.collectAsStateWithLifecycle()
     val mirroredFrame by viewModel.mirroredFrame.collectAsStateWithLifecycle()
     val screenshotCount by viewModel.localScreenshotCount.collectAsStateWithLifecycle()
+    val youTubeAccount by viewModel.youTubeAccount.collectAsStateWithLifecycle()
+    val rtmpTestResult by viewModel.rtmpTestResult.collectAsStateWithLifecycle()
+    val isTestingRtmp by viewModel.isTestingRtmp.collectAsStateWithLifecycle()
 
     // Real Navigation History: tab history + pushable subpage back stack
     var currentTab by remember { mutableStateOf(ZroNavTab.HOME) }
@@ -369,9 +373,7 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
             runCatching {
                 context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            val mime = context.contentResolver.getType(uri).orEmpty()
-            val isGif = mime.contains("gif", ignoreCase = true) || uri.toString().endsWith(".gif", ignoreCase = true)
-            viewModel.addMediaLayerFromUri(uri.toString(), isGif = isGif, isVideo = false)
+            viewModel.importAndAddMediaLayer(uri, isVideoHint = false)
         }
     }
 
@@ -382,7 +384,7 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
             runCatching {
                 context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            viewModel.addMediaLayerFromUri(uri.toString(), isGif = false, isVideo = true)
+            viewModel.importAndAddMediaLayer(uri, isVideoHint = true)
         }
     }
 
@@ -395,8 +397,7 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
             runCatching {
                 context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            viewModel.updateLayerProps(layerId) { it.copy(mediaUri = uri.toString()) }
-            viewModel.showMessage("Updated scene background media.")
+            viewModel.importBackgroundMediaForLayer(layerId, uri)
         }
     }
 
@@ -515,21 +516,28 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                 viewModel.showMessage("Phone 1 is disconnected. Connect Phone 1 first — Phone 2 never captures its own screen.")
                 pushSubpage(AppSubpage.DUAL_PAIRING)
             }
-        } else if (settings.stream.streamKey.isBlank()) {
-            pushSubpage(AppSubpage.LIVE_SETUP)
-            viewModel.showMessage("Enter your Stream Key in Live Setup before going live.")
         } else {
-            val proceedStart = {
-                if (streamTelemetry.captureActive && ZroStreamCoordinator.isCaptureActive()) {
-                    viewModel.startBroadcastFromExistingCapture()
-                } else {
-                    launchPrivacyAwareCapture(PendingCapturePurpose.GO_LIVE_DIRECT, settings.stream.captureMode, false)
-                }
-            }
-            if (settings.audio.micEnabled) {
-                ensureMicPermissionAndRun(proceedStart)
+            val streamCheck = RtmpPublisher.validateConfig(
+                primaryUrl = settings.stream.effectivePrimaryServerUrl(),
+                backupUrl = settings.stream.effectiveBackupServerUrl(),
+                streamKey = settings.stream.streamKey
+            )
+            if (!streamCheck.valid) {
+                pushSubpage(AppSubpage.LIVE_SETUP)
+                viewModel.showMessage(streamCheck.errorMessage ?: "Enter your Stream Key in Live Setup before going live.")
             } else {
-                proceedStart()
+                val proceedStart = {
+                    if (streamTelemetry.captureActive && ZroStreamCoordinator.isCaptureActive()) {
+                        viewModel.startBroadcastFromExistingCapture()
+                    } else {
+                        launchPrivacyAwareCapture(PendingCapturePurpose.GO_LIVE_DIRECT, settings.stream.captureMode, false)
+                    }
+                }
+                if (settings.audio.micEnabled) {
+                    ensureMicPermissionAndRun(proceedStart)
+                } else {
+                    proceedStart()
+                }
             }
         }
     }
@@ -715,7 +723,14 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                             onOpenCameraSettings = { pushSubpage(AppSubpage.CAMERA_SETTINGS) },
                             onOpenSceneStudio = { selectTopTab(ZroNavTab.STUDIO) },
                             onStartLive = requestStartBroadcast,
-                            onStopLive = { viewModel.endStream() }
+                            onStopLive = { viewModel.endStream() },
+                            youTubeAccount = youTubeAccount,
+                            rtmpTestResult = rtmpTestResult,
+                            isTestingRtmp = isTestingRtmp,
+                            onConnectYouTubeAccount = { viewModel.signInYouTubeAccount(context) },
+                            onDisconnectYouTubeAccount = { viewModel.signOutYouTubeAccount() },
+                            onSaveConfiguration = { viewModel.saveStreamConfiguration() },
+                            onTestConnection = { viewModel.testRtmpConnection() }
                         )
 
                         AppSubpage.CHAT -> ChatControlScreen(
@@ -982,7 +997,9 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                                 onRenameLayer = { id, name -> viewModel.renameLayer(id, name) },
                                 onRenameScreenCapture = { viewModel.renameScreenCapture(it) },
                                 onMergeLayers = { ids, name -> viewModel.mergeLayers(ids, name) },
-                                onUnmergeLayer = { id -> viewModel.unmergeLayer(id) }
+                                onUnmergeLayer = { id -> viewModel.unmergeLayer(id) },
+                                onMoveLayerTo = { id, x, y -> viewModel.moveLayerTo(id, x, y) },
+                                onReloadBrowserLayer = { id -> viewModel.reloadBrowserLayer(id) }
                             )
 
                             ZroNavTab.DUAL -> DualPhoneStudioScreen(

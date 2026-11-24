@@ -95,6 +95,8 @@ class StreamNotificationManager(private val context: Context) {
         val isStreaming = telemetry.state == StreamLifecycleState.LIVE ||
             telemetry.state == StreamLifecycleState.PAUSED ||
             telemetry.state == StreamLifecycleState.CONNECTING ||
+            telemetry.state == StreamLifecycleState.CONNECTED ||
+            telemetry.state == StreamLifecycleState.SENDING_VIDEO ||
             telemetry.state == StreamLifecycleState.RECONNECTING
 
         val title = when {
@@ -102,12 +104,18 @@ class StreamNotificationManager(private val context: Context) {
                 "Game Hidden — Privacy Shield Active • ${ZroStreamCoordinator.formatDuration(telemetry.durationSec)}"
             telemetry.state == StreamLifecycleState.LIVE ->
                 "LIVE (${telemetry.captureMode.shortLabel}) • ${ZroStreamCoordinator.formatDuration(telemetry.durationSec)}"
+            telemetry.state == StreamLifecycleState.SENDING_VIDEO ->
+                "SENDING VIDEO (${telemetry.captureMode.shortLabel})…"
+            telemetry.state == StreamLifecycleState.CONNECTED ->
+                "CONNECTED — Initializing Video Signal…"
             telemetry.state == StreamLifecycleState.PAUSED ->
                 "STREAM PAUSED • ${ZroStreamCoordinator.formatDuration(telemetry.durationSec)}"
             telemetry.state == StreamLifecycleState.RECONNECTING ->
                 "RECONNECTING (Attempt ${telemetry.reconnectAttempt})"
             telemetry.state == StreamLifecycleState.CONNECTING ->
-                "Starting YouTube Live…"
+                "Connecting to Stream Server…"
+            telemetry.state == StreamLifecycleState.READY ->
+                "READY • Game Capture Active (${telemetry.captureMode.shortLabel})"
             telemetry.capturePreviewActive ->
                 "Game Capture Preview Ready (${telemetry.captureMode.shortLabel})"
             !voiceRoomName.isNullOrBlank() ->

@@ -44,6 +44,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.StreamLifecycleState
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.ZroAmber
 import com.example.ui.theme.ZroCobalt
@@ -162,9 +163,19 @@ fun LiveStatusBadge(
     brbActive: Boolean = false,
     reducedMotion: Boolean = false,
     durationText: String = "",
+    lifecycleState: StreamLifecycleState? = null,
     modifier: Modifier = Modifier
 ) {
-    val shouldAnimate = (isLive || isReconnecting) && !reducedMotion && !privacyShield && !brbActive
+    val effectiveLive = lifecycleState == StreamLifecycleState.LIVE || (lifecycleState == null && isLive)
+    val effectiveConnecting = lifecycleState == StreamLifecycleState.CONNECTING ||
+        lifecycleState == StreamLifecycleState.CONNECTED ||
+        lifecycleState == StreamLifecycleState.SENDING_VIDEO
+    val effectiveReconnecting = lifecycleState == StreamLifecycleState.RECONNECTING || (lifecycleState == null && isReconnecting)
+    val effectivePaused = lifecycleState == StreamLifecycleState.PAUSED || (lifecycleState == null && isPaused)
+    val effectiveError = lifecycleState == StreamLifecycleState.ERROR
+    val effectiveReady = lifecycleState == StreamLifecycleState.READY
+
+    val shouldAnimate = (effectiveLive || effectiveReconnecting || effectiveConnecting) && !reducedMotion && !privacyShield && !brbActive
     val dotAlpha = if (shouldAnimate) {
         val infiniteTransition = rememberInfiniteTransition(label = "live_pulse")
         val animated by infiniteTransition.animateFloat(
@@ -178,15 +189,20 @@ fun LiveStatusBadge(
         )
         animated
     } else {
-        if (isLive || isReconnecting || privacyShield || brbActive) 1f else 0.6f
+        if (effectiveLive || effectiveReconnecting || effectiveConnecting || effectiveError || effectiveReady || privacyShield || brbActive) 1f else 0.6f
     }
 
     val (dotColor, bgColor, label) = when {
         brbActive -> Triple(ZroAmber, ZroAmber.copy(alpha = 0.14f), "BRB")
-        privacyShield && isLive -> Triple(ZroAmber, ZroAmber.copy(alpha = 0.14f), "SHIELD")
-        isReconnecting -> Triple(ZroAmber, ZroAmber.copy(alpha = 0.14f), "RECONNECT")
-        isPaused -> Triple(ZroAmber, ZroAmber.copy(alpha = 0.14f), "PAUSED")
-        isLive -> Triple(ZroLiveRed, ZroLiveRed.copy(alpha = 0.16f), "LIVE")
+        privacyShield && effectiveLive -> Triple(ZroAmber, ZroAmber.copy(alpha = 0.14f), "SHIELD")
+        effectiveReconnecting -> Triple(ZroAmber, ZroAmber.copy(alpha = 0.14f), "RECONNECTING")
+        effectivePaused -> Triple(ZroAmber, ZroAmber.copy(alpha = 0.14f), "PAUSED")
+        lifecycleState == StreamLifecycleState.CONNECTING -> Triple(ZroAmber, ZroAmber.copy(alpha = 0.14f), "CONNECTING")
+        lifecycleState == StreamLifecycleState.CONNECTED -> Triple(ZroCobalt, ZroCobalt.copy(alpha = 0.16f), "CONNECTED")
+        lifecycleState == StreamLifecycleState.SENDING_VIDEO -> Triple(ZroCobalt, ZroCobalt.copy(alpha = 0.16f), "SENDING VIDEO")
+        effectiveLive -> Triple(ZroLiveRed, ZroLiveRed.copy(alpha = 0.16f), "LIVE")
+        effectiveError -> Triple(ZroLiveRed, ZroLiveRed.copy(alpha = 0.16f), "ERROR")
+        effectiveReady -> Triple(ZroEmerald, ZroEmerald.copy(alpha = 0.15f), "READY")
         else -> Triple(MaterialTheme.colorScheme.onSurfaceVariant, MaterialTheme.colorScheme.surfaceContainerHigh, "OFFLINE")
     }
 
@@ -208,11 +224,11 @@ fun LiveStatusBadge(
                     .background(dotColor.copy(alpha = dotAlpha))
             )
             Text(
-                text = if (durationText.isNotBlank() && (isLive || isPaused)) "$label $durationText" else label,
+                text = if (durationText.isNotBlank() && (effectiveLive || effectivePaused)) "$label $durationText" else label,
                 style = MaterialTheme.typography.labelSmall,
                 fontFamily = JetBrainsMonoFontFamily,
                 fontWeight = FontWeight.Bold,
-                color = if (isLive && !privacyShield && !brbActive) Color(0xFFFCA5A5) else MaterialTheme.colorScheme.onSurface
+                color = if ((effectiveLive || effectiveError) && !privacyShield && !brbActive) Color(0xFFFCA5A5) else MaterialTheme.colorScheme.onSurface
             )
         }
     }

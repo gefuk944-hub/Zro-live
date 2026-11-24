@@ -33,13 +33,18 @@ import com.example.data.model.YouTubeChatMessage
 import com.example.data.model.YouTubeChatState
 import com.example.data.model.ZroAppSettings
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Environment
 import com.example.data.model.NoiseCancellationLevel
+import com.example.data.model.RtmpTestResult
+import com.example.data.model.YouTubeAccountState
 import com.example.dualphone.DualPhoneEngine
 import com.example.dualphone.DualPhoneProtocol
 import com.example.dualphone.DualRemoteCommand
 import com.example.overlay.FloatingOverlayService
+import com.example.streaming.RtmpPublisher
 import com.example.streaming.StreamingForegroundService
+import com.example.streaming.YouTubeAuthHelper
 import com.example.streaming.ZroStreamCoordinator
 import com.example.studio.CameraSourceMode
 import com.example.studio.CanvasGridMode
@@ -60,6 +65,7 @@ import com.example.studio.ResizeCorner
 import com.example.studio.SceneLayer
 import com.example.studio.SceneSlot
 import com.example.studio.SceneTransitionType
+import com.example.studio.StudioMediaStore
 import com.example.studio.StudioWorkspaceReducer
 import com.example.studio.StudioWorkspaceState
 import com.example.telemetry.DeviceTelemetryMonitor
@@ -235,6 +241,15 @@ class ZroMainViewModel(
     private val _localScreenshotCount = MutableStateFlow(0)
     val localScreenshotCount: StateFlow<Int> = _localScreenshotCount.asStateFlow()
 
+    private val _youTubeAccount = MutableStateFlow(YouTubeAuthHelper.currentAccountState())
+    val youTubeAccount: StateFlow<YouTubeAccountState> = _youTubeAccount.asStateFlow()
+
+    private val _rtmpTestResult = MutableStateFlow<RtmpTestResult?>(null)
+    val rtmpTestResult: StateFlow<RtmpTestResult?> = _rtmpTestResult.asStateFlow()
+
+    private val _isTestingRtmp = MutableStateFlow(false)
+    val isTestingRtmp: StateFlow<Boolean> = _isTestingRtmp.asStateFlow()
+
     private val _chatState = MutableStateFlow<YouTubeChatState>(YouTubeChatState.Disconnected)
     val chatState: StateFlow<YouTubeChatState> = _chatState.asStateFlow()
 
@@ -309,6 +324,28 @@ class ZroMainViewModel(
                 ZroStreamCoordinator.currentPerfSettings = cfg.performance
                 ZroAudioEngine.updateSettings(appContext, cfg.audio)
                 ZroAudioEngine.applyPerformanceSettings(cfg.performance)
+                if (!ZroStreamCoordinator.isSessionActive()) {
+                    val configValid = RtmpPublisher.validateConfig(
+                        primaryUrl = cfg.stream.effectivePrimaryServerUrl(),
+                        backupUrl = cfg.stream.effectiveBackupServerUrl(),
+                        streamKey = cfg.stream.streamKey
+                    ).valid
+                    ZroStreamCoordinator.updateTelemetry { cur ->
+                        if (cur.state == StreamLifecycleState.IDLE || cur.state == StreamLifecycleState.READY) {
+                            cur.copy(
+                                state = if (configValid) StreamLifecycleState.READY else StreamLifecycleState.IDLE,
+                                statusDetail = if (configValid) {
+                                    "Ready to connect (${cfg.stream.effectivePrimaryServerUrl()})"
+                                } else {
+                                    "Enter RTMP server & Stream Key to go live"
+                                },
+                                targetBitrateKbps = cfg.stream.bitrateKbps,
+                                targetFps = cfg.stream.fps,
+                                resolutionLabel = cfg.stream.resolution.shortLabel
+                            )
+                        } else cur
+                    }
+                }
                 _smartRecommendation.value = telemetryMonitor.computeSmartRecommendation(
                     t = _deviceTelemetry.value,
                     profile = cfg.performance.profile,
@@ -415,6 +452,128 @@ class ZroMainViewModel(
     fun updateStreamSettings(updated: StreamSettings) {
         ZroStreamCoordinator.currentStreamSettings = updated
         viewModelScope.launch { settingsStore.saveStreamSettings(updated) }
+    }
+
+    fun saveStreamConfiguration(updated: StreamSettings = settings.value.stream) {
+        val cleaned = updated.copy(
+            rtmpUrl = updated.rtmpUrl.trim(),
+            backupRtmpUrl = updated.backupRtmpUrl.trim(),
+            streamKey = updated.streamKey.trim()
+        )
+        updateStreamSettings(cleaned)
+        val validation = RtmpPublisher.validateConfig(
+            primaryUrl = cleaned.effectivePrimaryServerUrl(),
+            backupUrl = cleaned.effectiveBackupServerUrl(),
+            streamKey = cleaned.streamKey
+        )
+        if (!validation.valid) {
+            showMessage("Saved draft — ${validation.errorMessage ?: "Invalid RTMP config."}")
+        } else {
+            showMessage("Streaming configuration saved (${cleaned.platform.label} • Key ${RtmpPublisher.maskStreamKey(cleaned.streamKey)}).")
+        }
+    }
+
+    fun testRtmpConnection() {
+        if (_isTestingRtmp.value) return
+        val cfg = settings.value.stream
+        val primaryUrl = if (cfg.useBackupServer && cfg.effectiveBackupServerUrl().isNotBlank()) {
+            cfg.effectiveBackupServerUrl()
+        } else {
+            cfg.effectivePrimaryServerUrl()
+        }
+        val backupUrl = if (cfg.useBackupServer) {
+            cfg.effectivePrimaryServerUrl()
+        } else {
+            cfg.effectiveBackupServerUrl()
+        }
+        val validation = RtmpPublisher.validateConfig(
+            primaryUrl = primaryUrl,
+            backupUrl = backupUrl,
+            streamKey = cfg.streamKey
+        )
+        if (!validation.valid) {
+            val errMsg = validation.errorMessage ?: "Invalid RTMP configuration."
+            _rtmpTestResult.value = RtmpTestResult(
+                inProgress = false,
+                success = false,
+                serverTested = primaryUrl,
+                message = errMsg
+            )
+            showMessage(errMsg)
+            return
+        }
+
+        _isTestingRtmp.value = true
+        _rtmpTestResult.value = RtmpTestResult(
+            inProgress = true,
+            success = null,
+            serverTested = primaryUrl,
+            message = "Testing RTMP handshake…"
+        )
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                val publisher = RtmpPublisher()
+                val primaryRes = publisher.testConnection(primaryUrl, cfg.streamKey)
+                if (primaryRes.success || backupUrl.isBlank() || backupUrl == primaryUrl) {
+                    RtmpTestResult(
+                        inProgress = false,
+                        success = primaryRes.success,
+                        latencyMs = primaryRes.latencyMs,
+                        serverTested = primaryRes.serverUrl,
+                        message = primaryRes.detail
+                    )
+                } else {
+                    val backupRes = publisher.testConnection(backupUrl, cfg.streamKey)
+                    if (backupRes.success) {
+                        RtmpTestResult(
+                            inProgress = false,
+                            success = true,
+                            latencyMs = backupRes.latencyMs,
+                            serverTested = backupRes.serverUrl,
+                            message = "Backup server reachable (${backupRes.latencyMs} ms). Primary failed: ${primaryRes.detail}"
+                        )
+                    } else {
+                        RtmpTestResult(
+                            inProgress = false,
+                            success = false,
+                            latencyMs = primaryRes.latencyMs,
+                            serverTested = primaryRes.serverUrl,
+                            message = primaryRes.detail
+                        )
+                    }
+                }
+            }
+            _rtmpTestResult.value = result
+            _isTestingRtmp.value = false
+            showMessage(
+                if (result.success == true) "RTMP connection verified (${result.latencyMs} ms)."
+                else result.message
+            )
+        }
+    }
+
+    fun signInYouTubeAccount(activityContext: Context) {
+        if (_youTubeAccount.value.isLoading) return
+        _youTubeAccount.update { it.copy(isLoading = true, statusMessage = null) }
+        viewModelScope.launch {
+            val res = YouTubeAuthHelper.signInWithGoogleForYouTube(activityContext)
+            res.onSuccess { account ->
+                _youTubeAccount.value = account
+                showMessage("Connected YouTube / Google account: ${account.displayName.ifBlank { account.email }}")
+            }.onFailure { err ->
+                val msg = err.localizedMessage ?: "YouTube sign-in failed."
+                _youTubeAccount.update { it.copy(isLoading = false, statusMessage = msg) }
+                showMessage(msg)
+            }
+        }
+    }
+
+    fun signOutYouTubeAccount() {
+        viewModelScope.launch {
+            val state = YouTubeAuthHelper.signOut(appContext)
+            _youTubeAccount.value = state
+            showMessage("Disconnected YouTube / Google account.")
+        }
     }
 
     /**
@@ -616,8 +775,13 @@ class ZroMainViewModel(
             return
         }
         val streamCfg = settings.value.stream
-        if (streamCfg.streamKey.isBlank()) {
-            showMessage("Enter your YouTube Stream Key before going live.")
+        val configCheck = RtmpPublisher.validateConfig(
+            primaryUrl = streamCfg.effectivePrimaryServerUrl(),
+            backupUrl = streamCfg.effectiveBackupServerUrl(),
+            streamKey = streamCfg.streamKey
+        )
+        if (!configCheck.valid) {
+            showMessage(configCheck.errorMessage ?: "Invalid RTMP streaming settings.")
             return
         }
         if (resultCode != null && data != null) {
@@ -1241,7 +1405,13 @@ class ZroMainViewModel(
         showMessage("Added '${layer.name}' to ${next.activeScene.name}")
     }
 
-    fun addMediaLayerFromUri(uriString: String, isGif: Boolean = false, isVideo: Boolean = false) {
+    fun addMediaLayerFromUri(
+        uriString: String,
+        isGif: Boolean = false,
+        isVideo: Boolean = false,
+        mediaWidth: Int = 0,
+        mediaHeight: Int = 0
+    ) {
         val type = when {
             isVideo -> LayerSourceType.VIDEO_OVERLAY
             isGif -> LayerSourceType.GIF
@@ -1252,19 +1422,81 @@ class ZroMainViewModel(
             LayerSourceType.GIF -> "Animated GIF"
             else -> "Custom Image"
         }
+        val sceneVertical = _studioState.value.activeScene.isVertical
+        val (w, h) = StudioMediaStore.computeNormalizedLayerSize(
+            mediaWidthPx = mediaWidth,
+            mediaHeightPx = mediaHeight,
+            sceneIsVertical = sceneVertical
+        )
+        val x = ((1f - w) / 2f).coerceIn(0.02f, 0.90f)
+        val y = ((1f - h) / 2f).coerceIn(0.02f, 0.90f)
         addLayerSource(
             SceneLayer(
                 name = name,
                 type = type,
-                x = 0.18f,
-                y = 0.18f,
-                width = 0.44f,
-                height = 0.36f,
+                x = x,
+                y = y,
+                width = w,
+                height = h,
                 mediaUri = uriString,
+                sourceMediaWidth = mediaWidth,
+                sourceMediaHeight = mediaHeight,
                 transparentBackground = true,
-                animationType = if (isGif) LayerAnimationType.PULSE else LayerAnimationType.NONE
+                animationType = LayerAnimationType.NONE
             )
         )
+    }
+
+    fun importAndAddMediaLayer(uri: Uri, isVideoHint: Boolean = false) {
+        if (_studioState.value.activeScene.sceneLocked) {
+            showMessage("Scene is locked. Unlock scene to add new layers.")
+            return
+        }
+        viewModelScope.launch {
+            val imported = withContext(Dispatchers.IO) {
+                StudioMediaStore.importMediaToAppStorage(appContext, uri, isVideoHint = isVideoHint).getOrNull()
+            }
+            if (imported != null) {
+                addMediaLayerFromUri(
+                    uriString = imported.persistentUri,
+                    isGif = imported.isGif,
+                    isVideo = imported.isVideo,
+                    mediaWidth = imported.widthPx,
+                    mediaHeight = imported.heightPx
+                )
+            } else {
+                val mime = appContext.contentResolver.getType(uri).orEmpty()
+                val isGif = mime.contains("gif", ignoreCase = true) || uri.toString().endsWith(".gif", ignoreCase = true)
+                addMediaLayerFromUri(uri.toString(), isGif = isGif, isVideo = isVideoHint)
+            }
+        }
+    }
+
+    fun importBackgroundMediaForLayer(layerId: String, uri: Uri) {
+        viewModelScope.launch {
+            val imported = withContext(Dispatchers.IO) {
+                StudioMediaStore.importMediaToAppStorage(appContext, uri, isVideoHint = false).getOrNull()
+            }
+            val finalUri = imported?.persistentUri ?: uri.toString()
+            updateLayerProps(layerId) {
+                it.copy(
+                    mediaUri = finalUri,
+                    sourceMediaWidth = imported?.widthPx ?: it.sourceMediaWidth,
+                    sourceMediaHeight = imported?.heightPx ?: it.sourceMediaHeight
+                )
+            }
+            showMessage("Updated scene background media.")
+        }
+    }
+
+    fun reloadBrowserLayer(layerId: String) {
+        val cur = _studioState.value
+        val target = cur.activeScene.layers.firstOrNull { it.id == layerId } ?: return
+        if (target.type != LayerSourceType.BROWSER_WEB) return
+        val next = StudioWorkspaceReducer.updateLayer(cur, layerId) {
+            it.copy(webReloadNonce = it.webReloadNonce + 1)
+        }
+        commitStudioState(next, persist = false, recordUndo = false)
     }
 
     fun addPresetOverlay(presetTag: String) {
@@ -1352,6 +1584,18 @@ class ZroMainViewModel(
             dragSnapshotPushed = true
         }
         val next = StudioWorkspaceReducer.moveLayerBy(cur, layerId, dxNorm, dyNorm)
+        commitStudioState(next, persist = false, recordUndo = false)
+    }
+
+    fun moveLayerTo(layerId: String, rawX: Float, rawY: Float) {
+        val cur = _studioState.value
+        val target = cur.activeScene.layers.firstOrNull { it.id == layerId } ?: return
+        if (cur.activeScene.sceneLocked || target.locked) return
+        if (!dragSnapshotPushed) {
+            pushUndoSnapshot(cur)
+            dragSnapshotPushed = true
+        }
+        val next = StudioWorkspaceReducer.moveLayerTo(cur, layerId, rawX, rawY)
         commitStudioState(next, persist = false, recordUndo = false)
     }
 
@@ -1523,12 +1767,25 @@ class ZroMainViewModel(
     }
 
     fun deleteLayer(layerId: String) {
-        val target = _studioState.value.activeScene.layers.firstOrNull { it.id == layerId }
+        val cur = _studioState.value
+        val target = cur.activeScene.layers.firstOrNull { it.id == layerId }
         if (target?.locked == true) {
             showMessage("Unlock '${target.name}' before deleting it.")
             return
         }
-        commitStudioState(StudioWorkspaceReducer.deleteLayer(_studioState.value, layerId))
+        val next = StudioWorkspaceReducer.deleteLayer(cur, layerId)
+        commitStudioState(next)
+        val removedUri = target?.mediaUri
+        if (!removedUri.isNullOrBlank()) {
+            val stillReferenced = next.scenes.values.any { scene ->
+                scene.layers.any { it.mediaUri == removedUri }
+            }
+            if (!stillReferenced) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    StudioMediaStore.deleteIfAppManaged(appContext, removedUri)
+                }
+            }
+        }
     }
 
     // --- LAYER CROPPING, LAYER MERGING, RENAME LAYER & RENAME SCREEN CAPTURE ---

@@ -172,8 +172,27 @@ object StudioWorkspaceReducer {
         dyNormalized: Float
     ): StudioWorkspaceState {
         return updateLayer(state, layerId) { layer ->
-            var nx = (layer.x + dxNormalized).coerceIn(-0.4f, 0.95f)
-            var ny = (layer.y + dyNormalized).coerceIn(-0.4f, 0.95f)
+            val nx = (layer.x + dxNormalized).coerceIn(-0.4f, 0.95f)
+            val ny = (layer.y + dyNormalized).coerceIn(-0.4f, 0.95f)
+            layer.copy(x = nx, y = ny)
+        }
+    }
+
+    /**
+     * Smooth OBS-style positioning from a continuous raw drag anchor.
+     * Applies gentle magnetic snapping only to the rendered target coordinate
+     * while the gesture caller keeps tracking the un-snapped raw drag offset,
+     * completely eliminating sticky grid traps and sudden position jumps.
+     */
+    fun moveLayerTo(
+        state: StudioWorkspaceState,
+        layerId: String,
+        rawX: Float,
+        rawY: Float
+    ): StudioWorkspaceState {
+        return updateLayer(state, layerId) { layer ->
+            var nx = rawX.coerceIn(-0.4f, 0.95f)
+            var ny = rawY.coerceIn(-0.4f, 0.95f)
             if (state.showSnapGuides) {
                 nx = snapCoordinate(nx, layer.width, state.gridMode.cols)
                 ny = snapCoordinate(ny, layer.height, state.gridMode.rows)
@@ -183,9 +202,9 @@ object StudioWorkspaceReducer {
     }
 
     /**
-     * Real OBS-style 4-corner handle resizing.
-     * Anchors the opposite corner while dragging TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, or BOTTOM_RIGHT.
-     * Enforces minimum dimensions, optional proportional scaling, and strict layer/scene lock rules.
+     * Real OBS-style 8-point transform handle resizing (4 corners + 4 edge midpoints).
+     * Anchors the opposite corner or edge while dragging, supports proportional & free scaling,
+     * enforces minimum dimensions, and strictly respects layer & scene locks.
      */
     fun resizeLayerFromCorner(
         state: StudioWorkspaceState,
@@ -248,6 +267,18 @@ object StudioWorkspaceReducer {
                         newRight = left + w
                         newBottom = top + h
                     }
+                }
+                ResizeCorner.TOP_CENTER -> {
+                    newTop = (top + dyNorm).coerceIn(-0.4f, bottom - MIN_HEIGHT)
+                }
+                ResizeCorner.BOTTOM_CENTER -> {
+                    newBottom = (bottom + dyNorm).coerceIn(top + MIN_HEIGHT, 1.4f)
+                }
+                ResizeCorner.CENTER_LEFT -> {
+                    newLeft = (left + dxNorm).coerceIn(-0.4f, right - MIN_WIDTH)
+                }
+                ResizeCorner.CENTER_RIGHT -> {
+                    newRight = (right + dxNorm).coerceIn(left + MIN_WIDTH, 1.4f)
                 }
             }
 

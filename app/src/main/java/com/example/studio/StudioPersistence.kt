@@ -188,6 +188,8 @@ object StudioPersistence {
         put("subWidgetUrl", l.subWidgetUrl)
         put("subUseExternalWidget", l.subUseExternalWidget)
         put("presetTag", l.presetTag)
+        put("sourceMediaWidth", l.sourceMediaWidth)
+        put("sourceMediaHeight", l.sourceMediaHeight)
         put("graphicAdjustment", GraphicAdjustmentJson.toJson(l.graphicAdjustment.copy(opacity = l.opacity)))
         if (l.mergedChildren.isNotEmpty()) {
             val childArr = JSONArray()
@@ -211,10 +213,10 @@ object StudioPersistence {
         height = o.optDouble("height", 0.2).toFloat().coerceIn(0.05f, 1.0f),
         rotationDeg = o.optDouble("rotationDeg", 0.0).toFloat().coerceIn(-180f, 360f),
         opacity = o.optDouble("opacity", 1.0).toFloat().coerceIn(0.05f, 1.0f),
-        cropLeft = o.optDouble("cropLeft", 0.0).toFloat().coerceIn(0f, 0.45f),
-        cropTop = o.optDouble("cropTop", 0.0).toFloat().coerceIn(0f, 0.45f),
-        cropRight = o.optDouble("cropRight", 0.0).toFloat().coerceIn(0f, 0.45f),
-        cropBottom = o.optDouble("cropBottom", 0.0).toFloat().coerceIn(0f, 0.45f),
+        cropLeft = o.optDouble("cropLeft", 0.0).toFloat().coerceIn(0f, 0.80f),
+        cropTop = o.optDouble("cropTop", 0.0).toFloat().coerceIn(0f, 0.80f),
+        cropRight = o.optDouble("cropRight", 0.0).toFloat().coerceIn(0f, 0.80f),
+        cropBottom = o.optDouble("cropBottom", 0.0).toFloat().coerceIn(0f, 0.80f),
         lockAspectRatio = o.optBoolean("lockAspectRatio", false),
         borderWidthDp = o.optDouble("borderWidthDp", 0.0).toFloat().coerceIn(0f, 8f),
         borderColorHex = o.optLong("borderColorHex", 0xFF3B82F6L),
@@ -240,6 +242,8 @@ object StudioPersistence {
         subWidgetUrl = o.optString("subWidgetUrl", ""),
         subUseExternalWidget = o.optBoolean("subUseExternalWidget", false),
         presetTag = o.optString("presetTag", ""),
+        sourceMediaWidth = o.optInt("sourceMediaWidth", 0).coerceAtLeast(0),
+        sourceMediaHeight = o.optInt("sourceMediaHeight", 0).coerceAtLeast(0),
         graphicAdjustment = GraphicAdjustmentJson.fromJson(
             o.optJSONObject("graphicAdjustment"),
             fallbackOpacity = o.optDouble("opacity", 1.0).toFloat().coerceIn(0.05f, 1.0f)

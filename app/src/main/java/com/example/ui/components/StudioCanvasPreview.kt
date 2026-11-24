@@ -1,10 +1,6 @@
 package com.example.ui.components
 
-import android.annotation.SuppressLint
 import android.graphics.Bitmap
-import android.webkit.WebResourceRequest
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -60,7 +56,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -78,6 +77,7 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -92,11 +92,11 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import coil.compose.AsyncImage
 import com.example.data.model.AudioMeterState
 import com.example.data.model.YouTubeChatMessage
 import com.example.studio.CameraSourceMode
 import com.example.studio.CanvasGridMode
+import com.example.studio.ChromaKeyProcessor
 import com.example.studio.CropEdge
 import com.example.studio.DualLinkState
 import com.example.studio.DualPhoneRole
@@ -115,7 +115,9 @@ import com.example.ui.theme.ZroAmber
 import com.example.ui.theme.ZroCobalt
 import com.example.ui.theme.ZroEmerald
 import com.example.ui.theme.ZroLiveRed
+import kotlin.math.cos
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 /**
  * OBS-style interactive visual canvas editor:
@@ -140,6 +142,7 @@ fun StudioCanvasPreview(
     cropModeActive: Boolean = false,
     onSelectLayer: (String?) -> Unit = {},
     onMoveLayerBy: (String, Float, Float) -> Unit = { _, _, _ -> },
+    onMoveLayerTo: ((String, Float, Float) -> Unit)? = null,
     onResizeLayerCorner: (String, ResizeCorner, Float, Float, Boolean) -> Unit = { _, _, _, _, _ -> },
     onCropLayerEdge: (String, CropEdge, Float) -> Unit = { _, _, _ -> },
     onDragFinished: () -> Unit = {},
@@ -246,6 +249,7 @@ fun StudioCanvasPreview(
                             reducedMotion = reducedMotion,
                             onSelect = { onSelectLayer(layer.id) },
                             onMoveBy = { dx, dy -> onMoveLayerBy(layer.id, dx, dy) },
+                            onMoveTo = onMoveLayerTo?.let { cb -> { rx, ry -> cb(layer.id, rx, ry) } },
                             onResizeCorner = { corner, dx, dy ->
                                 onResizeLayerCorner(layer.id, corner, dx, dy, layer.lockAspectRatio)
                             },
@@ -404,6 +408,7 @@ private fun StudioLayerNode(
     reducedMotion: Boolean,
     onSelect: () -> Unit,
     onMoveBy: (Float, Float) -> Unit,
+    onMoveTo: ((Float, Float) -> Unit)? = null,
     onResizeCorner: (ResizeCorner, Float, Float) -> Unit,
     onDragFinished: () -> Unit,
     onReconnectPeer: (() -> Unit)?,
@@ -419,8 +424,13 @@ private fun StudioLayerNode(
     val canEdit = interactive && !sceneLocked && !layer.locked
     val latestOnSelect by rememberUpdatedState(onSelect)
     val latestOnMoveBy by rememberUpdatedState(onMoveBy)
+    val latestOnMoveTo by rememberUpdatedState(onMoveTo)
+    val latestLayerX by rememberUpdatedState(layer.x)
+    val latestLayerY by rememberUpdatedState(layer.y)
     val latestOnResizeCorner by rememberUpdatedState(onResizeCorner)
     val latestOnDragFinished by rememberUpdatedState(onDragFinished)
+    var dragRawX by remember(layer.id) { mutableFloatStateOf(layer.x) }
+    var dragRawY by remember(layer.id) { mutableFloatStateOf(layer.y) }
 
     val animProgress = if (!reducedMotion && layer.animationEnabled && layer.animationType != LayerAnimationType.NONE) {
         val dur = (2200f / layer.animationSpeed.coerceIn(0.4f, 3f)).toInt().coerceIn(600, 5000)
@@ -491,15 +501,25 @@ private fun StudioLayerNode(
                 .pointerInput(layer.id, canEdit, canvasWidthPx, canvasHeightPx) {
                     if (!canEdit) return@pointerInput
                     detectDragGestures(
-                        onDragStart = { latestOnSelect() },
+                        onDragStart = {
+                            dragRawX = latestLayerX
+                            dragRawY = latestLayerY
+                            latestOnSelect()
+                        },
                         onDragEnd = { latestOnDragFinished() },
                         onDragCancel = { latestOnDragFinished() },
                         onDrag = { change, dragAmount ->
                             change.consume()
-                            latestOnMoveBy(
-                                dragAmount.x / canvasWidthPx,
-                                dragAmount.y / canvasHeightPx
-                            )
+                            val dx = dragAmount.x / canvasWidthPx
+                            val dy = dragAmount.y / canvasHeightPx
+                            val moveTo = latestOnMoveTo
+                            if (moveTo != null) {
+                                dragRawX += dx
+                                dragRawY += dy
+                                moveTo(dragRawX, dragRawY)
+                            } else {
+                                latestOnMoveBy(dx, dy)
+                            }
                         }
                     )
                 }
@@ -540,6 +560,8 @@ private fun StudioLayerNode(
                     chatTextSizeSp = chatTextSizeSp,
                     animProgress = animProgress,
                     reducedMotion = reducedMotion,
+                    bypassGraphicAdjustment = bypassGraphicAdjustment,
+                    interactiveEditing = interactive,
                     onReconnectPeer = onReconnectPeer
                 )
             }
@@ -596,62 +618,84 @@ private fun SelectedLayerHandlesOverlay(
     onDragFinished: () -> Unit
 ) {
     val density = LocalDensity.current
-    val xPx = (layer.x * canvasWidthPx).roundToInt()
-    val yPx = (layer.y * canvasHeightPx).roundToInt()
-    val wDp = with(density) { (layer.width * canvasWidthPx).toDp() }
-    val hDp = with(density) { (layer.height * canvasHeightPx).toDp() }
+    val handleTouchDp = 24.dp
+    val handlePx = with(density) { handleTouchDp.toPx() }
+    val halfHandlePx = handlePx / 2f
+    val leftPx = layer.x * canvasWidthPx
+    val topPx = layer.y * canvasHeightPx
+    val widthPx = (layer.width * canvasWidthPx).coerceAtLeast(1f)
+    val heightPx = (layer.height * canvasHeightPx).coerceAtLeast(1f)
+    val cx = leftPx + widthPx / 2f
+    val cy = topPx + heightPx / 2f
+    val rad = Math.toRadians(layer.rotationDeg.toDouble())
+    val cosA = cos(rad).toFloat()
+    val sinA = sin(rad).toFloat()
+
+    val maxOffsetX = (canvasWidthPx - handlePx).coerceAtLeast(0f)
+    val maxOffsetY = (canvasHeightPx - handlePx).coerceAtLeast(0f)
+
+    fun rotatedHandleOffset(localX: Float, localY: Float): IntOffset {
+        val rx = cx + localX * cosA - localY * sinA
+        val ry = cy + localX * sinA + localY * cosA
+        return IntOffset(
+            x = (rx - halfHandlePx).coerceIn(0f, maxOffsetX).roundToInt(),
+            y = (ry - halfHandlePx).coerceIn(0f, maxOffsetY).roundToInt()
+        )
+    }
+
+    val halfW = widthPx / 2f
+    val halfH = heightPx / 2f
     val latestOnResizeCorner by rememberUpdatedState(onResizeCorner)
     val latestOnDragFinished by rememberUpdatedState(onDragFinished)
 
     Box(
         modifier = Modifier
-            .offset { IntOffset(xPx, yPx) }
-            .size(width = wDp, height = hDp)
-            .border(1.5.dp, ZroCobalt)
+            .fillMaxSize()
+            .testTag("selected_layer_transform_box")
     ) {
-        CornerResizeHandle(
-            corner = ResizeCorner.TOP_LEFT,
-            tag = "handle_tl",
-            modifier = Modifier.align(Alignment.TopStart),
-            canvasWidthPx = canvasWidthPx,
-            canvasHeightPx = canvasHeightPx,
-            onResize = { dx, dy -> latestOnResizeCorner(ResizeCorner.TOP_LEFT, dx, dy) },
-            onEnd = { latestOnDragFinished() }
+        // Exact source bounding box outline following layer rotation
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            rotate(degrees = layer.rotationDeg, pivot = Offset(cx, cy)) {
+                drawRect(
+                    color = ZroCobalt,
+                    topLeft = Offset(leftPx, topPx),
+                    size = Size(widthPx, heightPx),
+                    style = Stroke(width = 1.5.dp.toPx())
+                )
+            }
+        }
+
+        val handles = listOf(
+            Triple(ResizeCorner.TOP_LEFT, "handle_tl", rotatedHandleOffset(-halfW, -halfH)),
+            Triple(ResizeCorner.TOP_RIGHT, "handle_tr", rotatedHandleOffset(halfW, -halfH)),
+            Triple(ResizeCorner.BOTTOM_LEFT, "handle_bl", rotatedHandleOffset(-halfW, halfH)),
+            Triple(ResizeCorner.BOTTOM_RIGHT, "handle_br", rotatedHandleOffset(halfW, halfH)),
+            Triple(ResizeCorner.TOP_CENTER, "handle_tc", rotatedHandleOffset(0f, -halfH)),
+            Triple(ResizeCorner.BOTTOM_CENTER, "handle_bc", rotatedHandleOffset(0f, halfH)),
+            Triple(ResizeCorner.CENTER_LEFT, "handle_cl", rotatedHandleOffset(-halfW, 0f)),
+            Triple(ResizeCorner.CENTER_RIGHT, "handle_cr", rotatedHandleOffset(halfW, 0f))
         )
-        CornerResizeHandle(
-            corner = ResizeCorner.TOP_RIGHT,
-            tag = "handle_tr",
-            modifier = Modifier.align(Alignment.TopEnd),
-            canvasWidthPx = canvasWidthPx,
-            canvasHeightPx = canvasHeightPx,
-            onResize = { dx, dy -> latestOnResizeCorner(ResizeCorner.TOP_RIGHT, dx, dy) },
-            onEnd = { latestOnDragFinished() }
-        )
-        CornerResizeHandle(
-            corner = ResizeCorner.BOTTOM_LEFT,
-            tag = "handle_bl",
-            modifier = Modifier.align(Alignment.BottomStart),
-            canvasWidthPx = canvasWidthPx,
-            canvasHeightPx = canvasHeightPx,
-            onResize = { dx, dy -> latestOnResizeCorner(ResizeCorner.BOTTOM_LEFT, dx, dy) },
-            onEnd = { latestOnDragFinished() }
-        )
-        CornerResizeHandle(
-            corner = ResizeCorner.BOTTOM_RIGHT,
-            tag = "handle_br",
-            modifier = Modifier.align(Alignment.BottomEnd),
-            canvasWidthPx = canvasWidthPx,
-            canvasHeightPx = canvasHeightPx,
-            onResize = { dx, dy -> latestOnResizeCorner(ResizeCorner.BOTTOM_RIGHT, dx, dy) },
-            onEnd = { latestOnDragFinished() }
-        )
+
+        handles.forEach { (corner, tag, offset) ->
+            TransformBoundaryHandle(
+                corner = corner,
+                tag = tag,
+                handleSizeDp = handleTouchDp,
+                modifier = Modifier.offset { offset },
+                canvasWidthPx = canvasWidthPx,
+                canvasHeightPx = canvasHeightPx,
+                onResize = { dx, dy -> latestOnResizeCorner(corner, dx, dy) },
+                onEnd = { latestOnDragFinished() }
+            )
+        }
     }
 }
 
 @Composable
-private fun CornerResizeHandle(
+private fun TransformBoundaryHandle(
     corner: ResizeCorner,
     tag: String,
+    handleSizeDp: androidx.compose.ui.unit.Dp,
     modifier: Modifier,
     canvasWidthPx: Float,
     canvasHeightPx: Float,
@@ -661,10 +705,13 @@ private fun CornerResizeHandle(
     val latestResize by rememberUpdatedState(onResize)
     val latestEnd by rememberUpdatedState(onEnd)
 
-    // Generous 24dp touch box with crisp 10dp OBS square handle centered inside
+    val isHorizontalEdge = corner == ResizeCorner.TOP_CENTER || corner == ResizeCorner.BOTTOM_CENTER
+    val isVerticalEdge = corner == ResizeCorner.CENTER_LEFT || corner == ResizeCorner.CENTER_RIGHT
+
+    // Touch target centered directly on the transform boundary (clamped cleanly at canvas edges)
     Box(
         modifier = modifier
-            .size(24.dp)
+            .size(handleSizeDp)
             .pointerInput(corner, canvasWidthPx, canvasHeightPx) {
                 detectDragGestures(
                     onDragEnd = { latestEnd() },
@@ -676,16 +723,22 @@ private fun CornerResizeHandle(
                 )
             }
             .testTag(tag),
-        contentAlignment = when (corner) {
-            ResizeCorner.TOP_LEFT -> Alignment.TopStart
-            ResizeCorner.TOP_RIGHT -> Alignment.TopEnd
-            ResizeCorner.BOTTOM_LEFT -> Alignment.BottomStart
-            ResizeCorner.BOTTOM_RIGHT -> Alignment.BottomEnd
-        }
+        contentAlignment = Alignment.Center
     ) {
         Box(
             modifier = Modifier
-                .size(10.dp)
+                .size(
+                    width = when {
+                        isHorizontalEdge -> 14.dp
+                        isVerticalEdge -> 6.dp
+                        else -> 10.dp
+                    },
+                    height = when {
+                        isHorizontalEdge -> 6.dp
+                        isVerticalEdge -> 14.dp
+                        else -> 10.dp
+                    }
+                )
                 .background(Color.White, RoundedCornerShape(2.dp))
                 .border(1.5.dp, ZroCobalt, RoundedCornerShape(2.dp))
         )
@@ -817,6 +870,8 @@ private fun LayerContentVisual(
     chatTextSizeSp: Float,
     animProgress: Float,
     reducedMotion: Boolean,
+    bypassGraphicAdjustment: Boolean = false,
+    interactiveEditing: Boolean = true,
     onReconnectPeer: (() -> Unit)?
 ) {
     val bgColor = if (layer.transparentBackground) Color.Transparent else Color(layer.backgroundColorHex)
@@ -826,21 +881,32 @@ private fun LayerContentVisual(
         "DISPLAY" -> SpaceGroteskFontFamily
         else -> FontFamily.SansSerif
     }
+    val chromaActive = !bypassGraphicAdjustment &&
+        layer.graphicAdjustment.enabled &&
+        layer.graphicAdjustment.chromaKey.enabled &&
+        layer.type.supportsChromaKey()
 
     when (layer.type) {
         LayerSourceType.GAMEPLAY_SCREEN -> {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0xFF0A0D13)),
+                    .background(if (chromaActive) Color.Transparent else Color(0xFF0A0D13)),
                 contentAlignment = Alignment.Center
             ) {
                 val isPhone2 = dualTelemetry.role == DualPhoneRole.PHONE2_STUDIO
                 val isConnected = dualTelemetry.linkState == DualLinkState.CONNECTED
 
                 if (mirroredFrame != null && (!isPhone2 || isConnected)) {
+                    val displayFrame = remember(mirroredFrame, chromaActive, layer.graphicAdjustment.chromaKey) {
+                        if (chromaActive) {
+                            ChromaKeyProcessor.applyChromaKey(mirroredFrame, layer.graphicAdjustment.chromaKey)
+                        } else {
+                            mirroredFrame
+                        }
+                    }
                     Image(
-                        bitmap = mirroredFrame.asImageBitmap(),
+                        bitmap = displayFrame.asImageBitmap(),
                         contentDescription = "Authorized Phone 1 Gameplay Feed",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
@@ -1012,16 +1078,25 @@ private fun LayerContentVisual(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0xFF141821)),
+                    .background(if (chromaActive) Color.Transparent else Color(0xFF141821)),
                 contentAlignment = Alignment.Center
             ) {
                 val isLocalCamera = cameraSourceMode == CameraSourceMode.PHONE2_FRONT ||
                     cameraSourceMode == CameraSourceMode.PHONE2_REAR
+                val frontCam = cameraSourceMode == CameraSourceMode.PHONE2_FRONT || useFrontCamera
                 if (enableLiveCameraPreview && cameraPermissionGranted && isLocalCamera) {
-                    CameraXFacecamPreview(
-                        useFront = cameraSourceMode == CameraSourceMode.PHONE2_FRONT || useFrontCamera,
-                        modifier = Modifier.fillMaxSize()
-                    )
+                    if (chromaActive) {
+                        CameraXChromaFacecamView(
+                            useFront = frontCam,
+                            chromaSettings = layer.graphicAdjustment.chromaKey,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        CameraXFacecamPreview(
+                            useFront = frontCam,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                 } else {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -1056,14 +1131,14 @@ private fun LayerContentVisual(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(bgColor),
+                    .background(if (chromaActive) Color.Transparent else bgColor),
                 contentAlignment = Alignment.Center
             ) {
                 if (!layer.mediaUri.isNullOrBlank()) {
-                    AsyncImage(
-                        model = layer.mediaUri,
-                        contentDescription = layer.name,
+                    StudioImageLayerView(
+                        layer = layer,
                         contentScale = ContentScale.Fit,
+                        bypassGraphicAdjustment = bypassGraphicAdjustment,
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
@@ -1084,47 +1159,47 @@ private fun LayerContentVisual(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0xCC11141B)),
+                    .background(if (chromaActive) Color.Transparent else Color(0xCC11141B)),
                 contentAlignment = Alignment.Center
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Rounded.PlayArrow, contentDescription = null, tint = ZroCobalt, modifier = Modifier.size(18.dp))
-                    Text(
-                        text = if (!layer.mediaUri.isNullOrBlank()) "VIDEO MEDIA" else layer.name,
-                        fontSize = 8.sp,
-                        fontFamily = JetBrainsMonoFontFamily,
-                        color = Color.White,
-                        maxLines = 1
+                if (!layer.mediaUri.isNullOrBlank()) {
+                    StudioVideoLayerView(
+                        layer = layer,
+                        bypassGraphicAdjustment = bypassGraphicAdjustment,
+                        modifier = Modifier.fillMaxSize()
                     )
+                } else {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Rounded.PlayArrow, contentDescription = null, tint = ZroCobalt, modifier = Modifier.size(18.dp))
+                        Text(
+                            text = layer.name,
+                            fontSize = 8.sp,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = Color.White,
+                            maxLines = 1
+                        )
+                    }
                 }
             }
         }
 
         LayerSourceType.BROWSER_WEB -> {
-            if (layer.webUrl.startsWith("https://") || layer.webUrl.startsWith("http://")) {
-                StudioWebSourceView(url = layer.webUrl, modifier = Modifier.fillMaxSize())
-            } else {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(bgColor)
-                        .padding(6.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "BROWSER SOURCE\nSet https:// URL",
-                        fontSize = 9.sp,
-                        fontFamily = JetBrainsMonoFontFamily,
-                        color = Color(0xFF9CA3AF),
-                        textAlign = TextAlign.Center
-                    )
-                }
-            }
+            StudioWebSourceView(
+                url = layer.webUrl,
+                reloadNonce = layer.webReloadNonce,
+                interactiveEditing = interactiveEditing,
+                modifier = Modifier.fillMaxSize()
+            )
         }
 
         LayerSourceType.SUBSCRIBER_COUNTER -> {
             if (layer.subUseExternalWidget && layer.subWidgetUrl.startsWith("https://")) {
-                StudioWebSourceView(url = layer.subWidgetUrl, modifier = Modifier.fillMaxSize())
+                StudioWebSourceView(
+                    url = layer.subWidgetUrl,
+                    reloadNonce = layer.webReloadNonce,
+                    interactiveEditing = interactiveEditing,
+                    modifier = Modifier.fillMaxSize()
+                )
             } else {
                 val pct = if (layer.subGoal > 0) (layer.subCount.toFloat() / layer.subGoal.toFloat()).coerceIn(0f, 1f) else 0f
                 Column(
@@ -1237,12 +1312,12 @@ private fun LayerContentVisual(
         }
 
         LayerSourceType.BACKGROUND -> {
-            Box(modifier = Modifier.fillMaxSize().background(bgColor)) {
+            Box(modifier = Modifier.fillMaxSize().background(if (chromaActive) Color.Transparent else bgColor)) {
                 if (!layer.mediaUri.isNullOrBlank()) {
-                    AsyncImage(
-                        model = layer.mediaUri,
-                        contentDescription = layer.name,
+                    StudioImageLayerView(
+                        layer = layer,
                         contentScale = ContentScale.Crop,
+                        bypassGraphicAdjustment = bypassGraphicAdjustment,
                         modifier = Modifier.fillMaxSize()
                     )
                 } else if (layer.motionBackgroundEnabled) {
@@ -1259,10 +1334,10 @@ private fun LayerContentVisual(
             val accentColor = Color(layer.borderColorHex)
             Box(modifier = Modifier.fillMaxSize()) {
                 if (!layer.mediaUri.isNullOrBlank()) {
-                    AsyncImage(
-                        model = layer.mediaUri,
-                        contentDescription = layer.name,
+                    StudioImageLayerView(
+                        layer = layer,
                         contentScale = ContentScale.Crop,
+                        bypassGraphicAdjustment = bypassGraphicAdjustment,
                         modifier = Modifier.fillMaxSize()
                     )
                     Box(
@@ -1440,36 +1515,4 @@ fun CameraXFacecamPreview(
             // Lifecycle-bound CameraX automatically releases surface when lifecycle stops/disposes
         }
     }
-}
-
-@SuppressLint("SetJavaScriptEnabled")
-@Composable
-private fun StudioWebSourceView(
-    url: String,
-    modifier: Modifier = Modifier
-) {
-    AndroidView(
-        modifier = modifier,
-        factory = { ctx ->
-            WebView(ctx).apply {
-                setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.allowFileAccess = false
-                settings.allowContentAccess = false
-                webViewClient = object : WebViewClient() {
-                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                        val scheme = request?.url?.scheme?.lowercase()
-                        return scheme != "https" && scheme != "http"
-                    }
-                }
-                loadUrl(url)
-            }
-        },
-        update = { webView ->
-            if (webView.url != url) {
-                webView.loadUrl(url)
-            }
-        }
-    )
 }

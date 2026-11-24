@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -94,6 +95,8 @@ import com.example.studio.SceneLayer
 import com.example.studio.SceneSlot
 import com.example.studio.SceneTransitionType
 import com.example.studio.StudioWorkspaceState
+import androidx.compose.material.icons.rounded.Refresh
+import com.example.ui.components.BrowserUrlValidator
 import com.example.ui.components.GlassCard
 import com.example.ui.components.GraphicCategoryTab
 import com.example.ui.components.MergeLayersDialog
@@ -189,7 +192,9 @@ fun ObsSceneStudioScreen(
     onRenameLayer: (String, String) -> Unit = { _, _ -> },
     onRenameScreenCapture: (String) -> Unit = {},
     onMergeLayers: (List<String>, String) -> Unit = { _, _ -> },
-    onUnmergeLayer: (String) -> Unit = {}
+    onUnmergeLayer: (String) -> Unit = {},
+    onMoveLayerTo: ((String, Float, Float) -> Unit)? = null,
+    onReloadBrowserLayer: (String) -> Unit = {}
 ) {
     val activeScene = workspace.activeScene
     val selectedLayer = activeScene.layers.firstOrNull { it.id == workspace.selectedLayerId }
@@ -277,13 +282,14 @@ fun ObsSceneStudioScreen(
                                 SceneLayer(
                                     name = "Browser Source",
                                     type = LayerSourceType.BROWSER_WEB,
-                                    x = 0.12f,
-                                    y = 0.12f,
-                                    width = 0.50f,
-                                    height = 0.24f,
+                                    x = 0.14f,
+                                    y = 0.14f,
+                                    width = 0.56f,
+                                    height = 0.36f,
                                     webUrl = ""
                                 )
                             )
+                            dockTab = StudioDockTab.TRANSFORM
                         },
                         "Subscriber Goal Widget" to {
                             onAddLayerSource(
@@ -380,7 +386,7 @@ fun ObsSceneStudioScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        val maxCanvasHeight = (maxHeight * 0.30f).coerceIn(120.dp, 220.dp)
+        val maxCanvasHeight = (maxHeight * 0.28f).coerceIn(104.dp, 220.dp)
         Column(
             modifier = Modifier.fillMaxSize()
         ) {
@@ -409,7 +415,7 @@ fun ObsSceneStudioScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -418,13 +424,15 @@ fun ObsSceneStudioScreen(
                         text = "OBS Scene Studio",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
-                        color = Color.White
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Text(
                         text = if (workspace.savedLayoutTimestampMs > 0L) {
                             "Saved ${formatSavedTime(workspace.savedLayoutTimestampMs)} • Auto-Restore ${if (workspace.autoRestoreLastLayout) "ON" else "OFF"}"
                         } else {
-                            "Drag source or 4 corner handles to frame"
+                            "Drag source or 8 transform handles to frame"
                         },
                         style = MaterialTheme.typography.labelSmall,
                         fontFamily = JetBrainsMonoFontFamily,
@@ -531,6 +539,7 @@ fun ObsSceneStudioScreen(
                 cropModeActive = cropModeActive,
                 onSelectLayer = onSelectLayer,
                 onMoveLayerBy = onMoveLayerBy,
+                onMoveLayerTo = onMoveLayerTo,
                 onResizeLayerCorner = onResizeLayerCorner,
                 onCropLayerEdge = onCropLayerEdge,
                 onDragFinished = onDragFinished,
@@ -699,7 +708,7 @@ fun ObsSceneStudioScreen(
             // 5. Active Dock Content
             when (dockTab) {
                 StudioDockTab.SOURCES -> {
-                    item {
+                    item(key = "sources_header_card") {
                         GlassCard {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -708,7 +717,7 @@ fun ObsSceneStudioScreen(
                             ) {
                                 SectionHeader(
                                     title = "Sources (${activeScene.layers.size})",
-                                    subtitle = "Tap source to select & show 4 resize handles",
+                                    subtitle = "Tap source to select & show 8 transform handles",
                                     modifier = Modifier.weight(1f)
                                 )
                                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -796,135 +805,136 @@ fun ObsSceneStudioScreen(
                                     }
                                 }
                             }
+                        }
+                    }
 
-                            Spacer(modifier = Modifier.height(8.dp))
-                            val ordered = activeScene.layers.sortedByDescending { it.zIndex }
-                            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                                ordered.forEach { layer ->
-                                    val isSel = workspace.selectedLayerId == layer.id
-                                    val isCropped = layer.cropLeft > 0.005f || layer.cropRight > 0.005f ||
-                                        layer.cropTop > 0.005f || layer.cropBottom > 0.005f
-                                    Surface(
-                                        shape = RoundedCornerShape(6.dp),
-                                        color = if (isSel) ZroCobalt.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surfaceContainerLow,
-                                        border = BorderStroke(
-                                            1.dp,
-                                            if (isSel) ZroCobalt else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
-                                        ),
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable { onSelectLayer(layer.id) }
-                                            .testTag("source_row_${layer.id}")
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(
-                                                    text = layer.name,
-                                                    style = MaterialTheme.typography.labelMedium,
-                                                    fontWeight = if (isSel) FontWeight.SemiBold else FontWeight.Normal,
-                                                    color = if (layer.visible) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
-                                                val meta = buildString {
-                                                    if (layer.type == LayerSourceType.MERGED_GROUP) {
-                                                        append("Merged (${layer.mergedChildren.size})")
-                                                    } else {
-                                                        append(layer.type.label)
-                                                    }
-                                                    append(" • ${(layer.width * 100).toInt()}×${(layer.height * 100).toInt()}%")
-                                                    if (isCropped) append(" • Crop")
-                                                }
-                                                Text(
-                                                    text = meta,
-                                                    fontSize = 10.sp,
-                                                    fontFamily = JetBrainsMonoFontFamily,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
-                                            }
-                                            IconButton(
-                                                onClick = { renameTargetLayer = layer },
-                                                modifier = Modifier
-                                                    .size(28.dp)
-                                                    .testTag("layer_rename_btn_${layer.id}")
-                                            ) {
-                                                Icon(
-                                                    Icons.Rounded.Edit,
-                                                    contentDescription = "Rename layer",
-                                                    tint = Color.White,
-                                                    modifier = Modifier.size(14.dp)
-                                                )
-                                            }
-                                            if (layer.type == LayerSourceType.MERGED_GROUP) {
-                                                IconButton(
-                                                    onClick = { onUnmergeLayer(layer.id) },
-                                                    modifier = Modifier
-                                                        .size(28.dp)
-                                                        .testTag("layer_unmerge_btn_${layer.id}")
-                                                ) {
-                                                    Icon(
-                                                        Icons.AutoMirrored.Rounded.CallSplit,
-                                                        contentDescription = "Unmerge layer",
-                                                        tint = ZroCobalt,
-                                                        modifier = Modifier.size(15.dp)
-                                                    )
-                                                }
-                                            }
-                                            IconButton(
-                                                onClick = { onToggleLayerVisibility(layer.id) },
-                                                modifier = Modifier.size(28.dp)
-                                            ) {
-                                                Icon(
-                                                    if (layer.visible) Icons.Rounded.Visibility else Icons.Rounded.VisibilityOff,
-                                                    contentDescription = "Toggle visibility",
-                                                    tint = if (layer.visible) ZroEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    modifier = Modifier.size(15.dp)
-                                                )
-                                            }
-                                            IconButton(
-                                                onClick = { onToggleLayerLock(layer.id) },
-                                                modifier = Modifier
-                                                    .size(28.dp)
-                                                    .testTag("layer_lock_btn_${layer.id}")
-                                            ) {
-                                                Icon(
-                                                    if (layer.locked) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
-                                                    contentDescription = "Toggle lock",
-                                                    tint = if (layer.locked) ZroAmber else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    modifier = Modifier.size(15.dp)
-                                                )
-                                            }
-                                            IconButton(
-                                                onClick = { onMoveLayerZOrder(layer.id, true) },
-                                                modifier = Modifier.size(26.dp)
-                                            ) {
-                                                Icon(Icons.Rounded.ArrowUpward, contentDescription = "Bring forward", tint = Color.White, modifier = Modifier.size(14.dp))
-                                            }
-                                            IconButton(
-                                                onClick = { onMoveLayerZOrder(layer.id, false) },
-                                                modifier = Modifier.size(26.dp)
-                                            ) {
-                                                Icon(Icons.Rounded.ArrowDownward, contentDescription = "Send backward", tint = Color.White, modifier = Modifier.size(14.dp))
-                                            }
-                                            IconButton(
-                                                onClick = { onDuplicateLayer(layer.id) },
-                                                modifier = Modifier.size(26.dp)
-                                            ) {
-                                                Icon(Icons.Rounded.ContentCopy, contentDescription = "Duplicate", tint = Color.White, modifier = Modifier.size(14.dp))
-                                            }
-                                            IconButton(
-                                                onClick = { onDeleteLayer(layer.id) },
-                                                modifier = Modifier.size(26.dp)
-                                            ) {
-                                                Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = ZroLiveRed, modifier = Modifier.size(14.dp))
-                                            }
+                    val ordered = activeScene.layers.sortedByDescending { it.zIndex }
+                    items(ordered, key = { it.id }) { layer ->
+                        val isSel = workspace.selectedLayerId == layer.id
+                        val isCropped = layer.cropLeft > 0.005f || layer.cropRight > 0.005f ||
+                            layer.cropTop > 0.005f || layer.cropBottom > 0.005f
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = if (isSel) ZroCobalt.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surfaceContainerLow,
+                            border = BorderStroke(
+                                1.dp,
+                                if (isSel) ZroCobalt else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSelectLayer(layer.id) }
+                                .testTag("source_row_${layer.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = layer.name,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = if (isSel) FontWeight.SemiBold else FontWeight.Normal,
+                                        color = if (layer.visible) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    val meta = buildString {
+                                        if (layer.type == LayerSourceType.MERGED_GROUP) {
+                                            append("Merged (${layer.mergedChildren.size})")
+                                        } else {
+                                            append(layer.type.label)
                                         }
+                                        append(" • ${(layer.width * 100).toInt()}×${(layer.height * 100).toInt()}%")
+                                        if (layer.sourceMediaWidth > 0 && layer.sourceMediaHeight > 0) {
+                                            append(" • ${layer.sourceMediaWidth}×${layer.sourceMediaHeight}")
+                                        }
+                                        if (isCropped) append(" • Crop")
+                                        if (layer.graphicAdjustment.chromaKey.enabled) append(" • Chroma")
                                     }
+                                    Text(
+                                        text = meta,
+                                        fontSize = 10.sp,
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { renameTargetLayer = layer },
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .testTag("layer_rename_btn_${layer.id}")
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.Edit,
+                                        contentDescription = "Rename layer",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                                if (layer.type == LayerSourceType.MERGED_GROUP) {
+                                    IconButton(
+                                        onClick = { onUnmergeLayer(layer.id) },
+                                        modifier = Modifier
+                                            .size(28.dp)
+                                            .testTag("layer_unmerge_btn_${layer.id}")
+                                    ) {
+                                        Icon(
+                                            Icons.AutoMirrored.Rounded.CallSplit,
+                                            contentDescription = "Unmerge layer",
+                                            tint = ZroCobalt,
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                    }
+                                }
+                                IconButton(
+                                    onClick = { onToggleLayerVisibility(layer.id) },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        if (layer.visible) Icons.Rounded.Visibility else Icons.Rounded.VisibilityOff,
+                                        contentDescription = "Toggle visibility",
+                                        tint = if (layer.visible) ZroEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onToggleLayerLock(layer.id) },
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .testTag("layer_lock_btn_${layer.id}")
+                                ) {
+                                    Icon(
+                                        if (layer.locked) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
+                                        contentDescription = "Toggle lock",
+                                        tint = if (layer.locked) ZroAmber else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onMoveLayerZOrder(layer.id, true) },
+                                    modifier = Modifier.size(26.dp)
+                                ) {
+                                    Icon(Icons.Rounded.ArrowUpward, contentDescription = "Bring forward", tint = Color.White, modifier = Modifier.size(14.dp))
+                                }
+                                IconButton(
+                                    onClick = { onMoveLayerZOrder(layer.id, false) },
+                                    modifier = Modifier.size(26.dp)
+                                ) {
+                                    Icon(Icons.Rounded.ArrowDownward, contentDescription = "Send backward", tint = Color.White, modifier = Modifier.size(14.dp))
+                                }
+                                IconButton(
+                                    onClick = { onDuplicateLayer(layer.id) },
+                                    modifier = Modifier.size(26.dp)
+                                ) {
+                                    Icon(Icons.Rounded.ContentCopy, contentDescription = "Duplicate", tint = Color.White, modifier = Modifier.size(14.dp))
+                                }
+                                IconButton(
+                                    onClick = { onDeleteLayer(layer.id) },
+                                    modifier = Modifier.size(26.dp)
+                                ) {
+                                    Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = ZroLiveRed, modifier = Modifier.size(14.dp))
                                 }
                             }
                         }
@@ -945,7 +955,7 @@ fun ObsSceneStudioScreen(
                             GlassCard {
                                 SectionHeader(
                                     title = "Transform — ${selectedLayer.name}",
-                                    subtitle = if (selectedLayer.locked) "LOCKED — Unlock in Sources to edit" else "Drag 4 corners on canvas or fine-tune below"
+                                    subtitle = if (selectedLayer.locked) "LOCKED — Unlock in Sources to edit" else "Drag 8 handles on canvas or fine-tune below"
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
 
@@ -1199,14 +1209,104 @@ fun ObsSceneStudioScreen(
                                 }
 
                                 if (selectedLayer.type == LayerSourceType.BROWSER_WEB) {
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                    OutlinedTextField(
-                                        value = selectedLayer.webUrl,
-                                        onValueChange = { url -> onUpdateLayerProps(selectedLayer.id) { it.copy(webUrl = url) } },
-                                        label = { Text("Browser Source URL (https://...)") },
-                                        singleLine = true,
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    var urlDraft by remember(selectedLayer.id, selectedLayer.webUrl) {
+                                        mutableStateOf(selectedLayer.webUrl)
+                                    }
+                                    var urlError by remember(selectedLayer.id) {
+                                        mutableStateOf<String?>(null)
+                                    }
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.55f)),
                                         modifier = Modifier.fillMaxWidth()
-                                    )
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.padding(10.dp),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Text(
+                                                text = "Browser / Website Source",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = Color.White
+                                            )
+                                            OutlinedTextField(
+                                                value = urlDraft,
+                                                onValueChange = {
+                                                    urlDraft = it
+                                                    urlError = null
+                                                },
+                                                label = { Text("Website URL (https://...)") },
+                                                placeholder = { Text("https://example.com/overlay", fontSize = 12.sp) },
+                                                isError = urlError != null,
+                                                supportingText = if (urlError != null) {
+                                                    { Text(urlError!!, color = ZroLiveRed, fontSize = 11.sp) }
+                                                } else null,
+                                                singleLine = true,
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .testTag("studio_browser_url_input")
+                                            )
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Button(
+                                                    onClick = {
+                                                        val normalizedUrl = BrowserUrlValidator.normalizeAndValidate(urlDraft)
+                                                        if (normalizedUrl != null) {
+                                                            urlError = null
+                                                            onUpdateLayerProps(selectedLayer.id) {
+                                                                it.copy(
+                                                                    webUrl = normalizedUrl,
+                                                                    webReloadNonce = it.webReloadNonce + 1
+                                                                )
+                                                            }
+                                                        } else {
+                                                            urlError = "Enter a valid https:// or http:// URL."
+                                                        }
+                                                    },
+                                                    enabled = !selectedLayer.locked,
+                                                    colors = ButtonDefaults.buttonColors(containerColor = ZroCobalt, contentColor = Color.White),
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .testTag("studio_browser_load_btn")
+                                                ) {
+                                                    Text("Load", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                                }
+                                                OutlinedButton(
+                                                    onClick = { onReloadBrowserLayer(selectedLayer.id) },
+                                                    enabled = selectedLayer.webUrl.isNotBlank(),
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .testTag("studio_browser_reload_btn")
+                                                ) {
+                                                    Icon(Icons.Rounded.Refresh, contentDescription = "Reload page", modifier = Modifier.size(13.dp))
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Text("Reload", fontSize = 11.sp)
+                                                }
+                                                OutlinedButton(
+                                                    onClick = {
+                                                        urlDraft = ""
+                                                        urlError = null
+                                                        onUpdateLayerProps(selectedLayer.id) { it.copy(webUrl = "") }
+                                                    },
+                                                    enabled = !selectedLayer.locked && selectedLayer.webUrl.isNotBlank(),
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                                    modifier = Modifier.testTag("studio_browser_clear_btn")
+                                                ) {
+                                                    Text("Clear", fontSize = 11.sp)
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
 
                                 if (selectedLayer.type == LayerSourceType.SUBSCRIBER_COUNTER) {
@@ -1266,7 +1366,8 @@ fun ObsSceneStudioScreen(
                         onSaveCustomPreset = onSaveCustomGraphicPreset,
                         onDeleteCustomPreset = onDeleteCustomGraphicPreset,
                         onResetSelectedLayer = onResetLayerGraphicAdjustment,
-                        onCopyToLayer = onCopyGraphicAdjustmentToLayer
+                        onCopyToLayer = onCopyGraphicAdjustmentToLayer,
+                        mirroredFrame = mirroredFrame
                     )
                 }
 

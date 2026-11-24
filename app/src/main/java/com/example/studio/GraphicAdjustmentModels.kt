@@ -22,6 +22,77 @@ enum class GraphicPresetId(val label: String) {
     }
 }
 
+enum class ChromaKeyPreset(val label: String, val defaultColorHex: Long) {
+    GREEN_SCREEN("Green Screen", 0xFF00B140L),
+    BLUE_SCREEN("Blue Screen", 0xFF0047BBL),
+    CUSTOM("Custom Color", 0xFF00B140L);
+
+    companion object {
+        fun fromName(raw: String?): ChromaKeyPreset =
+            entries.firstOrNull { it.name == raw } ?: GREEN_SCREEN
+    }
+}
+
+enum class ChromaKeyPreviewMode(val label: String) {
+    CHROMA_KEY("Keyed"),
+    ORIGINAL("Original"),
+    CHECKERBOARD("Transparent")
+}
+
+/**
+ * Per-layer Chroma Key (green/blue/custom screen removal) configuration.
+ * Persisted independently for every layer alongside its graphic adjustments.
+ */
+data class LayerChromaKeySettings(
+    val enabled: Boolean = false,
+    val preset: ChromaKeyPreset = ChromaKeyPreset.GREEN_SCREEN,
+    val keyColorHex: Long = 0xFF00B140L,
+    val similarity: Float = 0.40f,       // 0.01..1.00
+    val smoothness: Float = 0.12f,       // 0.00..0.60
+    val spillReduction: Float = 0.35f,   // 0.00..1.00
+    val edgeCleanup: Float = 0.15f,      // 0.00..1.00
+    val opacity: Float = 1.0f            // 0.05..1.00
+) {
+    fun clamped(): LayerChromaKeySettings = copy(
+        similarity = similarity.coerceIn(0.01f, 1.0f),
+        smoothness = smoothness.coerceIn(0.0f, 0.60f),
+        spillReduction = spillReduction.coerceIn(0.0f, 1.0f),
+        edgeCleanup = edgeCleanup.coerceIn(0.0f, 1.0f),
+        opacity = opacity.coerceIn(0.05f, 1.0f)
+    )
+
+    companion object {
+        val DEFAULT = LayerChromaKeySettings()
+
+        fun forPreset(preset: ChromaKeyPreset): LayerChromaKeySettings = when (preset) {
+            ChromaKeyPreset.GREEN_SCREEN -> LayerChromaKeySettings(
+                enabled = true,
+                preset = ChromaKeyPreset.GREEN_SCREEN,
+                keyColorHex = 0xFF00B140L,
+                similarity = 0.40f,
+                smoothness = 0.12f,
+                spillReduction = 0.38f,
+                edgeCleanup = 0.15f,
+                opacity = 1.0f
+            )
+            ChromaKeyPreset.BLUE_SCREEN -> LayerChromaKeySettings(
+                enabled = true,
+                preset = ChromaKeyPreset.BLUE_SCREEN,
+                keyColorHex = 0xFF0047BBL,
+                similarity = 0.38f,
+                smoothness = 0.14f,
+                spillReduction = 0.35f,
+                edgeCleanup = 0.15f,
+                opacity = 1.0f
+            )
+            ChromaKeyPreset.CUSTOM -> LayerChromaKeySettings(
+                enabled = true,
+                preset = ChromaKeyPreset.CUSTOM
+            )
+        }
+    }
+}
+
 /**
  * Independent, per-layer graphic adjustment configuration.
  * All defaults are strictly neutral (no visual change to existing layers).
@@ -65,7 +136,9 @@ data class LayerGraphicAdjustment(
     val dropShadowOpacity: Float = 0.65f, // 0.1..1.0
     val outlineEnabled: Boolean = false,
     val outlineWidthDp: Float = 0f,    // 0..10 dp
-    val outlineColorHex: Long = 0xFF3B82F6L
+    val outlineColorHex: Long = 0xFF3B82F6L,
+    // Independent per-layer Chroma Key (Green Screen / Blue Screen / Custom Color removal)
+    val chromaKey: LayerChromaKeySettings = LayerChromaKeySettings.DEFAULT
 ) {
     fun hasColorMatrixChanges(): Boolean {
         if (!enabled) return false
@@ -95,7 +168,8 @@ data class LayerGraphicAdjustment(
             (blurEnabled && blurRadiusDp > 0.05f) ||
             (glowEnabled && glowIntensity > 0.5f) ||
             (dropShadowEnabled && dropShadowRadiusDp > 0.05f) ||
-            (outlineEnabled && outlineWidthDp > 0.05f)
+            (outlineEnabled && outlineWidthDp > 0.05f) ||
+            chromaKey.enabled
     }
 
     fun clamped(): LayerGraphicAdjustment = copy(
@@ -120,7 +194,8 @@ data class LayerGraphicAdjustment(
         glowIntensity = glowIntensity.coerceIn(0f, 100f),
         dropShadowRadiusDp = dropShadowRadiusDp.coerceIn(0f, 24f),
         dropShadowOpacity = dropShadowOpacity.coerceIn(0.1f, 1.0f),
-        outlineWidthDp = outlineWidthDp.coerceIn(0f, 10f)
+        outlineWidthDp = outlineWidthDp.coerceIn(0f, 10f),
+        chromaKey = chromaKey.clamped()
     )
 
     companion object {
@@ -263,6 +338,32 @@ object GraphicAdjustmentJson {
         put("outlineEnabled", adj.outlineEnabled)
         put("outlineWidthDp", adj.outlineWidthDp.toDouble())
         put("outlineColorHex", adj.outlineColorHex)
+        put("chromaKey", chromaKeyToJson(adj.chromaKey))
+    }
+
+    fun chromaKeyToJson(ck: LayerChromaKeySettings): JSONObject = JSONObject().apply {
+        put("enabled", ck.enabled)
+        put("preset", ck.preset.name)
+        put("keyColorHex", ck.keyColorHex)
+        put("similarity", ck.similarity.toDouble())
+        put("smoothness", ck.smoothness.toDouble())
+        put("spillReduction", ck.spillReduction.toDouble())
+        put("edgeCleanup", ck.edgeCleanup.toDouble())
+        put("opacity", ck.opacity.toDouble())
+    }
+
+    fun chromaKeyFromJson(o: JSONObject?): LayerChromaKeySettings {
+        if (o == null) return LayerChromaKeySettings.DEFAULT
+        return LayerChromaKeySettings(
+            enabled = o.optBoolean("enabled", false),
+            preset = ChromaKeyPreset.fromName(o.optString("preset")),
+            keyColorHex = o.optLong("keyColorHex", 0xFF00B140L),
+            similarity = o.optDouble("similarity", 0.40).toFloat(),
+            smoothness = o.optDouble("smoothness", 0.12).toFloat(),
+            spillReduction = o.optDouble("spillReduction", 0.35).toFloat(),
+            edgeCleanup = o.optDouble("edgeCleanup", 0.15).toFloat(),
+            opacity = o.optDouble("opacity", 1.0).toFloat()
+        ).clamped()
     }
 
     fun fromJson(o: JSONObject?, fallbackOpacity: Float = 1.0f): LayerGraphicAdjustment {
@@ -300,7 +401,8 @@ object GraphicAdjustmentJson {
             dropShadowOpacity = o.optDouble("dropShadowOpacity", 0.65).toFloat(),
             outlineEnabled = o.optBoolean("outlineEnabled", false),
             outlineWidthDp = o.optDouble("outlineWidthDp", 0.0).toFloat(),
-            outlineColorHex = o.optLong("outlineColorHex", 0xFF3B82F6L)
+            outlineColorHex = o.optLong("outlineColorHex", 0xFF3B82F6L),
+            chromaKey = chromaKeyFromJson(o.optJSONObject("chromaKey"))
         ).clamped()
     }
 

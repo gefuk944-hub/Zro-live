@@ -7,6 +7,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -204,6 +205,8 @@ fun DualPhoneStudioScreen(
     val isPaused = streamTelemetry.state == StreamLifecycleState.PAUSED
     val isActiveStream = isLive || isPaused ||
         streamTelemetry.state == StreamLifecycleState.CONNECTING ||
+        streamTelemetry.state == StreamLifecycleState.CONNECTED ||
+        streamTelemetry.state == StreamLifecycleState.SENDING_VIDEO ||
         streamTelemetry.state == StreamLifecycleState.RECONNECTING
 
     if (showStopConfirm) {
@@ -260,10 +263,14 @@ fun DualPhoneStudioScreen(
         )
     }
 
-    Column(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
+    ) {
+        val remotePreviewMaxHeight = (maxHeight * 0.28f).coerceIn(106.dp, 158.dp)
+    Column(
+        modifier = Modifier.fillMaxSize()
     ) {
         if (onBack != null) {
             ProSubpageTopBar(
@@ -276,7 +283,8 @@ fun DualPhoneStudioScreen(
                         isLive = isLive,
                         isPaused = isPaused,
                         brbActive = workspace.brbActive,
-                        reducedMotion = reducedMotion
+                        reducedMotion = reducedMotion,
+                        lifecycleState = streamTelemetry.state
                     )
                 }
             )
@@ -314,7 +322,8 @@ fun DualPhoneStudioScreen(
                     isLive = isLive,
                     isPaused = isPaused,
                     brbActive = workspace.brbActive,
-                    reducedMotion = reducedMotion
+                    reducedMotion = reducedMotion,
+                    lifecycleState = streamTelemetry.state
                 )
             }
         }
@@ -513,7 +522,7 @@ fun DualPhoneStudioScreen(
                                 onCropLayerEdge = onCropLayerEdge,
                                 onDragFinished = onDragFinished,
                                 onReconnectPeer = onReconnect,
-                                modifier = Modifier.heightIn(max = 152.dp)
+                                modifier = Modifier.heightIn(max = remotePreviewMaxHeight)
                             )
 
                             // Live Layer Edit + Crop + Rename Capture Bar
@@ -1204,6 +1213,7 @@ fun DualPhoneStudioScreen(
             }
         }
     }
+    }
 }
 
 @Composable
@@ -1344,5 +1354,6 @@ private fun RemoteDeckButton(
                 }
             }
         }
+    }
     }
 }

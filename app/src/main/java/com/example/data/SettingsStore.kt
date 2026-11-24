@@ -123,6 +123,9 @@ class SettingsStore(private val context: Context) {
         val THUMBNAIL_URI = stringPreferencesKey("thumbnail_uri")
         val AUTHORIZED_LAYOUT_JSON = stringPreferencesKey("authorized_layout_json")
         val SCREEN_CAPTURE_NAME = stringPreferencesKey("screen_capture_name")
+        val BACKUP_RTMP_URL = stringPreferencesKey("backup_rtmp_url")
+        val USE_RTMPS = booleanPreferencesKey("use_rtmps")
+        val USE_BACKUP_SERVER = booleanPreferencesKey("use_backup_server")
     }
 
     val settingsFlow: Flow<ZroAppSettings> = context.zroDataStore.data
@@ -141,6 +144,9 @@ class SettingsStore(private val context: Context) {
                 stream = StreamSettings(
                     platform = StreamPlatform.fromName(p[Keys.STREAM_PLATFORM]),
                     rtmpUrl = p[Keys.RTMP_URL] ?: "rtmp://a.rtmp.youtube.com/live2",
+                    backupRtmpUrl = p[Keys.BACKUP_RTMP_URL] ?: "rtmp://b.rtmp.youtube.com/live2",
+                    useRtmps = p[Keys.USE_RTMPS] ?: false,
+                    useBackupServer = p[Keys.USE_BACKUP_SERVER] ?: false,
                     streamKey = p[Keys.STREAM_KEY] ?: "",
                     streamTitle = p[Keys.STREAM_TITLE] ?: "Mobile Gaming Live — Zro live",
                     streamDescription = p[Keys.STREAM_DESC] ?: "Streaming live gameplay with squad voice powered by Zro live.",
@@ -237,6 +243,9 @@ class SettingsStore(private val context: Context) {
         context.zroDataStore.edit { p ->
             p[Keys.STREAM_PLATFORM] = s.platform.name
             p[Keys.RTMP_URL] = s.rtmpUrl
+            p[Keys.BACKUP_RTMP_URL] = s.backupRtmpUrl
+            p[Keys.USE_RTMPS] = s.useRtmps
+            p[Keys.USE_BACKUP_SERVER] = s.useBackupServer
             p[Keys.STREAM_KEY] = s.streamKey
             p[Keys.STREAM_TITLE] = s.streamTitle
             p[Keys.STREAM_DESC] = s.streamDescription

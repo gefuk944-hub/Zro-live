@@ -307,7 +307,9 @@ private fun BroadcastTabContent(
     var showRenameCaptureDialog by remember { mutableStateOf(false) }
     val isLive = streamTelemetry.state == StreamLifecycleState.LIVE
     val isPaused = streamTelemetry.state == StreamLifecycleState.PAUSED
-    val isConnecting = streamTelemetry.state == StreamLifecycleState.CONNECTING
+    val isConnecting = streamTelemetry.state == StreamLifecycleState.CONNECTING ||
+        streamTelemetry.state == StreamLifecycleState.CONNECTED ||
+        streamTelemetry.state == StreamLifecycleState.SENDING_VIDEO
     val isReconnecting = streamTelemetry.state == StreamLifecycleState.RECONNECTING
     val isRunning = isLive || isPaused || isConnecting || isReconnecting
     val reducedMotion = performanceSettings.reduceAnimationsDuringGameplay || performanceSettings.lowRamMode
@@ -397,7 +399,8 @@ private fun BroadcastTabContent(
                             isReconnecting = isReconnecting,
                             privacyShield = streamTelemetry.privacyShieldActive,
                             reducedMotion = reducedMotion,
-                            durationText = ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec)
+                            lifecycleState = streamTelemetry.state,
+                            durationText = if (isLive || isPaused) ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec) else ""
                         )
                         Surface(
                             shape = RoundedCornerShape(999.dp),

@@ -96,7 +96,10 @@ fun HomeDashboardScreen(
     val isLive = streamTelemetry.state == StreamLifecycleState.LIVE
     val isPaused = streamTelemetry.state == StreamLifecycleState.PAUSED
     val isReconnecting = streamTelemetry.state == StreamLifecycleState.RECONNECTING
-    val isActiveSession = isLive || isPaused || isReconnecting || streamTelemetry.state == StreamLifecycleState.CONNECTING
+    val isActiveSession = isLive || isPaused || isReconnecting ||
+        streamTelemetry.state == StreamLifecycleState.CONNECTING ||
+        streamTelemetry.state == StreamLifecycleState.CONNECTED ||
+        streamTelemetry.state == StreamLifecycleState.SENDING_VIDEO
     val reducedMotion = settings.performance.reduceAnimationsDuringGameplay || settings.performance.lowRamMode
 
     val phoneConnected = dualTelemetry.linkState == DualLinkState.CONNECTED
@@ -138,7 +141,8 @@ fun HomeDashboardScreen(
                     privacyShield = streamTelemetry.privacyShieldActive,
                     brbActive = workspace.brbActive,
                     reducedMotion = reducedMotion,
-                    durationText = formatHomeDuration(streamTelemetry.durationSec)
+                    lifecycleState = streamTelemetry.state,
+                    durationText = if (isLive || isPaused) formatHomeDuration(streamTelemetry.durationSec) else ""
                 )
             }
         }

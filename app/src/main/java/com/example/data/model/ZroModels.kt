@@ -196,6 +196,9 @@ enum class StreamPlatform(val label: String, val defaultRtmpUrl: String) {
 data class StreamSettings(
     val platform: StreamPlatform = StreamPlatform.YOUTUBE,
     val rtmpUrl: String = "rtmp://a.rtmp.youtube.com/live2",
+    val backupRtmpUrl: String = "rtmp://b.rtmp.youtube.com/live2",
+    val useRtmps: Boolean = false,
+    val useBackupServer: Boolean = false,
     val streamKey: String = "",
     val streamTitle: String = "Mobile Gaming Live — Zro live",
     val streamDescription: String = "Streaming live gameplay with squad voice powered by Zro live.",
@@ -220,6 +223,42 @@ data class StreamSettings(
     val chatVisible: Boolean = true,
     val chatNotifications: Boolean = true,
     val lowDataMode: Boolean = false
+) {
+    fun effectivePrimaryServerUrl(): String {
+        val raw = rtmpUrl.trim().ifBlank { "rtmp://a.rtmp.youtube.com/live2" }
+        return if (useRtmps && raw.startsWith("rtmp://", ignoreCase = true)) {
+            "rtmps://" + raw.removePrefix("rtmp://")
+        } else {
+            raw
+        }
+    }
+
+    fun effectiveBackupServerUrl(): String {
+        val raw = backupRtmpUrl.trim()
+        if (raw.isBlank()) return ""
+        return if (useRtmps && raw.startsWith("rtmp://", ignoreCase = true)) {
+            "rtmps://" + raw.removePrefix("rtmp://")
+        } else {
+            raw
+        }
+    }
+}
+
+data class YouTubeAccountState(
+    val signedIn: Boolean = false,
+    val displayName: String = "",
+    val email: String = "",
+    val photoUrl: String? = null,
+    val isLoading: Boolean = false,
+    val statusMessage: String? = null
+)
+
+data class RtmpTestResult(
+    val inProgress: Boolean = false,
+    val success: Boolean? = null,
+    val latencyMs: Long = 0L,
+    val serverTested: String = "",
+    val message: String = ""
 )
 
 data class AudioSettings(
@@ -293,13 +332,16 @@ data class ZroAppSettings(
 
 // --- LIVE RUNTIME STATE & TELEMETRY ---
 
-enum class StreamLifecycleState {
-    IDLE,
-    CONNECTING,
-    LIVE,
-    PAUSED,
-    RECONNECTING,
-    ERROR
+enum class StreamLifecycleState(val displayLabel: String) {
+    IDLE("OFFLINE"),
+    READY("READY"),
+    CONNECTING("CONNECTING"),
+    CONNECTED("CONNECTED"),
+    SENDING_VIDEO("SENDING VIDEO"),
+    LIVE("LIVE"),
+    PAUSED("PAUSED"),
+    RECONNECTING("RECONNECTING"),
+    ERROR("ERROR")
 }
 
 enum class StreamHealth(val label: String) {
@@ -337,7 +379,14 @@ data class StreamRuntimeTelemetry(
     val capturedWidth: Int = 0,
     val capturedHeight: Int = 0,
     val thermalThrottled: Boolean = false,
-    val activeEncoderName: String = "Hardware H.264"
+    val activeEncoderName: String = "Hardware H.264",
+    // Honest RTMP / Encoder diagnostics
+    val statusDetail: String = "",
+    val activeServerUrl: String = "",
+    val usingBackupServer: Boolean = false,
+    val videoEncoderReady: Boolean = false,
+    val audioEncoderReady: Boolean = false,
+    val bytesSentTotal: Long = 0L
 )
 
 data class AudioMeterState(
