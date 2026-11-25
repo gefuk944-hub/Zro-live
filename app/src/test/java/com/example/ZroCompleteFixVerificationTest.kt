@@ -328,4 +328,21 @@ class ZroCompleteFixVerificationTest {
         val rotated = StudioWorkspaceReducer.updateLayer(state, layer.id) { it.copy(rotationDeg = 270f) }
         assertEquals(270f, rotated.activeScene.layers.first { it.id == layer.id }.rotationDeg, 0.01f)
     }
+
+    @Test
+    fun `rtmp validator detects youtude typo immediately and suggests youtube url`() {
+        val suggested = RtmpPublisher.suggestCorrectedRtmpUrl("rtmp://a.rtmp.youtude.com/live2")
+        assertEquals("rtmp://a.rtmp.youtube.com/live2", suggested)
+
+        val suggestedTls = RtmpPublisher.suggestCorrectedRtmpUrl("rtmps://a.rtmp.youtude.com/live2")
+        assertEquals("rtmps://a.rtmps.youtube.com/live2", suggestedTls)
+
+        val validation = RtmpPublisher.validateConfig(
+            primaryUrl = "rtmp://a.rtmp.youtude.com/live2",
+            backupUrl = "",
+            streamKey = "abcd-1234-efgh-5678"
+        )
+        assertFalse("Misspelled youtude.com host must fail fast before TCP connect", validation.valid)
+        assertTrue(validation.errorMessage.orEmpty().contains("youtube.com"))
+    }
 }

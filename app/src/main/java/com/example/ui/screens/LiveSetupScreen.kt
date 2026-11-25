@@ -333,24 +333,65 @@ fun LiveSetupScreen(
                     }
 
                     Spacer(modifier = Modifier.height(10.dp))
+                    val urlTypoSuggestion = remember(streamSettings.rtmpUrl) {
+                        RtmpPublisher.suggestCorrectedRtmpUrl(streamSettings.rtmpUrl)
+                    }
+                    val urlValidationError = remember(streamSettings.rtmpUrl) {
+                        if (streamSettings.rtmpUrl.isNotBlank()) {
+                            RtmpPublisher.validateServerUrl(streamSettings.rtmpUrl, "Stream RTMP URL")
+                        } else {
+                            null
+                        }
+                    }
                     OutlinedTextField(
                         value = streamSettings.rtmpUrl,
                         onValueChange = { onUpdateStreamSettings(streamSettings.copy(rtmpUrl = it)) },
                         label = { Text("Stream RTMP URL") },
                         placeholder = { Text("rtmp:// or rtmps:// ingest server URL", fontSize = 12.sp) },
+                        isError = urlValidationError != null,
                         supportingText = {
                             val effective = streamSettings.effectivePrimaryServerUrl()
-                            Text(
-                                text = if (effective.isNotBlank()) "Server: $effective" else "Paste your RTMP / RTMPS server URL (not auto-filled)",
-                                fontSize = 10.sp,
-                                fontFamily = JetBrainsMonoFontFamily
-                            )
+                            when {
+                                urlValidationError != null -> Text(
+                                    text = urlValidationError,
+                                    color = ZroLiveRed,
+                                    fontSize = 11.sp
+                                )
+                                effective.isNotBlank() -> Text(
+                                    text = "Server: $effective",
+                                    fontSize = 10.sp,
+                                    fontFamily = JetBrainsMonoFontFamily
+                                )
+                                else -> Text(
+                                    text = "Paste your RTMP / RTMPS server URL (not auto-filled)",
+                                    fontSize = 10.sp,
+                                    fontFamily = JetBrainsMonoFontFamily
+                                )
+                            }
                         },
                         singleLine = true,
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("live_setup_primary_url_input")
                     )
+                    if (urlTypoSuggestion != null) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        OutlinedButton(
+                            onClick = { onUpdateStreamSettings(streamSettings.copy(rtmpUrl = urlTypoSuggestion)) },
+                            shape = RoundedCornerShape(6.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("live_setup_fix_url_typo_btn")
+                        ) {
+                            Text(
+                                text = "Fix typo → $urlTypoSuggestion",
+                                fontSize = 11.sp,
+                                fontFamily = JetBrainsMonoFontFamily,
+                                color = ZroAmber
+                            )
+                        }
+                    }
 
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedTextField(

@@ -154,6 +154,41 @@ class RtmpPublisher {
             return ConfigValidationResult(true)
         }
 
+        private val MISSPELLED_YOUTUBE_DOMAINS = listOf(
+            "youtude.com",
+            "youtupe.com",
+            "youtub.com",
+            "yotube.com",
+            "yuotube.com",
+            "youutube.com",
+            "yutube.com"
+        )
+
+        /**
+         * Detects common misspelled YouTube RTMP ingest hostnames (e.g. a.rtmp.youtude.com -> a.rtmp.youtube.com)
+         * so typos are caught instantly before attempting a slow TCP timeout to a parked/wrong IP.
+         */
+        fun suggestCorrectedRtmpUrl(rawUrl: String): String? {
+            val trimmed = rawUrl.trim()
+            if (trimmed.isBlank()) return null
+            val parsed = runCatching { URI(trimmed) }.getOrNull() ?: return null
+            val scheme = parsed.scheme?.lowercase() ?: return null
+            if (scheme != "rtmp" && scheme != "rtmps") return null
+            val host = parsed.host?.lowercase() ?: return null
+            val matchedTypo = MISSPELLED_YOUTUBE_DOMAINS.firstOrNull { typo ->
+                host == typo || host.endsWith(".$typo")
+            } ?: return null
+            val fixedHost = host.substring(0, host.length - matchedTypo.length) + "youtube.com"
+            val normalizedHost = if (scheme == "rtmps" && (fixedHost == "a.rtmp.youtube.com" || fixedHost == "b.rtmp.youtube.com")) {
+                if (fixedHost.startsWith("b.")) "b.rtmps.youtube.com" else "a.rtmps.youtube.com"
+            } else {
+                fixedHost
+            }
+            val portPart = if (parsed.port > 0) ":${parsed.port}" else ""
+            val pathPart = parsed.rawPath.orEmpty().ifBlank { "/live2" }
+            return "$scheme://$normalizedHost$portPart$pathPart"
+        }
+
         fun validateServerUrl(url: String, label: String = "Server URL"): String? {
             val trimmed = url.trim()
             val lower = trimmed.lowercase()
@@ -164,6 +199,10 @@ class RtmpPublisher {
                 ?: return "$label is not a valid RTMP URI."
             if (parsed.host.isNullOrBlank()) {
                 return "$label is missing a valid server hostname."
+            }
+            val suggestion = suggestCorrectedRtmpUrl(trimmed)
+            if (suggestion != null) {
+                return "Typo in $label ('${parsed.host}' is misspelled). Use $suggestion"
             }
             return null
         }
@@ -1419,6 +1458,12 @@ class RtmpPublisher {
             scrubbed.contains("Hostname", ignoreCase = true) && scrubbed.contains("not verified", ignoreCase = true)
         ) {
             return "TLS certificate verification failed: server certificate does not match the hostname. Verify your RTMPS host (for YouTube RTMPS use rtmps://a.rtmps.youtube.com/live2, or rtmp://a.rtmp.youtube.com/live2)."
+        }
+        if (e is java.net.UnknownHostException) {
+            return "RTMP server host not found. Check the spelling of your Stream RTMP URL and your internet connection."
+        }
+        if (e is SocketTimeoutException || scrubbed.contains("failed to connect to", ignoreCase = true)) {
+            return "Timed out connecting to RTMP server. Verify the Stream RTMP URL spelling (e.g. rtmp://a.rtmp.youtube.com/live2) and check that port 1935/443 is reachable on your network."
         }
         return scrubbed
     }
