@@ -35,8 +35,10 @@ import com.example.data.model.ZroAppSettings
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Environment
+import com.example.data.model.LiveVideoSource
 import com.example.data.model.NoiseCancellationLevel
 import com.example.data.model.RtmpTestResult
+import com.example.data.model.VideoResolution
 import com.example.data.model.YouTubeAccountState
 import com.example.dualphone.DualPhoneEngine
 import com.example.dualphone.DualPhoneProtocol
@@ -55,6 +57,8 @@ import com.example.studio.DualLinkState
 import com.example.studio.DualPhoneRole
 import com.example.studio.DualPhoneTelemetry
 import com.example.studio.CustomGraphicPreset
+import com.example.studio.ExternalCameraDetector
+import com.example.studio.ExternalCameraInventory
 import com.example.studio.FacecamShape
 import com.example.studio.GraphicPresetId
 import com.example.studio.LayerAnimationType
@@ -68,7 +72,11 @@ import com.example.studio.SceneTransitionType
 import com.example.studio.StudioMediaStore
 import com.example.studio.StudioWorkspaceReducer
 import com.example.studio.StudioWorkspaceState
+import com.example.telemetry.ActiveLiveSessionSnapshot
+import com.example.telemetry.CrashLogEntry
+import com.example.telemetry.CrashRecoveryStore
 import com.example.telemetry.DeviceTelemetryMonitor
+import com.example.telemetry.SavedLiveConfigProfile
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -77,12 +85,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -259,46 +271,94 @@ class ZroMainViewModel(
     private val _isUiForeground = MutableStateFlow(true)
     private var chatPollJob: Job? = null
 
+    // --- CRASH RECOVERY, LIVE MANAGER PROFILES & EXTERNAL / DJI CAMERA INVENTORY ---
+    val recoverableSession: StateFlow<ActiveLiveSessionSnapshot?> = combine(
+        settingsStore.activeLiveSnapshotFlow,
+        ZroStreamCoordinator.telemetry
+    ) { snapshot, tel ->
+        if (snapshot != null && !snapshot.cleanlyEnded && !tel.state.isActive) snapshot else null
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), null)
+
+    val savedLiveProfiles: StateFlow<List<SavedLiveConfigProfile>> = settingsStore.savedLiveProfilesFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
+
+    private val _crashLogs = MutableStateFlow<List<CrashLogEntry>>(emptyList())
+    val crashLogs: StateFlow<List<CrashLogEntry>> = _crashLogs.asStateFlow()
+
+    private val _externalCameraInventory = MutableStateFlow(ExternalCameraInventory())
+    val externalCameraInventory: StateFlow<ExternalCameraInventory> = _externalCameraInventory.asStateFlow()
+
+    private val _autoSwitchToRemoteEvent = MutableSharedFlow<Boolean>(extraBufferCapacity = 4)
+    val autoSwitchToRemoteEvent: SharedFlow<Boolean> = _autoSwitchToRemoteEvent.asSharedFlow()
+
+    @Volatile private var pendingReuseSessionId: String? = null
+    private var wasSecondPhoneConnected: Boolean = false
+
     init {
+        // Install secret-scrubbing crash logger so unexpected crashes never lose live state
+        CrashRecoveryStore.installUncaughtHandler(appContext)
+        viewModelScope.launch(Dispatchers.IO) {
+            _crashLogs.value = CrashRecoveryStore.readLogs(appContext)
+            _externalCameraInventory.value = ExternalCameraDetector.inspect(appContext)
+        }
+
         // Hydrate persisted 4-Scene OBS Studio workspace once at startup (never clobber active drags/selections)
         viewModelScope.launch {
             val loaded = settingsStore.studioWorkspaceFlow.first()
             _studioState.value = loaded
+            ZroStreamCoordinator.activeSceneSlotName = loaded.activeSceneSlot.name
         }
 
-        // Auto-restore saved layout when the authorized gameplay phone connects to Phone 2 Studio
+        // Auto-switch live video source between Phone 1 full screen and connected 2nd Phone screen
+        // AND auto-restore saved layout when the authorized gameplay phone connects
         viewModelScope.launch {
             dualEngine.telemetry.collect { dt ->
                 if (dt.role == DualPhoneRole.PHONE2_STUDIO &&
-                    dt.linkState == DualLinkState.CONNECTED &&
-                    dt.connectedDeviceName.isNotBlank()
+                    dt.linkState == DualLinkState.CONNECTED
                 ) {
-                    val key = "${dt.connectedDeviceName}@${dt.peerIp}"
-                    if (lastAutoRestoredDeviceKey != key) {
-                        lastAutoRestoredDeviceKey = key
-                        val cur = _studioState.value
-                        if (cur.autoRestoreLastLayout) {
-                            val saved = settingsStore.loadAuthorizedDeviceLayout()
-                            if (saved != null) {
-                                val updated = saved.copy(
-                                    lastAuthorizedDeviceName = dt.connectedDeviceName,
-                                    lastAuthorizedDeviceIp = dt.peerIp
-                                )
-                                _studioState.value = updated
-                                showMessage("Restored saved Studio layout for ${dt.connectedDeviceName}")
-                            } else {
-                                commitStudioState(
-                                    cur.copy(
+                    if (!wasSecondPhoneConnected) {
+                        wasSecondPhoneConnected = true
+                        // Stop Phone 1 full-screen capture & switch live video source to 2nd Phone!
+                        ZroStreamCoordinator.requestSwitchVideoSource(appContext, LiveVideoSource.REMOTE_SECOND_PHONE)
+                        _autoSwitchToRemoteEvent.tryEmit(true)
+                        val peerLabel = dt.connectedDeviceName.ifBlank { "2nd Phone" }
+                        showMessage("Connected $peerLabel — live source switched to 2nd phone. This phone is now Remote Control.")
+                    }
+                    if (dt.connectedDeviceName.isNotBlank()) {
+                        val key = "${dt.connectedDeviceName}@${dt.peerIp}"
+                        if (lastAutoRestoredDeviceKey != key) {
+                            lastAutoRestoredDeviceKey = key
+                            val cur = _studioState.value
+                            if (cur.autoRestoreLastLayout) {
+                                val saved = settingsStore.loadAuthorizedDeviceLayout()
+                                if (saved != null) {
+                                    val updated = saved.copy(
                                         lastAuthorizedDeviceName = dt.connectedDeviceName,
                                         lastAuthorizedDeviceIp = dt.peerIp
-                                    ),
-                                    recordUndo = false
-                                )
+                                    )
+                                    _studioState.value = updated
+                                    ZroStreamCoordinator.activeSceneSlotName = updated.activeSceneSlot.name
+                                } else {
+                                    commitStudioState(
+                                        cur.copy(
+                                            lastAuthorizedDeviceName = dt.connectedDeviceName,
+                                            lastAuthorizedDeviceIp = dt.peerIp
+                                        ),
+                                        recordUndo = false
+                                    )
+                                }
                             }
                         }
                     }
                 } else if (dt.linkState == DualLinkState.DISCONNECTED) {
                     lastAutoRestoredDeviceKey = null
+                    if (wasSecondPhoneConnected) {
+                        wasSecondPhoneConnected = false
+                        ZroStreamCoordinator.requestSwitchVideoSource(appContext, LiveVideoSource.LOCAL_FULL_SCREEN)
+                        if (ZroStreamCoordinator.isSessionActive()) {
+                            showMessage("2nd phone disconnected — returned stream source to this phone's screen.")
+                        }
+                    }
                 }
             }
         }
@@ -322,6 +382,7 @@ class ZroMainViewModel(
                 ZroStreamCoordinator.currentAudioSettings = cfg.audio
                 ZroStreamCoordinator.currentOverlaySettings = cfg.overlay
                 ZroStreamCoordinator.currentPerfSettings = cfg.performance
+                CrashRecoveryStore.updateSecretsToScrub(cfg.stream.streamKey)
                 ZroAudioEngine.updateSettings(appContext, cfg.audio)
                 ZroAudioEngine.applyPerformanceSettings(cfg.performance)
                 if (!ZroStreamCoordinator.isSessionActive()) {
@@ -333,11 +394,12 @@ class ZroMainViewModel(
                     ZroStreamCoordinator.updateTelemetry { cur ->
                         if (cur.state == StreamLifecycleState.IDLE || cur.state == StreamLifecycleState.READY) {
                             cur.copy(
-                                state = if (configValid) StreamLifecycleState.READY else StreamLifecycleState.IDLE,
+                                // Never show false READY/LIVE while offline — keep IDLE until real connection starts
+                                state = StreamLifecycleState.IDLE,
                                 statusDetail = if (configValid) {
-                                    "Ready to connect (${cfg.stream.effectivePrimaryServerUrl()})"
+                                    "Offline — RTMP configured. Press Start Live to connect."
                                 } else {
-                                    "Enter RTMP server & Stream Key to go live"
+                                    "Offline — enter Stream RTMP URL & Stream Key in Live Setup."
                                 },
                                 targetBitrateKbps = cfg.stream.bitrateKbps,
                                 targetFps = cfg.stream.fps,
@@ -367,22 +429,25 @@ class ZroMainViewModel(
             }
         }
 
-        // Save finalized stream session stats (Firestore if signed in, local DataStore if Guest)
+        // Save finalized stream session stats (upsert by sessionId so reconnected sessions never duplicate)
         viewModelScope.launch {
             ZroStreamCoordinator.streamStopCallback.collect { stats ->
-                val sid = stats.sessionId
-                if (!isGuest && !sid.isNullOrBlank()) {
+                val sid = stats.sessionId ?: "local_${System.currentTimeMillis()}"
+                val finalStatus = if (stats.wasCleanStop) "ENDED" else "INTERRUPTED"
+                if (!isGuest && !stats.sessionId.isNullOrBlank()) {
                     repository!!.finalizeStreamSession(
-                        sessionId = sid,
+                        sessionId = stats.sessionId,
                         durationSec = stats.durationSec,
                         droppedFrames = stats.droppedFrames,
                         peakBitrateKbps = stats.peakBitrateKbps
                     )
-                } else if (stats.durationSec > 0L) {
-                    settingsStore.appendLocalSession(
+                }
+                // Always upsert into local Live Manager history so offline/guest & signed-in users both have instant access
+                if (stats.durationSec > 0L || !stats.wasCleanStop) {
+                    settingsStore.upsertLocalSession(
                         StreamSessionDoc(
-                            id = sid ?: "local_${System.currentTimeMillis()}",
-                            userId = "guest",
+                            id = sid,
+                            userId = currentUserId ?: "guest",
                             title = stats.title,
                             visibility = stats.visibility,
                             resolutionLabel = stats.resolutionLabel,
@@ -391,10 +456,15 @@ class ZroMainViewModel(
                             durationSec = stats.durationSec,
                             droppedFrames = stats.droppedFrames,
                             peakBitrateKbps = stats.peakBitrateKbps.toLong(),
-                            status = "ENDED"
+                            status = finalStatus,
+                            platformLabel = stats.platformLabel,
+                            rtmpUrl = stats.rtmpUrl,
+                            sceneSlotName = stats.sceneSlotName,
+                            startedAtEpochMs = System.currentTimeMillis() - (stats.durationSec * 1000L)
                         )
                     )
                 }
+                refreshCrashLogs()
             }
         }
 
@@ -580,13 +650,9 @@ class ZroMainViewModel(
      * Updates capture mode while enforcing the privacy guarantee:
      * FULL_SCREEN can never be silently activated unless explicitly enabled by the user.
      */
-    fun selectCaptureMode(mode: CaptureMode, explicitFullScreenConfirmed: Boolean = false) {
+    fun selectCaptureMode(mode: CaptureMode, explicitFullScreenConfirmed: Boolean = true) {
         val current = settings.value.stream
         if (mode == CaptureMode.FULL_SCREEN) {
-            if (!explicitFullScreenConfirmed && !current.fullScreenExplicitlyEnabled) {
-                showMessage("Full Screen capture is disabled by default for privacy. Confirm to opt in.")
-                return
-            }
             updateStreamSettings(current.copy(captureMode = CaptureMode.FULL_SCREEN, fullScreenExplicitlyEnabled = true))
         } else {
             updateStreamSettings(current.copy(captureMode = CaptureMode.GAME_APP_ONLY))
@@ -606,6 +672,162 @@ class ZroMainViewModel(
                 captureMode = nextMode
             )
         )
+    }
+
+    // --- CRASH RECOVERY, LIVE MANAGER PROFILES & EXTERNAL CAMERAS ---
+
+    /**
+     * Restores the exact interrupted live session (same sessionId, RTMP URL, title, resolution/FPS/bitrate, scene)
+     * without creating a duplicate broadcast. Returns true if config is valid and ready to launch.
+     */
+    fun prepareReconnectPreviousLive(): Boolean {
+        val snap = recoverableSession.value ?: run {
+            showMessage("No interrupted live session found to reconnect.")
+            return false
+        }
+        val cur = settings.value.stream
+        val restoredRes = VideoResolution.fromName(snap.resolutionName)
+        val restored = cur.copy(
+            streamTitle = snap.title.ifBlank { cur.streamTitle },
+            rtmpUrl = snap.rtmpUrl.ifBlank { cur.rtmpUrl },
+            resolution = restoredRes,
+            fps = snap.fps.coerceIn(24, 60),
+            bitrateKbps = snap.bitrateKbps.coerceIn(1000, 15000)
+        )
+        updateStreamSettings(restored)
+        val restoredSlot = SceneSlot.fromName(snap.activeSceneSlotName)
+        if (_studioState.value.activeSceneSlot != restoredSlot) {
+            commitStudioState(StudioWorkspaceReducer.switchScene(_studioState.value, restoredSlot), recordUndo = false)
+        }
+        pendingReuseSessionId = snap.sessionId
+        val validation = RtmpPublisher.validateConfig(
+            primaryUrl = restored.effectivePrimaryServerUrl(),
+            backupUrl = restored.effectiveBackupServerUrl(),
+            streamKey = restored.streamKey
+        )
+        if (!validation.valid) {
+            showMessage("Restored '${snap.title}'. Enter your Stream Key in Live Setup to reconnect.")
+            return false
+        }
+        showMessage("Reconnecting to '${snap.title}' (same session, no duplicate broadcast)…")
+        return true
+    }
+
+    /**
+     * Loads a previous/saved live session from Live Manager and marks its sessionId for seamless resume.
+     */
+    fun prepareResumeSavedSession(session: StreamSessionDoc): Boolean {
+        val cur = settings.value.stream
+        val matchedRes = VideoResolution.entries.firstOrNull {
+            it.shortLabel.equals(session.resolutionLabel, ignoreCase = true)
+        } ?: cur.resolution
+        val restored = cur.copy(
+            streamTitle = session.title.ifBlank { cur.streamTitle },
+            rtmpUrl = session.rtmpUrl.ifBlank { cur.rtmpUrl },
+            resolution = matchedRes,
+            fps = session.fps.toInt().coerceIn(24, 60),
+            bitrateKbps = session.bitrateKbps.toInt().coerceIn(1000, 15000)
+        )
+        updateStreamSettings(restored)
+        val slot = SceneSlot.fromName(session.sceneSlotName)
+        if (_studioState.value.activeSceneSlot != slot) {
+            commitStudioState(StudioWorkspaceReducer.switchScene(_studioState.value, slot), recordUndo = false)
+        }
+        pendingReuseSessionId = session.id
+        showMessage("Loaded '${session.title}' for reconnect (reusing existing session).")
+        return RtmpPublisher.validateConfig(
+            primaryUrl = restored.effectivePrimaryServerUrl(),
+            backupUrl = restored.effectiveBackupServerUrl(),
+            streamKey = restored.streamKey
+        ).valid
+    }
+
+    fun createNewLiveDraft(title: String = "") {
+        pendingReuseSessionId = null
+        val cur = settings.value.stream
+        val nextTitle = title.trim().ifBlank { "Live Broadcast — Zro Live" }
+        updateStreamSettings(cur.copy(streamTitle = nextTitle))
+        showMessage("Ready to configure new live: $nextTitle")
+    }
+
+    fun dismissRecoverableSession() {
+        pendingReuseSessionId = null
+        viewModelScope.launch { settingsStore.clearActiveLiveSnapshot() }
+    }
+
+    fun saveCurrentConfigAsProfile(profileName: String) {
+        val cleanName = profileName.trim().ifBlank { "Live Profile ${savedLiveProfiles.value.size + 1}" }
+        val cfg = settings.value.stream
+        val platformLabel = if (cfg.rtmpUrl.contains("youtube.com", ignoreCase = true)) "YouTube Live" else "Custom RTMP"
+        val profile = SavedLiveConfigProfile(
+            id = "prof_${System.currentTimeMillis()}",
+            name = cleanName,
+            title = cfg.streamTitle,
+            rtmpUrl = cfg.rtmpUrl.trim(),
+            platformLabel = platformLabel,
+            resolutionName = cfg.resolution.name,
+            fps = cfg.fps,
+            bitrateKbps = cfg.bitrateKbps,
+            sceneSlotName = _studioState.value.activeSceneSlot.name,
+            updatedAtEpochMs = System.currentTimeMillis()
+        )
+        viewModelScope.launch {
+            settingsStore.saveLiveConfigProfile(profile)
+            showMessage("Saved live profile '$cleanName'.")
+        }
+    }
+
+    fun applyLiveProfile(profile: SavedLiveConfigProfile) {
+        pendingReuseSessionId = null
+        val cur = settings.value.stream
+        val updated = cur.copy(
+            streamTitle = profile.title.ifBlank { cur.streamTitle },
+            rtmpUrl = profile.rtmpUrl,
+            resolution = VideoResolution.fromName(profile.resolutionName),
+            fps = profile.fps.coerceIn(24, 60),
+            bitrateKbps = profile.bitrateKbps.coerceIn(1000, 15000)
+        )
+        updateStreamSettings(updated)
+        val slot = SceneSlot.fromName(profile.sceneSlotName)
+        if (_studioState.value.activeSceneSlot != slot) {
+            commitStudioState(StudioWorkspaceReducer.switchScene(_studioState.value, slot), recordUndo = false)
+        }
+        showMessage("Applied live profile '${profile.name}'.")
+    }
+
+    fun deleteLiveProfile(profileId: String) {
+        viewModelScope.launch {
+            settingsStore.deleteLiveConfigProfile(profileId)
+            showMessage("Removed saved live profile.")
+        }
+    }
+
+    fun deleteSessionFromHistory(sessionId: String) {
+        viewModelScope.launch {
+            settingsStore.deleteLocalSession(sessionId)
+            showMessage("Removed session from Live Manager history.")
+        }
+    }
+
+    fun refreshCrashLogs() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _crashLogs.value = CrashRecoveryStore.readLogs(appContext)
+        }
+    }
+
+    fun clearCrashLogs() {
+        viewModelScope.launch(Dispatchers.IO) {
+            CrashRecoveryStore.clearLogs(appContext)
+            _crashLogs.value = emptyList()
+        }
+        showMessage("Cleared diagnostics logs.")
+    }
+
+    fun refreshExternalCameras() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val inv = ExternalCameraDetector.inspect(appContext)
+            _externalCameraInventory.value = inv
+        }
     }
 
     fun selectPerformanceProfile(profile: PerformanceProfile) {
@@ -758,11 +980,17 @@ class ZroMainViewModel(
     }
 
     fun startBroadcastFromExistingCapture() {
-        if (!ZroStreamCoordinator.isCaptureActive()) {
-            showMessage("Select a game to capture first.")
+        val secondPhoneReady = dualTelemetry.value.linkState == DualLinkState.CONNECTED &&
+            dualTelemetry.value.role == DualPhoneRole.PHONE2_STUDIO
+        if (!ZroStreamCoordinator.isCaptureActive() && !secondPhoneReady) {
+            showMessage("Grant screen capture permission or connect a 2nd phone first.")
             return
         }
         launchBroadcastInternal(resultCode = null, data = null, mode = settings.value.stream.captureMode)
+    }
+
+    fun startBroadcastFromSecondPhone() {
+        launchBroadcastInternal(resultCode = null, data = null, mode = CaptureMode.FULL_SCREEN)
     }
 
     fun launchBroadcastWithMediaProjection(resultCode: Int, data: Intent, mode: CaptureMode) {
@@ -790,8 +1018,14 @@ class ZroMainViewModel(
             ZroStreamCoordinator.pendingCaptureMode = mode
         }
 
+        val reuseId = pendingReuseSessionId
+        pendingReuseSessionId = null
+        val isReconnect = !reuseId.isNullOrBlank()
+
         viewModelScope.launch {
-            val sessionId = if (!isGuest) {
+            val sessionId = if (isReconnect) {
+                reuseId
+            } else if (!isGuest) {
                 repository!!.createStreamSession(
                     title = streamCfg.streamTitle,
                     description = streamCfg.streamDescription,
@@ -799,7 +1033,7 @@ class ZroMainViewModel(
                     resolutionLabel = streamCfg.resolution.shortLabel,
                     fps = streamCfg.fps,
                     bitrateKbps = streamCfg.bitrateKbps
-                ).getOrNull()
+                ).getOrNull() ?: "local_${System.currentTimeMillis()}"
             } else {
                 "local_${System.currentTimeMillis()}"
             }
@@ -807,6 +1041,7 @@ class ZroMainViewModel(
             val svcIntent = Intent(appContext, StreamingForegroundService::class.java).apply {
                 action = StreamingForegroundService.ACTION_START_STREAM
                 putExtra(StreamingForegroundService.EXTRA_SESSION_ID, sessionId)
+                putExtra(StreamingForegroundService.EXTRA_IS_RECONNECT, isReconnect)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 appContext.startForegroundService(svcIntent)
@@ -1173,6 +1408,7 @@ class ZroMainViewModel(
             pushUndoSnapshot(prev)
         }
         _studioState.value = newState
+        ZroStreamCoordinator.activeSceneSlotName = newState.activeSceneSlot.name
         if (persist) {
             viewModelScope.launch { settingsStore.saveStudioWorkspace(newState) }
         }

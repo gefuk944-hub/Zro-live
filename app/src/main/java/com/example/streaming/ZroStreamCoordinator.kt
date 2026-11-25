@@ -5,6 +5,7 @@ import android.content.Intent
 import android.view.Surface
 import com.example.data.model.AudioSettings
 import com.example.data.model.CaptureMode
+import com.example.data.model.LiveVideoSource
 import com.example.data.model.OverlaySettings
 import com.example.data.model.PerformanceSettings
 import com.example.data.model.StreamHealth
@@ -58,7 +59,12 @@ object ZroStreamCoordinator {
         val bitrateKbps: Int,
         val durationSec: Long,
         val droppedFrames: Long,
-        val peakBitrateKbps: Int
+        val peakBitrateKbps: Int,
+        val platformLabel: String = "RTMP Live",
+        val rtmpUrl: String = "",
+        val sceneSlotName: String = "SCENE_1",
+        val wasCleanStop: Boolean = true,
+        val errorMessage: String? = null
     )
 
     // Volatile snapshot of latest settings for Service & Overlay access
@@ -66,9 +72,10 @@ object ZroStreamCoordinator {
     @Volatile var currentAudioSettings: AudioSettings = AudioSettings()
     @Volatile var currentOverlaySettings: OverlaySettings = OverlaySettings()
     @Volatile var currentPerfSettings: PerformanceSettings = PerformanceSettings()
+    @Volatile var activeSceneSlotName: String = "SCENE_1"
     @Volatile var pendingMediaProjectionResultCode: Int = 0
     @Volatile var pendingMediaProjectionData: Intent? = null
-    @Volatile var pendingCaptureMode: CaptureMode = CaptureMode.GAME_APP_ONLY
+    @Volatile var pendingCaptureMode: CaptureMode = CaptureMode.FULL_SCREEN
 
     // Live pre-stream capture preview surface (bound by LiveStudioScreen SurfaceView)
     val previewSurfaceRef = AtomicReference<Surface?>(null)
@@ -144,6 +151,29 @@ object ZroStreamCoordinator {
         runCatching { context.startService(intent) }
     }
 
+    /**
+     * Switches live stream video source seamlessly between Phone 1 full-screen capture
+     * and Phone 2 mirrored gameplay feed without disconnecting YouTube / RTMP Live.
+     */
+    fun requestSwitchVideoSource(context: Context, source: LiveVideoSource) {
+        updateTelemetry {
+            it.copy(
+                activeVideoSource = source,
+                captureSourceLabel = when (source) {
+                    LiveVideoSource.REMOTE_SECOND_PHONE -> "2nd Phone Screen (Live Source)"
+                    LiveVideoSource.LOCAL_FULL_SCREEN -> "This Phone Full Screen"
+                }
+            )
+        }
+        if (isSessionActive()) {
+            val intent = Intent(context, StreamingForegroundService::class.java).apply {
+                action = StreamingForegroundService.ACTION_SWITCH_VIDEO_SOURCE
+                putExtra(StreamingForegroundService.EXTRA_VIDEO_SOURCE, source.name)
+            }
+            runCatching { context.startService(intent) }
+        }
+    }
+
     fun formatDuration(seconds: Long): String {
         val safe = seconds.coerceAtLeast(0L)
         val h = safe / 3600
@@ -165,7 +195,8 @@ object ZroStreamCoordinator {
             captureActive = false,
             capturePreviewActive = false,
             captureMode = currentStreamSettings.captureMode,
-            captureSourceLabel = "No game selected",
+            activeVideoSource = LiveVideoSource.LOCAL_FULL_SCREEN,
+            captureSourceLabel = "This Phone Full Screen",
             capturedContentVisible = true,
             privacyShieldActive = false,
             errorMessage = error

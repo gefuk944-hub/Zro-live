@@ -20,9 +20,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Cameraswitch
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockOpen
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Save
+import androidx.compose.material.icons.rounded.Usb
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VideocamOff
 import androidx.compose.material3.FilterChip
@@ -37,6 +42,10 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -47,9 +56,11 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.studio.CameraSourceMode
 import com.example.studio.DualLinkState
 import com.example.studio.DualPhoneTelemetry
+import com.example.studio.ExternalCameraInventory
 import com.example.studio.FacecamShape
 import com.example.studio.LayerSourceType
 import com.example.studio.SceneLayer
@@ -81,10 +92,13 @@ fun CameraSettingsScreen(
     onSelectCameraSource: (CameraSourceMode) -> Unit,
     onUpdateFacecamLayer: ((SceneLayer) -> SceneLayer) -> Unit,
     onToggleFacecamLock: (String) -> Unit,
-    onSaveLayout: () -> Unit
+    onSaveLayout: () -> Unit,
+    externalCameraInventory: ExternalCameraInventory = ExternalCameraInventory(),
+    onRefreshExternalCameras: () -> Unit = {}
 ) {
     val activeScene = workspace.activeScene
     val camLayer = activeScene.layers.firstOrNull { it.type == LayerSourceType.WEBCAM }
+    var showDjiGuide by remember { mutableStateOf(true) }
     val previewShape = when (camLayer?.facecamShape ?: FacecamShape.ROUNDED_RECT) {
         FacecamShape.CIRCLE -> CircleShape
         FacecamShape.SQUARE -> RectangleShape
@@ -187,7 +201,12 @@ fun CameraSettingsScreen(
                     ) {
                         val isLocalCam = workspace.cameraSourceMode == CameraSourceMode.PHONE2_FRONT ||
                             workspace.cameraSourceMode == CameraSourceMode.PHONE2_REAR
-                        if (workspace.cameraEnabled && cameraPermissionGranted && isLocalCam) {
+                        val isUvcCam = workspace.cameraSourceMode == CameraSourceMode.DJI_USB_UVC ||
+                            workspace.cameraSourceMode == CameraSourceMode.EXTERNAL_UVC
+                        val canShowCameraXPreview = workspace.cameraEnabled && cameraPermissionGranted &&
+                            (isLocalCam || (isUvcCam && externalCameraInventory.hasExternalCamera2))
+
+                        if (canShowCameraXPreview) {
                             Box(
                                 modifier = Modifier
                                     .size(
@@ -200,6 +219,7 @@ fun CameraSettingsScreen(
                             ) {
                                 CameraXFacecamPreview(
                                     useFront = workspace.cameraSourceMode == CameraSourceMode.PHONE2_FRONT,
+                                    cameraSourceMode = workspace.cameraSourceMode,
                                     modifier = Modifier.fillMaxSize()
                                 )
                             }
@@ -217,22 +237,39 @@ fun CameraSettingsScreen(
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Text(
                                     text = when {
-                                        !workspace.cameraEnabled -> "Camera Preview Off"
-                                        !cameraPermissionGranted -> "Camera permission required to preview"
+                                        !workspace.cameraEnabled -> "Camera Preview Off — toggle Facecam ON to activate"
+                                        !cameraPermissionGranted -> "Camera permission required for live preview"
                                         workspace.cameraSourceMode == CameraSourceMode.PHONE1_REMOTE -> {
                                             if (dualTelemetry.linkState == DualLinkState.CONNECTED) {
-                                                "Phone 1 Remote Camera Paired (${dualTelemetry.connectedDeviceName})"
+                                                "2nd Phone Camera Paired (${dualTelemetry.connectedDeviceName})"
                                             } else {
-                                                "Connect Phone 1 in Dual Phone Pairing to use Phone 1 Remote Camera"
+                                                "Pair your 2nd phone in Remote -> 2-Phone Pairing to use remote camera"
                                             }
                                         }
-                                        else -> "External USB Camera — connect a UVC-compatible camera supported by Android CameraX"
+                                        workspace.cameraSourceMode == CameraSourceMode.DJI_USB_UVC -> {
+                                            if (externalCameraInventory.hasDjiUsbDevice) {
+                                                "DJI USB detected (${externalCameraInventory.djiDeviceLabel}). Switch DJI camera to Webcam / UVC mode and tap Scan."
+                                            } else {
+                                                "No DJI USB-C / UVC camera detected. Connect via USB-C OTG and enable Webcam (UVC) mode on your DJI camera."
+                                            }
+                                        }
+                                        workspace.cameraSourceMode == CameraSourceMode.EXTERNAL_UVC -> {
+                                            if (externalCameraInventory.hasUvcUsbDevice) {
+                                                "USB UVC device detected. Wait for Android CameraX external lens registration or tap Scan."
+                                            } else {
+                                                "No HDMI-to-USB UVC capture card detected. Connect a UVC capture dongle over USB-C OTG."
+                                            }
+                                        }
+                                        workspace.cameraSourceMode == CameraSourceMode.DJI_WIRELESS -> {
+                                            "DJI Wireless Companion: stream your DJI camera via local RTMP/network feed or pair via 2nd phone."
+                                        }
+                                        else -> "Camera standby"
                                     },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     textAlign = TextAlign.Center
                                 )
-                                if (workspace.cameraEnabled && !cameraPermissionGranted && isLocalCam) {
+                                if (workspace.cameraEnabled && !cameraPermissionGranted && (isLocalCam || isUvcCam)) {
                                     Spacer(modifier = Modifier.height(8.dp))
                                     OutlinedButton(onClick = onRequestCameraPermission) {
                                         Text("Grant Camera Permission")
@@ -241,17 +278,74 @@ fun CameraSettingsScreen(
                             }
                         }
                     }
+
+                    // Quick Front / Rear toggle row
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                val next = if (workspace.cameraSourceMode == CameraSourceMode.PHONE2_FRONT) {
+                                    CameraSourceMode.PHONE2_REAR
+                                } else {
+                                    CameraSourceMode.PHONE2_FRONT
+                                }
+                                onSelectCameraSource(next)
+                            },
+                            shape = RoundedCornerShape(6.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("camera_quick_flip_btn")
+                        ) {
+                            Icon(Icons.Rounded.Cameraswitch, contentDescription = "Switch front or rear camera", modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                if (workspace.cameraSourceMode == CameraSourceMode.PHONE2_FRONT) "Switch to Rear" else "Switch to Front",
+                                fontSize = 11.sp
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = onRefreshExternalCameras,
+                            shape = RoundedCornerShape(6.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("camera_scan_usb_btn")
+                        ) {
+                            Icon(Icons.Rounded.Refresh, contentDescription = "Scan USB and DJI cameras", modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Scan USB / DJI", fontSize = 11.sp)
+                        }
+                    }
                 }
             }
 
-            // 2. Camera Source Selector
+            // 2. Camera Source Selector (Phone + DJI USB/UVC + HDMI Capture Card + Wireless)
             item {
                 GlassCard {
-                    SectionHeader(title = "Camera Source", subtitle = "Choose Phone 2 local, External USB, or Phone 1 remote camera")
+                    SectionHeader(
+                        title = "Camera Source",
+                        subtitle = externalCameraInventory.statusSummary
+                    )
                     Spacer(modifier = Modifier.height(8.dp))
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         CameraSourceMode.entries.forEach { mode ->
                             val selected = workspace.cameraSourceMode == mode
+                            val hardwareBadge = when (mode) {
+                                CameraSourceMode.PHONE2_FRONT -> if (externalCameraInventory.hasFrontCamera) "READY" else null
+                                CameraSourceMode.PHONE2_REAR -> if (externalCameraInventory.hasRearCamera) "READY" else null
+                                CameraSourceMode.DJI_USB_UVC -> when {
+                                    externalCameraInventory.hasDjiUsbDevice -> "DJI DETECTED"
+                                    externalCameraInventory.hasExternalCamera2 -> "UVC READY"
+                                    else -> "USB-C OTG"
+                                }
+                                CameraSourceMode.EXTERNAL_UVC -> if (externalCameraInventory.hasUvcUsbDevice || externalCameraInventory.hasExternalCamera2) "DETECTED" else "UVC"
+                                CameraSourceMode.DJI_WIRELESS -> "WIFI / MIMO"
+                                CameraSourceMode.PHONE1_REMOTE -> if (dualTelemetry.linkState == DualLinkState.CONNECTED) "PAIRED" else "2ND PHONE"
+                            }
                             Surface(
                                 onClick = { onSelectCameraSource(mode) },
                                 shape = RoundedCornerShape(6.dp),
@@ -284,9 +378,85 @@ fun CameraSettingsScreen(
                                             fontWeight = FontWeight.Bold,
                                             color = ZroCobalt
                                         )
+                                    } else if (hardwareBadge != null) {
+                                        Text(
+                                            hardwareBadge,
+                                            fontSize = 10.sp,
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            color = if (hardwareBadge.contains("DETECTED") || hardwareBadge == "PAIRED") ZroEmerald else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // 2b. DJI Camera Compatibility & Connection Instructions
+            item {
+                GlassCard(
+                    modifier = Modifier.testTag("dji_setup_guide_card")
+                ) {
+                    Surface(
+                        onClick = { showDjiGuide = !showDjiGuide },
+                        color = Color.Transparent,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Rounded.Usb, contentDescription = null, tint = ZroCobalt, modifier = Modifier.size(18.dp))
+                                Column {
+                                    Text(
+                                        text = "DJI & External Camera Compatibility Guide",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        text = "USB-C UVC, HDMI Capture Card & Wireless methods",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Icon(
+                                imageVector = if (showDjiGuide) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                                contentDescription = "Toggle DJI connection guide",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    if (showDjiGuide) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = "1. DJI USB-C Webcam (UVC): Supported on DJI Osmo Action 4 / 5 Pro & Osmo Pocket 3. Plug a USB-C data/OTG cable into your phone, choose 'Webcam (UVC)' on the DJI camera screen, then tap 'Scan USB / DJI'.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFFD1D5DB)
+                            )
+                            Text(
+                                text = "2. HDMI-to-USB UVC Capture Card: Connect any DJI camera, action cam, or DSLR with clean HDMI output into a UVC USB-C capture dongle. Select 'HDMI Capture Card (UVC)' above.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFFD1D5DB)
+                            )
+                            Text(
+                                text = "3. DJI Wireless Companion: For cameras without direct UVC support, use DJI Mimo / wireless RTMP companion on a second device and pair via 2-Phone Pairing or Browser Source in Layers.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFFD1D5DB)
+                            )
+                            Text(
+                                text = "Hardware Note: Android exposes external UVC lenses to CameraX on devices with USB Host OTG & External Camera HAL support.",
+                                fontSize = 11.sp,
+                                color = ZroAmber
+                            )
                         }
                     }
                 }

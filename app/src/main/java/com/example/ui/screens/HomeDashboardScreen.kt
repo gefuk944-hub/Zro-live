@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.graphics.Bitmap
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -8,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -15,26 +17,31 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Chat
+import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.HeadsetMic
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.SettingsInputComponent
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VideocamOff
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -43,7 +50,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.data.model.AudioMeterState
 import com.example.data.model.DeviceTelemetry
+import com.example.data.model.LiveVideoSource
 import com.example.data.model.SmartRecommendation
 import com.example.data.model.StreamLifecycleState
 import com.example.data.model.StreamRuntimeTelemetry
@@ -53,10 +63,12 @@ import com.example.data.model.ZroAppSettings
 import com.example.studio.DualLinkState
 import com.example.studio.DualPhoneTelemetry
 import com.example.studio.StudioWorkspaceState
+import com.example.telemetry.ActiveLiveSessionSnapshot
 import com.example.ui.components.BrandGradientButton
 import com.example.ui.components.GlassCard
 import com.example.ui.components.LiveStatusBadge
 import com.example.ui.components.SectionHeader
+import com.example.ui.components.StudioCanvasPreview
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.ZroAmber
 import com.example.ui.theme.ZroCobalt
@@ -91,7 +103,15 @@ fun HomeDashboardScreen(
     onOpenAudioSettings: () -> Unit,
     onOpenCameraSettings: () -> Unit,
     onOpenChat: () -> Unit,
-    onOpenVoiceRoom: () -> Unit
+    onOpenVoiceRoom: () -> Unit,
+    recoverableSession: ActiveLiveSessionSnapshot? = null,
+    mirroredFrame: Bitmap? = null,
+    audioMeters: AudioMeterState = AudioMeterState(),
+    cameraPermissionGranted: Boolean = false,
+    onReconnectPreviousLive: () -> Unit = {},
+    onDismissRecovery: () -> Unit = {},
+    onOpenLiveManager: () -> Unit = {},
+    onOpenFullScreenPreview: () -> Unit = {}
 ) {
     val isLive = streamTelemetry.state == StreamLifecycleState.LIVE
     val isPaused = streamTelemetry.state == StreamLifecycleState.PAUSED
@@ -147,6 +167,127 @@ fun HomeDashboardScreen(
             }
         }
 
+        // 1b. Crash Recovery Banner (rejoins exact previous session without duplicates)
+        if (recoverableSession != null && !isActiveSession) {
+            item {
+                GlassCard(
+                    accentBorder = ZroAmber,
+                    modifier = Modifier.testTag("home_reconnect_banner")
+                ) {
+                    Text(
+                        text = "PREVIOUS LIVE INTERRUPTED",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        color = ZroAmber
+                    )
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Text(
+                        text = "${recoverableSession.title.ifBlank { "Live Stream" }} • ${recoverableSession.resolutionLabel} ${recoverableSession.fps} FPS • Scene: ${recoverableSession.sceneSlotName}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = onReconnectPreviousLive,
+                            colors = ButtonDefaults.buttonColors(containerColor = ZroEmerald, contentColor = Color.Black),
+                            shape = RoundedCornerShape(7.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("home_reconnect_btn")
+                        ) {
+                            Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Reconnect to Previous Live", fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        TextButton(onClick = onDismissRecovery) {
+                            Text("Dismiss", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+        }
+
+        // 1c. YouTube Standard 16:9 Live Output Preview Card
+        item {
+            GlassCard {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "YouTube 16:9 Live Preview",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White
+                        )
+                        val sourceLabel = if (streamTelemetry.activeVideoSource == LiveVideoSource.REMOTE_SECOND_PHONE || phoneConnected) {
+                            "Source: 2nd Phone Screen"
+                        } else {
+                            "Source: This Phone Full Screen"
+                        }
+                        Text(
+                            text = "${workspace.activeScene.name} • $sourceLabel",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = if (phoneConnected) ZroEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Surface(
+                        onClick = onOpenFullScreenPreview,
+                        shape = RoundedCornerShape(6.dp),
+                        color = ZroCobalt.copy(alpha = 0.22f),
+                        border = BorderStroke(1.dp, ZroCobalt),
+                        modifier = Modifier.testTag("home_fullscreen_preview_btn")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(Icons.Rounded.Fullscreen, contentDescription = "Full-Screen 16:9 Preview", tint = Color.White, modifier = Modifier.size(14.dp))
+                            Text("Full 16:9", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                val previewWorkspace = remember(workspace) {
+                    workspace.copy(
+                        showGrid = false,
+                        showSnapGuides = false,
+                        showSafeArea = false,
+                        canvasZoom = 1f,
+                        selectedLayerId = null
+                    )
+                }
+                StudioCanvasPreview(
+                    workspace = previewWorkspace,
+                    mirroredFrame = mirroredFrame,
+                    audioMeters = audioMeters,
+                    chatMessages = emptyList(),
+                    reducedMotion = reducedMotion,
+                    dualTelemetry = dualTelemetry,
+                    cameraPermissionGranted = cameraPermissionGranted,
+                    enableLiveCameraPreview = workspace.cameraEnabled && cameraPermissionGranted,
+                    interactive = false,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .testTag("home_16x9_preview_canvas")
+                )
+            }
+        }
+
         // 2. Primary Broadcast Control Dock (LIVE SETUP + START/STOP LIVE)
         item {
             GlassCard(
@@ -164,9 +305,10 @@ fun HomeDashboardScreen(
                     overflow = TextOverflow.Ellipsis
                 )
                 Spacer(modifier = Modifier.height(2.dp))
+                val configReady = settings.stream.rtmpUrl.isNotBlank() && settings.stream.streamKey.isNotBlank()
                 Text(
-                    text = "${settings.stream.platform.label} • ${settings.stream.visibility.label} • " +
-                        if (settings.stream.streamKey.isNotBlank()) "Key Ready" else "Configure in Live Setup",
+                    text = "${settings.stream.visibility.label} • " +
+                        if (configReady) "RTMP Configured" else "Configure URL & Key in Live Setup",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -293,7 +435,7 @@ fun HomeDashboardScreen(
             ) {
                 CompactShortcutButton(
                     icon = Icons.Rounded.Layers,
-                    label = "Studio",
+                    label = "Layers",
                     onClick = onOpenObsStudio,
                     modifier = Modifier
                         .weight(1f)
@@ -331,7 +473,15 @@ fun HomeDashboardScreen(
         item {
             SectionHeader(
                 title = "Recent Broadcasts",
-                subtitle = if (recentSessions.isEmpty()) "Recommended: ${smartRecommendation.resolution.shortLabel} ${smartRecommendation.fps} FPS" else "${recentSessions.size} recorded locally"
+                subtitle = if (recentSessions.isEmpty()) "Recommended: ${smartRecommendation.resolution.shortLabel} ${smartRecommendation.fps} FPS" else "${recentSessions.size} recorded locally",
+                trailing = {
+                    TextButton(
+                        onClick = onOpenLiveManager,
+                        modifier = Modifier.testTag("home_open_live_manager_btn")
+                    ) {
+                        Text("Live Manager", color = ZroCobalt)
+                    }
+                }
             )
         }
 

@@ -37,6 +37,7 @@ import androidx.compose.material.icons.rounded.Crop
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.FitScreen
+import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.GridOn
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Lock
@@ -194,7 +195,8 @@ fun ObsSceneStudioScreen(
     onMergeLayers: (List<String>, String) -> Unit = { _, _ -> },
     onUnmergeLayer: (String) -> Unit = {},
     onMoveLayerTo: ((String, Float, Float) -> Unit)? = null,
-    onReloadBrowserLayer: (String) -> Unit = {}
+    onReloadBrowserLayer: (String) -> Unit = {},
+    onOpenFullScreenPreview: (() -> Unit)? = null
 ) {
     val activeScene = workspace.activeScene
     val selectedLayer = activeScene.layers.firstOrNull { it.id == workspace.selectedLayerId }
@@ -392,20 +394,40 @@ fun ObsSceneStudioScreen(
         ) {
         if (onBack != null) {
             ProSubpageTopBar(
-                title = "Scene Studio",
+                title = "Layers & Studio",
                 subtitle = activeScene.name,
                 onBack = onBack,
                 backTestTag = "studio_back_button",
                 trailing = {
-                    OutlinedButton(
-                        onClick = onSaveLayoutExplicit,
-                        shape = RoundedCornerShape(6.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                        modifier = Modifier.testTag("studio_save_layout_btn")
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Rounded.Save, contentDescription = null, modifier = Modifier.size(14.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Save", fontSize = 11.sp)
+                        if (onOpenFullScreenPreview != null) {
+                            IconButton(
+                                onClick = onOpenFullScreenPreview,
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .testTag("studio_fullscreen_preview_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Fullscreen,
+                                    contentDescription = "16:9 Live Output Preview",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = onSaveLayoutExplicit,
+                            shape = RoundedCornerShape(6.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            modifier = Modifier.testTag("studio_save_layout_btn")
+                        ) {
+                            Icon(Icons.Rounded.Save, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Save", fontSize = 11.sp)
+                        }
                     }
                 }
             )

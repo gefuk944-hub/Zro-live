@@ -43,6 +43,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.FullscreenExit
 import androidx.compose.material.icons.rounded.LinkOff
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -50,6 +52,7 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VideocamOff
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -60,6 +63,8 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -1081,10 +1086,13 @@ private fun LayerContentVisual(
                     .background(if (chromaActive) Color.Transparent else Color(0xFF141821)),
                 contentAlignment = Alignment.Center
             ) {
-                val isLocalCamera = cameraSourceMode == CameraSourceMode.PHONE2_FRONT ||
-                    cameraSourceMode == CameraSourceMode.PHONE2_REAR
-                val frontCam = cameraSourceMode == CameraSourceMode.PHONE2_FRONT || useFrontCamera
-                if (enableLiveCameraPreview && cameraPermissionGranted && isLocalCamera) {
+                val isPreviewableCamera = cameraSourceMode == CameraSourceMode.PHONE2_FRONT ||
+                    cameraSourceMode == CameraSourceMode.PHONE2_REAR ||
+                    cameraSourceMode == CameraSourceMode.DJI_USB_UVC ||
+                    cameraSourceMode == CameraSourceMode.EXTERNAL_UVC
+                val frontCam = cameraSourceMode == CameraSourceMode.PHONE2_FRONT ||
+                    (cameraSourceMode != CameraSourceMode.PHONE2_REAR && useFrontCamera)
+                if (enableLiveCameraPreview && cameraPermissionGranted && isPreviewableCamera) {
                     if (chromaActive) {
                         CameraXChromaFacecamView(
                             useFront = frontCam,
@@ -1094,6 +1102,7 @@ private fun LayerContentVisual(
                     } else {
                         CameraXFacecamPreview(
                             useFront = frontCam,
+                            cameraSourceMode = cameraSourceMode,
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -1113,7 +1122,9 @@ private fun LayerContentVisual(
                             text = when (cameraSourceMode) {
                                 CameraSourceMode.PHONE2_FRONT -> "FRONT CAM"
                                 CameraSourceMode.PHONE2_REAR -> "REAR CAM"
-                                CameraSourceMode.EXTERNAL_UVC -> "EXT CAM"
+                                CameraSourceMode.DJI_USB_UVC -> "DJI USB/UVC"
+                                CameraSourceMode.EXTERNAL_UVC -> "HDMI / UVC"
+                                CameraSourceMode.DJI_WIRELESS -> "DJI WIRELESS"
                                 CameraSourceMode.PHONE1_REMOTE -> "PHONE 1 CAM"
                             },
                             fontSize = 8.sp,
@@ -1472,14 +1483,18 @@ private fun BroadcastMotionBackdrop(
 
 /**
  * Real CameraX PreviewView used ONLY when the user explicitly toggles Camera ON
- * and has granted runtime CAMERA permission. Unbinds cleanly on dispose.
+ * and has granted runtime CAMERA permission. Supports Front, Rear, and External USB/UVC
+ * (including DJI Osmo Action/Pocket UVC webcam mode and HDMI-to-USB UVC capture cards).
+ * Unbinds cleanly when turned off or disposed.
  */
 @Composable
 fun CameraXFacecamPreview(
     useFront: Boolean,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    cameraSourceMode: CameraSourceMode = if (useFront) CameraSourceMode.PHONE2_FRONT else CameraSourceMode.PHONE2_REAR
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     AndroidView(
         modifier = modifier,
@@ -1498,21 +1513,190 @@ fun CameraXFacecamPreview(
                     val preview = Preview.Builder().build().also {
                         it.surfaceProvider = previewView.surfaceProvider
                     }
-                    val selector = if (useFront) {
+                    val wantExternal = cameraSourceMode == CameraSourceMode.DJI_USB_UVC ||
+                        cameraSourceMode == CameraSourceMode.EXTERNAL_UVC
+                    val selector = if (wantExternal) {
+                        CameraSelector.Builder()
+                            .addCameraFilter { cameras ->
+                                val external = cameras.filter { cam ->
+                                    cam.lensFacing == CameraSelector.LENS_FACING_EXTERNAL
+                                }
+                                if (external.isNotEmpty()) external else cameras.take(1)
+                            }
+                            .build()
+                    } else if (cameraSourceMode == CameraSourceMode.PHONE2_FRONT || useFront) {
                         CameraSelector.DEFAULT_FRONT_CAMERA
                     } else {
                         CameraSelector.DEFAULT_BACK_CAMERA
                     }
                     cameraProvider.unbindAll()
-                    cameraProvider.bindToLifecycle(lifecycleOwner, selector, preview)
+                    if (cameraProvider.hasCamera(selector)) {
+                        cameraProvider.bindToLifecycle(lifecycleOwner, selector, preview)
+                    } else {
+                        val fallback = if (useFront) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+                        if (cameraProvider.hasCamera(fallback)) {
+                            cameraProvider.bindToLifecycle(lifecycleOwner, fallback, preview)
+                        }
+                    }
                 }
             }, ContextCompat.getMainExecutor(ctx))
         }
     )
 
-    DisposableEffect(lifecycleOwner, useFront) {
+    DisposableEffect(lifecycleOwner, useFront, cameraSourceMode) {
         onDispose {
-            // Lifecycle-bound CameraX automatically releases surface when lifecycle stops/disposes
+            runCatching {
+                val future = ProcessCameraProvider.getInstance(context)
+                if (future.isDone) {
+                    future.get().unbindAll()
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Full-screen YouTube-standard 16:9 broadcast output preview dialog.
+ * Allows checking exact final live output (layers, chroma key, facecam, borders, safe area)
+ * before or during a live broadcast.
+ */
+@Composable
+fun FullScreen16x9PreviewDialog(
+    workspace: StudioWorkspaceState,
+    mirroredFrame: Bitmap?,
+    audioMeters: AudioMeterState,
+    chatMessages: List<YouTubeChatMessage>,
+    dualTelemetry: DualPhoneTelemetry,
+    cameraPermissionGranted: Boolean,
+    resolutionLabel: String,
+    fps: Int,
+    statusLabel: String,
+    sourceLabel: String,
+    isLive: Boolean,
+    onDismiss: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF05070B))
+                .padding(horizontal = 12.dp, vertical = 14.dp)
+                .testTag("fullscreen_preview_dialog"),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            // Top Broadcast HUD bar
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = if (isLive) ZroLiveRed else Color(0xFF1F2430)
+                    ) {
+                        Text(
+                            text = statusLabel,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "YouTube 16:9 Live Output Preview",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White
+                        )
+                        Text(
+                            text = "$resolutionLabel • ${fps} FPS • $sourceLabel",
+                            fontSize = 11.sp,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = Color(0xFF9CA3AF)
+                        )
+                    }
+                }
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.testTag("fullscreen_preview_close_btn")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.FullscreenExit,
+                        contentDescription = "Exit full-screen preview",
+                        tint = Color.White
+                    )
+                }
+            }
+
+            // Full-bleed 16:9 YouTube Output Canvas (zero grid/editing chrome)
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                val cleanPreviewWorkspace = remember(workspace) {
+                    workspace.copy(
+                        showGrid = false,
+                        showSnapGuides = false,
+                        showSafeArea = false,
+                        canvasZoom = 1f,
+                        selectedLayerId = null
+                    )
+                }
+                StudioCanvasPreview(
+                    workspace = cleanPreviewWorkspace,
+                    mirroredFrame = mirroredFrame,
+                    audioMeters = audioMeters,
+                    chatMessages = chatMessages,
+                    reducedMotion = false,
+                    dualTelemetry = dualTelemetry,
+                    cameraPermissionGranted = cameraPermissionGranted,
+                    enableLiveCameraPreview = workspace.cameraEnabled && cameraPermissionGranted,
+                    interactive = false,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                )
+            }
+
+            // Bottom scene readout bar
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Scene: ${workspace.activeScene.name} (${workspace.activeScene.layers.count { it.visible }} active layers)",
+                    fontSize = 11.sp,
+                    fontFamily = JetBrainsMonoFontFamily,
+                    color = Color(0xFF9CA3AF)
+                )
+                Surface(
+                    onClick = onDismiss,
+                    shape = RoundedCornerShape(6.dp),
+                    color = Color(0xFF1A202E),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.16f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(Icons.Rounded.Close, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                        Text("Close Preview", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Medium)
+                    }
+                }
+            }
         }
     }
 }

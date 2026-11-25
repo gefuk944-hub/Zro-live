@@ -33,6 +33,8 @@ import com.example.data.model.VideoResolution
 import com.example.data.model.ZroAppSettings
 import com.example.studio.StudioPersistence
 import com.example.studio.StudioWorkspaceState
+import com.example.telemetry.ActiveLiveSessionSnapshot
+import com.example.telemetry.SavedLiveConfigProfile
 import com.example.ui.theme.ZroThemeStyle
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -140,25 +142,22 @@ class SettingsStore(private val context: Context) {
         val BACKUP_RTMP_URL = stringPreferencesKey("backup_rtmp_url")
         val USE_RTMPS = booleanPreferencesKey("use_rtmps")
         val USE_BACKUP_SERVER = booleanPreferencesKey("use_backup_server")
+        val ACTIVE_LIVE_SNAPSHOT_JSON = stringPreferencesKey("active_live_snapshot_json")
+        val SAVED_LIVE_PROFILES_JSON = stringPreferencesKey("saved_live_profiles_json")
     }
 
     val settingsFlow: Flow<ZroAppSettings> = context.zroDataStore.data
         .catch { emit(androidx.datastore.preferences.core.emptyPreferences()) }
         .map { p ->
-            val explicitFullScreen = p[Keys.FULL_SCREEN_EXPLICIT] ?: false
-            val savedCaptureMode = CaptureMode.fromName(p[Keys.CAPTURE_MODE])
-            // Enforce privacy rule: never activate FULL_SCREEN unless explicitly enabled
-            val effectiveCaptureMode = if (savedCaptureMode == CaptureMode.FULL_SCREEN && !explicitFullScreen) {
-                CaptureMode.GAME_APP_ONLY
-            } else {
-                savedCaptureMode
-            }
+            val explicitFullScreen = p[Keys.FULL_SCREEN_EXPLICIT] ?: true
+            val effectiveCaptureMode = p[Keys.CAPTURE_MODE]?.let { CaptureMode.fromName(it) }
+                ?: CaptureMode.FULL_SCREEN
 
             ZroAppSettings(
                 stream = StreamSettings(
                     platform = StreamPlatform.fromName(p[Keys.STREAM_PLATFORM]),
-                    rtmpUrl = p[Keys.RTMP_URL] ?: "rtmp://a.rtmp.youtube.com/live2",
-                    backupRtmpUrl = p[Keys.BACKUP_RTMP_URL] ?: "rtmp://b.rtmp.youtube.com/live2",
+                    rtmpUrl = p[Keys.RTMP_URL] ?: "",
+                    backupRtmpUrl = p[Keys.BACKUP_RTMP_URL] ?: "",
                     useRtmps = p[Keys.USE_RTMPS] ?: false,
                     useBackupServer = p[Keys.USE_BACKUP_SERVER] ?: false,
                     streamKey = p[Keys.STREAM_KEY] ?: "",
@@ -245,11 +244,92 @@ class SettingsStore(private val context: Context) {
         .map { p -> parseLocalSessions(p[Keys.LOCAL_SESSIONS_JSON]) }
 
     suspend fun appendLocalSession(session: StreamSessionDoc) {
+        upsertLocalSession(session)
+    }
+
+    /**
+     * Upserts a broadcast session by its unique sessionId so reconnecting after a crash
+     * or disconnect updates the exact same broadcast instead of creating duplicates.
+     */
+    suspend fun upsertLocalSession(session: StreamSessionDoc) {
         context.zroDataStore.edit { p ->
             val current = parseLocalSessions(p[Keys.LOCAL_SESSIONS_JSON]).toMutableList()
-            current.add(0, session)
-            val trimmed = current.take(12)
+            val existingIdx = current.indexOfFirst { it.id == session.id && session.id.isNotBlank() }
+            if (existingIdx >= 0) {
+                val prev = current[existingIdx]
+                val merged = session.copy(
+                    durationSec = maxOf(prev.durationSec, session.durationSec),
+                    peakBitrateKbps = maxOf(prev.peakBitrateKbps, session.peakBitrateKbps),
+                    startedAtEpochMs = if (prev.startedAtEpochMs > 0L) prev.startedAtEpochMs else session.startedAtEpochMs
+                )
+                current.removeAt(existingIdx)
+                current.add(0, merged)
+            } else {
+                current.add(0, session)
+            }
+            val trimmed = current.take(30)
             p[Keys.LOCAL_SESSIONS_JSON] = serializeLocalSessions(trimmed)
+        }
+    }
+
+    suspend fun deleteLocalSession(sessionId: String) {
+        context.zroDataStore.edit { p ->
+            val current = parseLocalSessions(p[Keys.LOCAL_SESSIONS_JSON])
+                .filterNot { it.id == sessionId }
+            p[Keys.LOCAL_SESSIONS_JSON] = serializeLocalSessions(current)
+        }
+    }
+
+    // --- CRASH RECOVERY SNAPSHOT (NEVER STORES STREAM KEY IN CLEAR LOGS) ---
+
+    val activeLiveSnapshotFlow: Flow<ActiveLiveSessionSnapshot?> = context.zroDataStore.data
+        .catch { emit(androidx.datastore.preferences.core.emptyPreferences()) }
+        .map { p -> parseActiveLiveSnapshot(p[Keys.ACTIVE_LIVE_SNAPSHOT_JSON]) }
+
+    suspend fun saveActiveLiveSnapshot(snapshot: ActiveLiveSessionSnapshot) {
+        context.zroDataStore.edit { p ->
+            p[Keys.ACTIVE_LIVE_SNAPSHOT_JSON] = serializeActiveLiveSnapshot(snapshot)
+        }
+    }
+
+    suspend fun markActiveLiveCleanlyEnded() {
+        context.zroDataStore.edit { p ->
+            val cur = parseActiveLiveSnapshot(p[Keys.ACTIVE_LIVE_SNAPSHOT_JSON])
+            if (cur != null) {
+                p[Keys.ACTIVE_LIVE_SNAPSHOT_JSON] = serializeActiveLiveSnapshot(
+                    cur.copy(cleanlyEnded = true, lastUpdatedEpochMs = System.currentTimeMillis())
+                )
+            }
+        }
+    }
+
+    suspend fun clearActiveLiveSnapshot() {
+        context.zroDataStore.edit { p ->
+            p.remove(Keys.ACTIVE_LIVE_SNAPSHOT_JSON)
+        }
+    }
+
+    // --- SAVED LIVE CONFIGURATION PROFILES ---
+
+    val savedLiveProfilesFlow: Flow<List<SavedLiveConfigProfile>> = context.zroDataStore.data
+        .catch { emit(androidx.datastore.preferences.core.emptyPreferences()) }
+        .map { p -> parseSavedProfiles(p[Keys.SAVED_LIVE_PROFILES_JSON]) }
+
+    suspend fun saveLiveConfigProfile(profile: SavedLiveConfigProfile) {
+        context.zroDataStore.edit { p ->
+            val current = parseSavedProfiles(p[Keys.SAVED_LIVE_PROFILES_JSON]).toMutableList()
+            val idx = current.indexOfFirst { it.id == profile.id }
+            if (idx >= 0) current.removeAt(idx)
+            current.add(0, profile)
+            p[Keys.SAVED_LIVE_PROFILES_JSON] = serializeSavedProfiles(current.take(20))
+        }
+    }
+
+    suspend fun deleteLiveConfigProfile(profileId: String) {
+        context.zroDataStore.edit { p ->
+            val current = parseSavedProfiles(p[Keys.SAVED_LIVE_PROFILES_JSON])
+                .filterNot { it.id == profileId }
+            p[Keys.SAVED_LIVE_PROFILES_JSON] = serializeSavedProfiles(current)
         }
     }
 
@@ -401,8 +481,8 @@ class SettingsStore(private val context: Context) {
                     add(
                         StreamSessionDoc(
                             id = obj.optString("id", "local_$i"),
-                            userId = "guest",
-                            title = obj.optString("title", "Local Broadcast"),
+                            userId = obj.optString("userId", "guest"),
+                            title = obj.optString("title", "Live Broadcast"),
                             visibility = obj.optString("visibility", "PUBLIC"),
                             resolutionLabel = obj.optString("resolutionLabel", "720p"),
                             fps = obj.optLong("fps", 30L),
@@ -410,7 +490,11 @@ class SettingsStore(private val context: Context) {
                             durationSec = obj.optLong("durationSec", 0L),
                             droppedFrames = obj.optLong("droppedFrames", 0L),
                             peakBitrateKbps = obj.optLong("peakBitrateKbps", 0L),
-                            status = obj.optString("status", "ENDED")
+                            status = obj.optString("status", "ENDED"),
+                            platformLabel = obj.optString("platformLabel", "RTMP Live"),
+                            rtmpUrl = obj.optString("rtmpUrl", ""),
+                            sceneSlotName = obj.optString("sceneSlotName", "SCENE_1"),
+                            startedAtEpochMs = obj.optLong("startedAtEpochMs", 0L)
                         )
                     )
                 }
@@ -424,6 +508,7 @@ class SettingsStore(private val context: Context) {
             arr.put(
                 JSONObject().apply {
                     put("id", s.id)
+                    put("userId", s.userId)
                     put("title", s.title)
                     put("visibility", s.visibility)
                     put("resolutionLabel", s.resolutionLabel)
@@ -433,6 +518,99 @@ class SettingsStore(private val context: Context) {
                     put("droppedFrames", s.droppedFrames)
                     put("peakBitrateKbps", s.peakBitrateKbps)
                     put("status", s.status)
+                    put("platformLabel", s.platformLabel)
+                    put("rtmpUrl", s.rtmpUrl)
+                    put("sceneSlotName", s.sceneSlotName)
+                    put("startedAtEpochMs", s.startedAtEpochMs)
+                }
+            )
+        }
+        return arr.toString()
+    }
+
+    private fun parseActiveLiveSnapshot(raw: String?): ActiveLiveSessionSnapshot? {
+        if (raw.isNullOrBlank()) return null
+        return runCatching {
+            val obj = JSONObject(raw)
+            val id = obj.optString("sessionId", "")
+            if (id.isBlank()) return null
+            ActiveLiveSessionSnapshot(
+                sessionId = id,
+                title = obj.optString("title", "Live Broadcast"),
+                rtmpUrl = obj.optString("rtmpUrl", ""),
+                platformLabel = obj.optString("platformLabel", "RTMP Live"),
+                resolutionName = obj.optString("resolutionName", "HD_720P"),
+                fps = obj.optInt("fps", 30),
+                bitrateKbps = obj.optInt("bitrateKbps", 4500),
+                activeSceneSlotName = obj.optString("activeSceneSlotName", "SCENE_1"),
+                startedAtEpochMs = obj.optLong("startedAtEpochMs", 0L),
+                lastUpdatedEpochMs = obj.optLong("lastUpdatedEpochMs", 0L),
+                durationSec = obj.optLong("durationSec", 0L),
+                cleanlyEnded = obj.optBoolean("cleanlyEnded", false),
+                lastError = obj.optString("lastError", "").takeIf { it.isNotBlank() }
+            )
+        }.getOrNull()
+    }
+
+    private fun serializeActiveLiveSnapshot(s: ActiveLiveSessionSnapshot): String {
+        return JSONObject().apply {
+            put("sessionId", s.sessionId)
+            put("title", s.title)
+            put("rtmpUrl", s.rtmpUrl)
+            put("platformLabel", s.platformLabel)
+            put("resolutionName", s.resolutionName)
+            put("fps", s.fps)
+            put("bitrateKbps", s.bitrateKbps)
+            put("activeSceneSlotName", s.activeSceneSlotName)
+            put("startedAtEpochMs", s.startedAtEpochMs)
+            put("lastUpdatedEpochMs", s.lastUpdatedEpochMs)
+            put("durationSec", s.durationSec)
+            put("cleanlyEnded", s.cleanlyEnded)
+            put("lastError", s.lastError ?: "")
+        }.toString()
+    }
+
+    private fun parseSavedProfiles(raw: String?): List<SavedLiveConfigProfile> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return runCatching {
+            val arr = JSONArray(raw)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    add(
+                        SavedLiveConfigProfile(
+                            id = obj.optString("id", "profile_$i"),
+                            name = obj.optString("name", "Saved Profile"),
+                            title = obj.optString("title", "Live Broadcast"),
+                            rtmpUrl = obj.optString("rtmpUrl", ""),
+                            platformLabel = obj.optString("platformLabel", "RTMP Live"),
+                            resolutionName = obj.optString("resolutionName", "HD_720P"),
+                            fps = obj.optInt("fps", 30),
+                            bitrateKbps = obj.optInt("bitrateKbps", 4500),
+                            sceneSlotName = obj.optString("sceneSlotName", "SCENE_1"),
+                            updatedAtEpochMs = obj.optLong("updatedAtEpochMs", 0L)
+                        )
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun serializeSavedProfiles(profiles: List<SavedLiveConfigProfile>): String {
+        val arr = JSONArray()
+        profiles.forEach { p ->
+            arr.put(
+                JSONObject().apply {
+                    put("id", p.id)
+                    put("name", p.name)
+                    put("title", p.title)
+                    put("rtmpUrl", p.rtmpUrl)
+                    put("platformLabel", p.platformLabel)
+                    put("resolutionName", p.resolutionName)
+                    put("fps", p.fps)
+                    put("bitrateKbps", p.bitrateKbps)
+                    put("sceneSlotName", p.sceneSlotName)
+                    put("updatedAtEpochMs", p.updatedAtEpochMs)
                 }
             )
         }

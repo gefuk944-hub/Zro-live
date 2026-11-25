@@ -37,6 +37,7 @@ import androidx.compose.material.icons.rounded.Cameraswitch
 import androidx.compose.material.icons.rounded.Crop
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.LinkOff
@@ -95,6 +96,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.AudioMeterState
 import com.example.data.model.AudioSettings
+import com.example.data.model.LiveVideoSource
 import com.example.data.model.StreamLifecycleState
 import com.example.data.model.StreamRuntimeTelemetry
 import com.example.data.model.YouTubeChatMessage
@@ -188,7 +190,8 @@ fun DualPhoneStudioScreen(
     onRenameScreenCapture: (String) -> Unit = {},
     onToggleLayerLock: (String) -> Unit = {},
     onToggleLayerVisibility: (String) -> Unit = {},
-    onSwitchScene: (SceneSlot) -> Unit = {}
+    onSwitchScene: (SceneSlot) -> Unit = {},
+    onOpenFullScreenPreview: () -> Unit = {}
 ) {
     var activeSection by remember(initialSection) { mutableStateOf(initialSection) }
     var showStopConfirm by remember { mutableStateOf(false) }
@@ -438,39 +441,103 @@ fun DualPhoneStudioScreen(
                                 .padding(horizontal = 8.dp, vertical = 6.dp),
                             verticalArrangement = Arrangement.spacedBy(5.dp)
                         ) {
-                            // Compact Preview Header
+                            // Compact OBS-style Preview Header with Prominent Layers & 16:9 Preview Controls
+                            val usingSecondPhoneSource = streamTelemetry.activeVideoSource == LiveVideoSource.REMOTE_SECOND_PHONE ||
+                                (dualTelemetry.linkState == DualLinkState.CONNECTED && dualTelemetry.role == DualPhoneRole.PHONE2_STUDIO)
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(
-                                    text = "Live Studio Preview — ${activeScene.name}",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Color.White,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Box(
-                                        modifier = Modifier
-                                            .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(5.dp))
-                                            .clickable(onClick = onOpenSceneEditor)
-                                            .padding(horizontal = 7.dp, vertical = 3.dp),
-                                        contentAlignment = Alignment.Center
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Live Studio Preview — ${activeScene.name}",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = if (usingSecondPhoneSource) {
+                                            "Source: 2nd Phone Screen (Phone 1 capture paused)"
+                                        } else {
+                                            "Source: This Phone Full Screen"
+                                        },
+                                        fontSize = 9.sp,
+                                        lineHeight = 12.sp,
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        color = if (usingSecondPhoneSource) ZroEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.testTag("remote_active_source_badge")
+                                    )
+                                }
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Surface(
+                                        onClick = onOpenSceneEditor,
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = ZroCobalt.copy(alpha = 0.24f),
+                                        border = BorderStroke(1.dp, ZroCobalt),
+                                        modifier = Modifier.testTag("remote_layers_btn")
                                     ) {
-                                        Text("Studio", fontSize = 9.sp, lineHeight = 12.sp, color = Color.White)
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Layers,
+                                                contentDescription = "Open Layers Panel",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(12.dp)
+                                            )
+                                            Text(
+                                                text = "Layers",
+                                                fontSize = 10.sp,
+                                                lineHeight = 12.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = Color.White
+                                            )
+                                        }
                                     }
-                                    Box(
-                                        modifier = Modifier
-                                            .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(5.dp))
-                                            .clickable(onClick = onOpenCameraSettings)
-                                            .padding(horizontal = 7.dp, vertical = 3.dp),
-                                        contentAlignment = Alignment.Center
+                                    Surface(
+                                        onClick = onOpenFullScreenPreview,
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = MaterialTheme.colorScheme.surfaceContainer,
+                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.65f)),
+                                        modifier = Modifier.testTag("remote_fullscreen_preview_btn")
                                     ) {
-                                        Text("Cam", fontSize = 9.sp, lineHeight = 12.sp, color = Color.White)
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Fullscreen,
+                                                contentDescription = "16:9 Live Preview",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(12.dp)
+                                            )
+                                            Text("16:9", fontSize = 9.sp, lineHeight = 12.sp, color = Color.White)
+                                        }
+                                    }
+                                    Surface(
+                                        onClick = onOpenCameraSettings,
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = MaterialTheme.colorScheme.surfaceContainer,
+                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.65f))
+                                    ) {
+                                        Text(
+                                            text = "Cam",
+                                            fontSize = 9.sp,
+                                            lineHeight = 12.sp,
+                                            color = Color.White,
+                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp)
+                                        )
                                     }
                                 }
                             }

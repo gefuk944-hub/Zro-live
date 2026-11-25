@@ -87,6 +87,8 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.chat.YouTubeLiveChatClient
 import com.example.data.SettingsStore
 import com.example.data.model.CaptureMode
+import com.example.data.model.LiveVideoSource
+import com.example.data.model.StreamLifecycleState
 import com.example.data.model.YouTubeChatState
 import com.example.data.model.ZroAppSettings
 import com.example.dualphone.DualPhoneProtocol
@@ -97,6 +99,7 @@ import com.example.streaming.ZroStreamCoordinator
 import com.example.studio.DualLinkState
 import com.example.studio.DualPhoneRole
 import com.example.telemetry.DeviceTelemetryMonitor
+import com.example.ui.components.FullScreen16x9PreviewDialog
 import com.example.ui.components.QrScannerDialog
 import com.example.ui.screens.CameraSettingsScreen
 import com.example.ui.screens.ChatControlScreen
@@ -120,7 +123,6 @@ enum class ZroNavTab(
     val unselectedIcon: ImageVector
 ) {
     HOME("Home", Icons.Rounded.Home, Icons.Outlined.Home),
-    STUDIO("Studio", Icons.Rounded.Layers, Icons.Outlined.Layers),
     DUAL("Remote", Icons.Rounded.SettingsInputComponent, Icons.Outlined.SettingsInputComponent),
     LIVE("Live", Icons.Rounded.Sensors, Icons.Outlined.Sensors),
     SETTINGS("Settings", Icons.Rounded.Settings, Icons.Outlined.Settings)
@@ -132,6 +134,7 @@ enum class ZroNavTab(
  */
 private enum class AppSubpage {
     LIVE_SETUP,
+    LAYERS_PANEL,
     CHAT,
     CAMERA_SETTINGS,
     AUDIO_STUDIO,
@@ -251,13 +254,18 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
     val youTubeAccount by viewModel.youTubeAccount.collectAsStateWithLifecycle()
     val rtmpTestResult by viewModel.rtmpTestResult.collectAsStateWithLifecycle()
     val isTestingRtmp by viewModel.isTestingRtmp.collectAsStateWithLifecycle()
+    val recoverableSession by viewModel.recoverableSession.collectAsStateWithLifecycle()
+    val savedLiveProfiles by viewModel.savedLiveProfiles.collectAsStateWithLifecycle()
+    val crashLogs by viewModel.crashLogs.collectAsStateWithLifecycle()
+    val externalCameraInventory by viewModel.externalCameraInventory.collectAsStateWithLifecycle()
 
     // Real Navigation History: tab history + pushable subpage back stack
     var currentTab by remember { mutableStateOf(ZroNavTab.HOME) }
     val tabBackStack = remember { mutableStateListOf<ZroNavTab>() }
     val subpageStack = remember { mutableStateListOf<AppSubpage>() }
-    var studioSubTab by remember { mutableStateOf(LiveStudioTab.BROADCAST) }
+    var studioSubTab by remember { mutableStateOf(LiveStudioTab.LIVE_MANAGER) }
     var showQrScanner by remember { mutableStateOf(false) }
+    var showFullScreenPreview by remember { mutableStateOf(false) }
     var cameraPermGranted by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
@@ -319,6 +327,14 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                     pushSubpage(AppSubpage.VOICE_ROOM)
                 }
             }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        viewModel.autoSwitchToRemoteEvent.collect {
+            // 2nd phone paired: automatically switch Phone 1 to Remote Control + compact preview
+            subpageStack.clear()
+            currentTab = ZroNavTab.DUAL
         }
     }
 
@@ -470,79 +486,89 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
         ensureCameraPermissionAndRun { showQrScanner = true }
     }
 
-    val launchPrivacyAwareCapture: (PendingCapturePurpose, CaptureMode, Boolean) -> Unit = { purpose, mode, bypassConfirm ->
-        // STRICT PRIVACY GUARD: Phone 2 Studio NEVER captures Phone 2's own screen!
-        if (dualTelemetry.role == DualPhoneRole.PHONE2_STUDIO) {
-            viewModel.showMessage("Phone 2 Studio only receives Phone 1's authorized gameplay and never captures Phone 2's screen.")
-            pushSubpage(AppSubpage.DUAL_PAIRING)
-        } else {
-            pendingCapturePurpose = purpose
-            val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+    val launchPrivacyAwareCapture: (PendingCapturePurpose, CaptureMode, Boolean) -> Unit = { purpose, mode, _ ->
+        pendingCapturePurpose = purpose
+        val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-            ) {
-                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
 
-            if (mode == CaptureMode.GAME_APP_ONLY) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    pendingCaptureModeLaunched = CaptureMode.GAME_APP_ONLY
-                    mediaProjectionLauncher.launch(Api34ProjectionHelper.createSingleAppIntent(mgr))
-                } else {
-                    showAndroid13CaptureLimitDialog = true
-                }
+        if (mode == CaptureMode.GAME_APP_ONLY) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                pendingCaptureModeLaunched = CaptureMode.GAME_APP_ONLY
+                mediaProjectionLauncher.launch(Api34ProjectionHelper.createSingleAppIntent(mgr))
             } else {
-                if (!settings.stream.fullScreenExplicitlyEnabled && !bypassConfirm) {
-                    showFullScreenOptInDialog = true
-                } else {
-                    pendingCaptureModeLaunched = CaptureMode.FULL_SCREEN
-                    val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                        Api34ProjectionHelper.createDefaultDisplayIntent(mgr)
-                    } else {
-                        mgr.createScreenCaptureIntent()
-                    }
-                    mediaProjectionLauncher.launch(intent)
-                }
+                showAndroid13CaptureLimitDialog = true
             }
+        } else {
+            // Default 1-phone full-screen capture starts directly without blocking opt-in dialog
+            pendingCaptureModeLaunched = CaptureMode.FULL_SCREEN
+            val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                Api34ProjectionHelper.createDefaultDisplayIntent(mgr)
+            } else {
+                mgr.createScreenCaptureIntent()
+            }
+            mediaProjectionLauncher.launch(intent)
         }
     }
 
     val requestSelectGameCapture: () -> Unit = {
-        launchPrivacyAwareCapture(PendingCapturePurpose.PREVIEW_ONLY, settings.stream.captureMode, false)
+        launchPrivacyAwareCapture(PendingCapturePurpose.PREVIEW_ONLY, settings.stream.captureMode, true)
     }
 
     val requestStartBroadcast: () -> Unit = {
-        if (dualTelemetry.role == DualPhoneRole.PHONE2_STUDIO) {
-            if (dualTelemetry.linkState == DualLinkState.CONNECTED) {
-                viewModel.dispatchRemoteControl(DualRemoteCommand(DualPhoneProtocol.CMD_START_LIVE))
-            } else {
-                viewModel.showMessage("Phone 1 is disconnected. Connect Phone 1 first — Phone 2 never captures its own screen.")
-                pushSubpage(AppSubpage.DUAL_PAIRING)
-            }
+        val streamCheck = RtmpPublisher.validateConfig(
+            primaryUrl = settings.stream.effectivePrimaryServerUrl(),
+            backupUrl = settings.stream.effectiveBackupServerUrl(),
+            streamKey = settings.stream.streamKey
+        )
+        if (!streamCheck.valid) {
+            pushSubpage(AppSubpage.LIVE_SETUP)
+            viewModel.showMessage(streamCheck.errorMessage ?: "Enter your Stream RTMP URL and Stream Key in Live Setup.")
         } else {
-            val streamCheck = RtmpPublisher.validateConfig(
-                primaryUrl = settings.stream.effectivePrimaryServerUrl(),
-                backupUrl = settings.stream.effectiveBackupServerUrl(),
-                streamKey = settings.stream.streamKey
-            )
-            if (!streamCheck.valid) {
-                pushSubpage(AppSubpage.LIVE_SETUP)
-                viewModel.showMessage(streamCheck.errorMessage ?: "Enter your Stream Key in Live Setup before going live.")
-            } else {
-                val proceedStart = {
-                    if (streamTelemetry.captureActive && ZroStreamCoordinator.isCaptureActive()) {
+            val secondPhoneConnected = dualTelemetry.linkState == DualLinkState.CONNECTED &&
+                dualTelemetry.role == DualPhoneRole.PHONE2_STUDIO
+            val proceedStart = {
+                when {
+                    secondPhoneConnected -> {
+                        // 2nd phone is already paired: stream its screen directly & show Remote Control on Phone 1
+                        viewModel.startBroadcastFromSecondPhone()
+                        subpageStack.clear()
+                        currentTab = ZroNavTab.DUAL
+                    }
+                    streamTelemetry.captureActive && ZroStreamCoordinator.isCaptureActive() -> {
                         viewModel.startBroadcastFromExistingCapture()
-                    } else {
-                        launchPrivacyAwareCapture(PendingCapturePurpose.GO_LIVE_DIRECT, settings.stream.captureMode, false)
+                    }
+                    else -> {
+                        // Default 1-phone mode: capture full screen of this phone immediately and start live
+                        launchPrivacyAwareCapture(PendingCapturePurpose.GO_LIVE_DIRECT, settings.stream.captureMode, true)
                     }
                 }
-                if (settings.audio.micEnabled) {
-                    ensureMicPermissionAndRun(proceedStart)
-                } else {
-                    proceedStart()
-                }
             }
+            if (settings.audio.micEnabled) {
+                ensureMicPermissionAndRun(proceedStart)
+            } else {
+                proceedStart()
+            }
+        }
+    }
+
+    val handleReconnectPreviousLive: () -> Unit = {
+        if (viewModel.prepareReconnectPreviousLive()) {
+            requestStartBroadcast()
+        } else {
+            pushSubpage(AppSubpage.LIVE_SETUP)
+        }
+    }
+
+    val handleResumeSavedSession: (com.example.data.model.StreamSessionDoc) -> Unit = { session ->
+        if (viewModel.prepareResumeSavedSession(session)) {
+            requestStartBroadcast()
+        } else {
+            pushSubpage(AppSubpage.LIVE_SETUP)
         }
     }
 
@@ -631,6 +657,31 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
     val reducedMotion = settings.performance.reduceAnimationsDuringGameplay || settings.performance.lowRamMode
     val connectedChatMessages = (chatState as? YouTubeChatState.Connected)?.messages.orEmpty()
     val activeSubpage = subpageStack.lastOrNull()
+
+    if (showFullScreenPreview) {
+        val isLiveNow = streamTelemetry.state == StreamLifecycleState.LIVE
+        val sourceLabel = if (streamTelemetry.activeVideoSource == LiveVideoSource.REMOTE_SECOND_PHONE ||
+            (dualTelemetry.linkState == DualLinkState.CONNECTED && dualTelemetry.role == DualPhoneRole.PHONE2_STUDIO)
+        ) {
+            "2nd Phone Screen"
+        } else {
+            "This Phone Full Screen"
+        }
+        FullScreen16x9PreviewDialog(
+            workspace = studioWorkspace,
+            mirroredFrame = mirroredFrame,
+            audioMeters = audioMeters,
+            chatMessages = connectedChatMessages,
+            dualTelemetry = dualTelemetry,
+            cameraPermissionGranted = cameraPermGranted,
+            resolutionLabel = settings.stream.resolution.shortLabel,
+            fps = settings.stream.fps,
+            statusLabel = streamTelemetry.state.displayLabel,
+            sourceLabel = sourceLabel,
+            isLive = isLiveNow,
+            onDismiss = { showFullScreenPreview = false }
+        )
+    }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val useNavigationRail = maxWidth >= 680.dp
@@ -750,7 +801,7 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                             onOpenAudioStudio = { pushSubpage(AppSubpage.AUDIO_STUDIO) },
                             onOpenDualPairing = { pushSubpage(AppSubpage.DUAL_PAIRING) },
                             onOpenCameraSettings = { pushSubpage(AppSubpage.CAMERA_SETTINGS) },
-                            onOpenSceneStudio = { selectTopTab(ZroNavTab.STUDIO) },
+                            onOpenSceneStudio = { pushSubpage(AppSubpage.LAYERS_PANEL) },
                             onStartLive = requestStartBroadcast,
                             onStopLive = { viewModel.endStream() },
                             youTubeAccount = youTubeAccount,
@@ -760,6 +811,103 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                             onDisconnectYouTubeAccount = { viewModel.signOutYouTubeAccount() },
                             onSaveConfiguration = { viewModel.saveStreamConfiguration() },
                             onTestConnection = { viewModel.testRtmpConnection() }
+                        )
+
+                        AppSubpage.LAYERS_PANEL -> ObsSceneStudioScreen(
+                            workspace = studioWorkspace,
+                            mirroredFrame = mirroredFrame,
+                            audioMeters = audioMeters,
+                            chatMessages = connectedChatMessages,
+                            dualTelemetry = dualTelemetry,
+                            cameraPermissionGranted = cameraPermGranted,
+                            canUndo = canUndo,
+                            canRedo = canRedo,
+                            reducedMotion = reducedMotion,
+                            onBack = popBack,
+                            onSwitchScene = { viewModel.switchScene(it) },
+                            onRenameActiveScene = { viewModel.renameActiveScene(it) },
+                            onToggleSceneLock = { viewModel.toggleSceneLock() },
+                            onToggleSceneVertical = { viewModel.toggleActiveSceneVertical() },
+                            onUpdateTransition = { t, dur -> viewModel.updateSceneTransition(t, dur) },
+                            onUndo = { viewModel.undoStudio() },
+                            onRedo = { viewModel.redoStudio() },
+                            onSetGridMode = { viewModel.setCanvasGridMode(it) },
+                            onSaveLayoutExplicit = { viewModel.saveScreenLayoutExplicitly() },
+                            onSetAutoRestoreLastLayout = { viewModel.setAutoRestoreLastLayout(it) },
+                            onResetLayoutConfirmed = { viewModel.resetEntireLayoutConfirmed() },
+                            onResetActiveScene = { viewModel.resetActiveSceneToDefault() },
+                            onSelectLayer = { viewModel.selectLayer(it) },
+                            onToggleLayerLock = { viewModel.toggleLayerLock(it) },
+                            onToggleLayerVisibility = { viewModel.toggleLayerVisibility(it) },
+                            onMoveLayerBy = { id, dx, dy -> viewModel.moveLayerBy(id, dx, dy) },
+                            onResizeLayerCorner = { id, corner, dx, dy, prop ->
+                                viewModel.resizeLayerFromCorner(id, corner, dx, dy, prop)
+                            },
+                            onDragFinished = { viewModel.persistCurrentStudioState() },
+                            onUpdateLayerProps = { id, transform -> viewModel.updateLayerProps(id, transform) },
+                            onCenterH = { viewModel.centerLayerHorizontally(it) },
+                            onCenterV = { viewModel.centerLayerVertically(it) },
+                            onFitCanvas = { viewModel.fitLayerFullCanvas(it) },
+                            onFillCanvas = { viewModel.fillLayerCanvas(it) },
+                            onResetTransform = { viewModel.resetLayerTransform(it) },
+                            onMoveLayerZOrder = { id, forward -> viewModel.moveLayerZOrder(id, forward) },
+                            onDuplicateLayer = { viewModel.duplicateLayer(it) },
+                            onDeleteLayer = { viewModel.deleteLayer(it) },
+                            onAddLayerSource = { viewModel.addLayerSource(it) },
+                            onPickImageOverlay = {
+                                imageOverlayPicker.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                )
+                            },
+                            onPickVideoOverlay = {
+                                videoOverlayPicker.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
+                                )
+                            },
+                            onPickBackgroundMediaForLayer = { layerId ->
+                                pendingBgLayerId = layerId
+                                layerBackgroundPicker.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                )
+                            },
+                            onUpdateCanvasOptions = { grid, snap, safe, zoom ->
+                                viewModel.updateCanvasOptions(grid, snap, safe, zoom)
+                            },
+                            onOpenCameraSettings = { pushSubpage(AppSubpage.CAMERA_SETTINGS) },
+                            onReconnectPeer = { viewModel.reconnectDualPhone() },
+                            onUpdateLayerGraphicAdjustmentLive = { id, transform ->
+                                viewModel.updateLayerGraphicAdjustmentLive(id, transform)
+                            },
+                            onApplyGraphicPreset = { id, preset ->
+                                viewModel.applyGraphicPresetToLayer(id, preset)
+                            },
+                            onApplyCustomGraphicPreset = { id, custom ->
+                                viewModel.applyCustomGraphicPresetToLayer(id, custom)
+                            },
+                            onSaveCustomGraphicPreset = { name, adj ->
+                                viewModel.saveCustomGraphicPreset(name, adj)
+                            },
+                            onDeleteCustomGraphicPreset = { presetId ->
+                                viewModel.deleteCustomGraphicPreset(presetId)
+                            },
+                            onResetLayerGraphicAdjustment = { id ->
+                                viewModel.resetLayerGraphicAdjustment(id)
+                            },
+                            onCopyGraphicAdjustmentToLayer = { srcId, dstId ->
+                                viewModel.copyGraphicAdjustmentToLayer(srcId, dstId)
+                            },
+                            screenCaptureName = settings.stream.screenCaptureName,
+                            onCropLayerEdge = { id, edge, delta -> viewModel.cropLayerEdgeLive(id, edge, delta) },
+                            onSetLayerCropLive = { id, l, t, r, b -> viewModel.setLayerCropLive(id, l, t, r, b) },
+                            onApplyCropAspectPreset = { id, preset -> viewModel.applyLayerCropAspectPreset(id, preset) },
+                            onResetLayerCrop = { id -> viewModel.resetLayerCrop(id) },
+                            onRenameLayer = { id, name -> viewModel.renameLayer(id, name) },
+                            onRenameScreenCapture = { viewModel.renameScreenCapture(it) },
+                            onMergeLayers = { ids, name -> viewModel.mergeLayers(ids, name) },
+                            onUnmergeLayer = { id -> viewModel.unmergeLayer(id) },
+                            onMoveLayerTo = { id, x, y -> viewModel.moveLayerTo(id, x, y) },
+                            onReloadBrowserLayer = { id -> viewModel.reloadBrowserLayer(id) },
+                            onOpenFullScreenPreview = { showFullScreenPreview = true }
                         )
 
                         AppSubpage.CHAT -> ChatControlScreen(
@@ -789,7 +937,9 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                             onSelectCameraSource = { viewModel.setCameraSourceMode(it) },
                             onUpdateFacecamLayer = { viewModel.updateFacecamForActiveScene(it) },
                             onToggleFacecamLock = { viewModel.toggleLayerLock(it) },
-                            onSaveLayout = { viewModel.saveScreenLayoutExplicitly() }
+                            onSaveLayout = { viewModel.saveScreenLayoutExplicitly() },
+                            externalCameraInventory = externalCameraInventory,
+                            onRefreshExternalCameras = { viewModel.refreshExternalCameras() }
                         )
 
                         AppSubpage.AUDIO_STUDIO -> LiveStudioScreen(
@@ -860,7 +1010,7 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                             onOpenChatPage = { pushSubpage(AppSubpage.CHAT) },
                             onOpenAudioStudio = { pushSubpage(AppSubpage.AUDIO_STUDIO) },
                             onOpenCameraSettings = { pushSubpage(AppSubpage.CAMERA_SETTINGS) },
-                            onOpenSceneEditor = { selectTopTab(ZroNavTab.STUDIO) },
+                            onOpenSceneEditor = { pushSubpage(AppSubpage.LAYERS_PANEL) },
                             onMoveRemoteTile = { id, up -> viewModel.moveRemoteTile(id, up) },
                             onAddRemoteTile = { viewModel.addRemoteTile(it) },
                             onRemoveRemoteTile = { viewModel.removeRemoteTile(it) },
@@ -879,7 +1029,8 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                             onRenameScreenCapture = { viewModel.renameScreenCapture(it) },
                             onToggleLayerLock = { viewModel.toggleLayerLock(it) },
                             onToggleLayerVisibility = { viewModel.toggleLayerVisibility(it) },
-                            onSwitchScene = { viewModel.switchScene(it) }
+                            onSwitchScene = { viewModel.switchScene(it) },
+                            onOpenFullScreenPreview = { showFullScreenPreview = true }
                         )
 
                         AppSubpage.VOICE_ROOM -> VoiceRoomScreen(
@@ -927,108 +1078,24 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                                 onOpenLiveSetup = { pushSubpage(AppSubpage.LIVE_SETUP) },
                                 onStartStreamingClick = requestStartBroadcast,
                                 onStopStreamingClick = { viewModel.endStream() },
-                                onOpenObsStudio = { selectTopTab(ZroNavTab.STUDIO) },
+                                onOpenObsStudio = { pushSubpage(AppSubpage.LAYERS_PANEL) },
                                 onOpenRemoteDeck = { selectTopTab(ZroNavTab.DUAL) },
                                 onOpenDualPairing = { pushSubpage(AppSubpage.DUAL_PAIRING) },
                                 onOpenAudioSettings = { pushSubpage(AppSubpage.AUDIO_STUDIO) },
                                 onOpenCameraSettings = { pushSubpage(AppSubpage.CAMERA_SETTINGS) },
                                 onOpenChat = { pushSubpage(AppSubpage.CHAT) },
-                                onOpenVoiceRoom = { pushSubpage(AppSubpage.VOICE_ROOM) }
-                            )
-
-                            ZroNavTab.STUDIO -> ObsSceneStudioScreen(
-                                workspace = studioWorkspace,
+                                onOpenVoiceRoom = { pushSubpage(AppSubpage.VOICE_ROOM) },
+                                recoverableSession = recoverableSession,
                                 mirroredFrame = mirroredFrame,
                                 audioMeters = audioMeters,
-                                chatMessages = connectedChatMessages,
-                                dualTelemetry = dualTelemetry,
                                 cameraPermissionGranted = cameraPermGranted,
-                                canUndo = canUndo,
-                                canRedo = canRedo,
-                                reducedMotion = reducedMotion,
-                                onSwitchScene = { viewModel.switchScene(it) },
-                                onRenameActiveScene = { viewModel.renameActiveScene(it) },
-                                onToggleSceneLock = { viewModel.toggleSceneLock() },
-                                onToggleSceneVertical = { viewModel.toggleActiveSceneVertical() },
-                                onUpdateTransition = { t, dur -> viewModel.updateSceneTransition(t, dur) },
-                                onUndo = { viewModel.undoStudio() },
-                                onRedo = { viewModel.redoStudio() },
-                                onSetGridMode = { viewModel.setCanvasGridMode(it) },
-                                onSaveLayoutExplicit = { viewModel.saveScreenLayoutExplicitly() },
-                                onSetAutoRestoreLastLayout = { viewModel.setAutoRestoreLastLayout(it) },
-                                onResetLayoutConfirmed = { viewModel.resetEntireLayoutConfirmed() },
-                                onResetActiveScene = { viewModel.resetActiveSceneToDefault() },
-                                onSelectLayer = { viewModel.selectLayer(it) },
-                                onToggleLayerLock = { viewModel.toggleLayerLock(it) },
-                                onToggleLayerVisibility = { viewModel.toggleLayerVisibility(it) },
-                                onMoveLayerBy = { id, dx, dy -> viewModel.moveLayerBy(id, dx, dy) },
-                                onResizeLayerCorner = { id, corner, dx, dy, prop ->
-                                    viewModel.resizeLayerFromCorner(id, corner, dx, dy, prop)
+                                onReconnectPreviousLive = handleReconnectPreviousLive,
+                                onDismissRecovery = { viewModel.dismissRecoverableSession() },
+                                onOpenLiveManager = {
+                                    studioSubTab = LiveStudioTab.LIVE_MANAGER
+                                    selectTopTab(ZroNavTab.LIVE)
                                 },
-                                onDragFinished = { viewModel.persistCurrentStudioState() },
-                                onUpdateLayerProps = { id, transform -> viewModel.updateLayerProps(id, transform) },
-                                onCenterH = { viewModel.centerLayerHorizontally(it) },
-                                onCenterV = { viewModel.centerLayerVertically(it) },
-                                onFitCanvas = { viewModel.fitLayerFullCanvas(it) },
-                                onFillCanvas = { viewModel.fillLayerCanvas(it) },
-                                onResetTransform = { viewModel.resetLayerTransform(it) },
-                                onMoveLayerZOrder = { id, forward -> viewModel.moveLayerZOrder(id, forward) },
-                                onDuplicateLayer = { viewModel.duplicateLayer(it) },
-                                onDeleteLayer = { viewModel.deleteLayer(it) },
-                                onAddLayerSource = { viewModel.addLayerSource(it) },
-                                onPickImageOverlay = {
-                                    imageOverlayPicker.launch(
-                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                    )
-                                },
-                                onPickVideoOverlay = {
-                                    videoOverlayPicker.launch(
-                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
-                                    )
-                                },
-                                onPickBackgroundMediaForLayer = { layerId ->
-                                    pendingBgLayerId = layerId
-                                    layerBackgroundPicker.launch(
-                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                    )
-                                },
-                                onUpdateCanvasOptions = { grid, snap, safe, zoom ->
-                                    viewModel.updateCanvasOptions(grid, snap, safe, zoom)
-                                },
-                                onOpenCameraSettings = { pushSubpage(AppSubpage.CAMERA_SETTINGS) },
-                                onReconnectPeer = { viewModel.reconnectDualPhone() },
-                                onUpdateLayerGraphicAdjustmentLive = { id, transform ->
-                                    viewModel.updateLayerGraphicAdjustmentLive(id, transform)
-                                },
-                                onApplyGraphicPreset = { id, preset ->
-                                    viewModel.applyGraphicPresetToLayer(id, preset)
-                                },
-                                onApplyCustomGraphicPreset = { id, custom ->
-                                    viewModel.applyCustomGraphicPresetToLayer(id, custom)
-                                },
-                                onSaveCustomGraphicPreset = { name, adj ->
-                                    viewModel.saveCustomGraphicPreset(name, adj)
-                                },
-                                onDeleteCustomGraphicPreset = { presetId ->
-                                    viewModel.deleteCustomGraphicPreset(presetId)
-                                },
-                                onResetLayerGraphicAdjustment = { id ->
-                                    viewModel.resetLayerGraphicAdjustment(id)
-                                },
-                                onCopyGraphicAdjustmentToLayer = { srcId, dstId ->
-                                    viewModel.copyGraphicAdjustmentToLayer(srcId, dstId)
-                                },
-                                screenCaptureName = settings.stream.screenCaptureName,
-                                onCropLayerEdge = { id, edge, delta -> viewModel.cropLayerEdgeLive(id, edge, delta) },
-                                onSetLayerCropLive = { id, l, t, r, b -> viewModel.setLayerCropLive(id, l, t, r, b) },
-                                onApplyCropAspectPreset = { id, preset -> viewModel.applyLayerCropAspectPreset(id, preset) },
-                                onResetLayerCrop = { id -> viewModel.resetLayerCrop(id) },
-                                onRenameLayer = { id, name -> viewModel.renameLayer(id, name) },
-                                onRenameScreenCapture = { viewModel.renameScreenCapture(it) },
-                                onMergeLayers = { ids, name -> viewModel.mergeLayers(ids, name) },
-                                onUnmergeLayer = { id -> viewModel.unmergeLayer(id) },
-                                onMoveLayerTo = { id, x, y -> viewModel.moveLayerTo(id, x, y) },
-                                onReloadBrowserLayer = { id -> viewModel.reloadBrowserLayer(id) }
+                                onOpenFullScreenPreview = { showFullScreenPreview = true }
                             )
 
                             ZroNavTab.DUAL -> DualPhoneStudioScreen(
@@ -1061,7 +1128,7 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                                 onOpenChatPage = { pushSubpage(AppSubpage.CHAT) },
                                 onOpenAudioStudio = { pushSubpage(AppSubpage.AUDIO_STUDIO) },
                                 onOpenCameraSettings = { pushSubpage(AppSubpage.CAMERA_SETTINGS) },
-                                onOpenSceneEditor = { selectTopTab(ZroNavTab.STUDIO) },
+                                onOpenSceneEditor = { pushSubpage(AppSubpage.LAYERS_PANEL) },
                                 onMoveRemoteTile = { id, up -> viewModel.moveRemoteTile(id, up) },
                                 onAddRemoteTile = { viewModel.addRemoteTile(it) },
                                 onRemoveRemoteTile = { viewModel.removeRemoteTile(it) },
@@ -1080,7 +1147,8 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                                 onRenameScreenCapture = { viewModel.renameScreenCapture(it) },
                                 onToggleLayerLock = { viewModel.toggleLayerLock(it) },
                                 onToggleLayerVisibility = { viewModel.toggleLayerVisibility(it) },
-                                onSwitchScene = { viewModel.switchScene(it) }
+                                onSwitchScene = { viewModel.switchScene(it) },
+                                onOpenFullScreenPreview = { showFullScreenPreview = true }
                             )
 
                             ZroNavTab.LIVE -> LiveStudioScreen(
@@ -1095,12 +1163,7 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                                 chatState = chatState,
                                 onUpdateStreamSettings = { viewModel.updateStreamSettings(it) },
                                 onSelectCaptureMode = { mode ->
-                                    if (mode == CaptureMode.FULL_SCREEN && !settings.stream.fullScreenExplicitlyEnabled) {
-                                        pendingCapturePurpose = PendingCapturePurpose.PREVIEW_ONLY
-                                        showFullScreenOptInDialog = true
-                                    } else {
-                                        viewModel.selectCaptureMode(mode, explicitFullScreenConfirmed = settings.stream.fullScreenExplicitlyEnabled)
-                                    }
+                                    viewModel.selectCaptureMode(mode, explicitFullScreenConfirmed = true)
                                 },
                                 onSelectGameCapture = requestSelectGameCapture,
                                 onStopCapture = { viewModel.stopCapture() },
@@ -1115,7 +1178,25 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                                 onConnectChat = { viewModel.connectYouTubeLiveChat() },
                                 onDisconnectChat = { viewModel.disconnectYouTubeLiveChat() },
                                 onSendChatMessage = { viewModel.sendYouTubeChatMessage(it) },
-                                onRenameScreenCapture = { viewModel.renameScreenCapture(it) }
+                                onRenameScreenCapture = { viewModel.renameScreenCapture(it) },
+                                recoverableSession = recoverableSession,
+                                recentSessions = recentSessions,
+                                savedProfiles = savedLiveProfiles,
+                                crashLogs = crashLogs,
+                                onReconnectPreviousLive = handleReconnectPreviousLive,
+                                onDismissRecovery = { viewModel.dismissRecoverableSession() },
+                                onCreateNewLive = { title ->
+                                    viewModel.createNewLiveDraft(title)
+                                    pushSubpage(AppSubpage.LIVE_SETUP)
+                                },
+                                onOpenLiveSetup = { pushSubpage(AppSubpage.LIVE_SETUP) },
+                                onOpenFullScreenPreview = { showFullScreenPreview = true },
+                                onResumeSavedSession = handleResumeSavedSession,
+                                onDeleteSession = { viewModel.deleteSessionFromHistory(it) },
+                                onSaveCurrentProfile = { viewModel.saveCurrentConfigAsProfile(it) },
+                                onApplyProfile = { viewModel.applyLiveProfile(it) },
+                                onDeleteProfile = { viewModel.deleteLiveProfile(it) },
+                                onClearCrashLogs = { viewModel.clearCrashLogs() }
                             )
 
                             ZroNavTab.SETTINGS -> SettingsScreen(

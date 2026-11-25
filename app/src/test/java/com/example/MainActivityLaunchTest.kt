@@ -22,21 +22,37 @@ class MainActivityLaunchTest {
 
     @Test
     fun `home live setup obs studio 4 corners remote 3 column deck brb chat camera and back navigation work on android 10 and 16`() {
-        // 1. Minimal Home renders immediately with zero login wall
+        // 1. Minimal Home renders immediately with zero login wall & 16:9 Live Output Preview
         composeRule.onNodeWithText("Zro live").assertIsDisplayed()
+        composeRule.onNodeWithTag("home_fullscreen_preview_btn").assertIsDisplayed()
+        composeRule.onNodeWithTag("home_dashboard_list")
+            .performScrollToNode(hasTestTag("home_live_setup_button"))
         composeRule.onNodeWithTag("home_live_setup_button").assertIsDisplayed()
+        composeRule.onNodeWithTag("home_dashboard_list")
+            .performScrollToNode(hasTestTag("dashboard_start_stream_button"))
         composeRule.onNodeWithTag("dashboard_start_stream_button").assertIsDisplayed()
+
+        // Verify Studio tab is removed from Bottom Navigation (4 tabs only: Home, Remote, Live, Settings)
+        composeRule.onNodeWithTag("nav_studio").assertDoesNotExist()
+        composeRule.onNodeWithTag("nav_home").assertIsDisplayed()
+        composeRule.onNodeWithTag("nav_dual").assertIsDisplayed()
+        composeRule.onNodeWithTag("nav_live").assertIsDisplayed()
+        composeRule.onNodeWithTag("nav_settings").assertIsDisplayed()
 
         // 2. Home -> Live Setup -> Back returns cleanly to Home
         composeRule.onNodeWithTag("home_live_setup_button").performClick()
         composeRule.onNodeWithText("Live Setup").assertIsDisplayed()
         composeRule.onNodeWithTag("live_setup_start_live_button").assertIsDisplayed()
         composeRule.onNodeWithTag("live_setup_back_button").performClick()
+        composeRule.onNodeWithTag("home_dashboard_list")
+            .performScrollToNode(hasTestTag("home_live_setup_button"))
         composeRule.onNodeWithTag("home_live_setup_button").assertIsDisplayed()
 
-        // 3. OBS Scene Studio: 4 scene tabs, 2x6/4x4/Off grid, 4 corner handles when layer selected, Save Layout
-        composeRule.onNodeWithTag("nav_studio").performClick()
-        composeRule.onNodeWithText("OBS Scene Studio").assertIsDisplayed()
+        // 3. Remote Control -> Layers button opens complete OBS-style Layers & Studio panel with Back button
+        composeRule.onNodeWithTag("nav_dual").performClick()
+        composeRule.onNodeWithText("Remote Control").assertIsDisplayed()
+        composeRule.onNodeWithTag("remote_layers_btn").assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("Layers & Studio").assertIsDisplayed()
         composeRule.onNodeWithTag("scene_tab_gameplay_live").assertIsDisplayed()
         composeRule.onNodeWithTag("grid_mode_grid_2x6").assertIsDisplayed()
         composeRule.onNodeWithTag("grid_mode_grid_4x4").performClick()
@@ -50,10 +66,11 @@ class MainActivityLaunchTest {
         composeRule.onNodeWithTag("handle_tr", useUnmergedTree = true).assertIsDisplayed()
         composeRule.onNodeWithTag("handle_bl", useUnmergedTree = true).assertIsDisplayed()
         composeRule.onNodeWithTag("handle_br", useUnmergedTree = true).assertIsDisplayed()
+        // Back from Layers panel returns directly to Remote Control
+        composeRule.onNodeWithTag("studio_back_button").performClick()
+        composeRule.onNodeWithText("Remote Control").assertIsDisplayed()
 
         // 4. Remote Control Deck: 3-column button grid, Master Volume + Team Voice Mute, One-Touch BRB/Resume, Chat -> Back to Remote
-        composeRule.onNodeWithTag("nav_dual").performClick()
-        composeRule.onNodeWithText("Remote Control").assertIsDisplayed()
         composeRule.onNodeWithTag("remote_tile_start_live").assertIsDisplayed()
         // Scroll to Row 4 (BRB & Chat) on compact screen and trigger One-Touch BRB
         composeRule.onNodeWithTag("dual_studio_list")

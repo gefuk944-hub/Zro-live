@@ -92,8 +92,8 @@ class ZroLiveVerificationTest {
         store.saveStreamSettings(updatedStream)
         val reloaded = store.settingsFlow.first()
         assertEquals("Guest Ranked Match", reloaded.stream.streamTitle)
-        assertEquals(CaptureMode.GAME_APP_ONLY, reloaded.stream.captureMode)
-        assertFalse(reloaded.stream.fullScreenExplicitlyEnabled)
+        assertEquals(CaptureMode.FULL_SCREEN, reloaded.stream.captureMode)
+        assertTrue(reloaded.stream.fullScreenExplicitlyEnabled)
 
         store.appendLocalSession(
             StreamSessionDoc(
@@ -111,36 +111,35 @@ class ZroLiveVerificationTest {
     }
 
     @Test
-    fun `capture mode defaults to game app only and rejects full screen without explicit opt in`() = runBlocking {
+    fun `capture mode defaults to full screen for 1 phone live and supports switching to game app only`() = runBlocking {
         val store = SettingsStore(context)
 
-        // Default model guarantees privacy-first capture
+        // Default model starts ready for immediate 1-phone full-screen broadcast
         val defaultStream = StreamSettings()
-        assertEquals(CaptureMode.GAME_APP_ONLY, defaultStream.captureMode)
-        assertFalse(defaultStream.fullScreenExplicitlyEnabled)
+        assertEquals(CaptureMode.FULL_SCREEN, defaultStream.captureMode)
+        assertTrue(defaultStream.fullScreenExplicitlyEnabled)
 
-        // Attempt to persist FULL_SCREEN with fullScreenExplicitlyEnabled = false:
-        // SettingsStore privacy guard must coerce it back to GAME_APP_ONLY on read
+        // User can switch to Game / App-Only mode and persist it
         store.saveStreamSettings(
             defaultStream.copy(
-                captureMode = CaptureMode.FULL_SCREEN,
+                captureMode = CaptureMode.GAME_APP_ONLY,
                 fullScreenExplicitlyEnabled = false
             )
         )
-        val coerced = store.settingsFlow.first()
-        assertEquals(CaptureMode.GAME_APP_ONLY, coerced.stream.captureMode)
-        assertFalse(coerced.stream.fullScreenExplicitlyEnabled)
+        val gameOnly = store.settingsFlow.first()
+        assertEquals(CaptureMode.GAME_APP_ONLY, gameOnly.stream.captureMode)
+        assertFalse(gameOnly.stream.fullScreenExplicitlyEnabled)
 
-        // Explicit opt-in enables FULL_SCREEN
+        // Switching back to FULL_SCREEN persists cleanly
         store.saveStreamSettings(
             defaultStream.copy(
                 captureMode = CaptureMode.FULL_SCREEN,
                 fullScreenExplicitlyEnabled = true
             )
         )
-        val optedIn = store.settingsFlow.first()
-        assertEquals(CaptureMode.FULL_SCREEN, optedIn.stream.captureMode)
-        assertTrue(optedIn.stream.fullScreenExplicitlyEnabled)
+        val fullScreen = store.settingsFlow.first()
+        assertEquals(CaptureMode.FULL_SCREEN, fullScreen.stream.captureMode)
+        assertTrue(fullScreen.stream.fullScreenExplicitlyEnabled)
     }
 
     @Test

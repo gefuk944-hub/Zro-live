@@ -14,7 +14,11 @@ import java.net.URI
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SNIHostName
+import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLParameters
+import javax.net.ssl.SSLPeerUnverifiedException
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
@@ -41,6 +45,32 @@ class RtmpPublisher {
 
         const val YOUTUBE_PRIMARY_RTMP = "rtmp://a.rtmp.youtube.com/live2"
         const val YOUTUBE_BACKUP_RTMP = "rtmp://b.rtmp.youtube.com/live2"
+        const val YOUTUBE_PRIMARY_RTMPS = "rtmps://a.rtmps.youtube.com/live2"
+        const val YOUTUBE_BACKUP_RTMPS = "rtmps://b.rtmps.youtube.com/live2"
+
+        /**
+         * Normalizes known YouTube RTMPS ingest hostnames (YouTube's TLS cert covers *.rtmps.youtube.com,
+         * NOT a.rtmp.youtube.com). Never disables certificate or hostname validation.
+         */
+        fun normalizeEndpointUrl(rawUrl: String): String {
+            val trimmed = rawUrl.trim().trimEnd('/')
+            if (trimmed.isBlank()) return ""
+            val parsed = runCatching { URI(trimmed) }.getOrNull() ?: return trimmed
+            val scheme = parsed.scheme?.lowercase() ?: return trimmed
+            val host = parsed.host?.lowercase() ?: return trimmed
+            if (scheme == "rtmps" && (host == "a.rtmp.youtube.com" || host == "b.rtmp.youtube.com")) {
+                val fixedHost = if (host.startsWith("b.")) "b.rtmps.youtube.com" else "a.rtmps.youtube.com"
+                val portPart = if (parsed.port > 0) ":${parsed.port}" else ""
+                val pathPart = parsed.rawPath.orEmpty().ifBlank { "/live2" }
+                return "rtmps://$fixedHost$portPart$pathPart"
+            }
+            return trimmed
+        }
+
+        internal fun isDnsHostname(host: String): Boolean {
+            if (host.isBlank() || host.contains(":")) return false // IPv6 literal
+            return !host.all { it.isDigit() || it == '.' }
+        }
 
         data class ConfigValidationResult(
             val valid: Boolean,
@@ -94,7 +124,7 @@ class RtmpPublisher {
             val cleanKey = streamKey.trim()
 
             if (cleanPrimary.isBlank()) {
-                return ConfigValidationResult(false, "Primary RTMP Server URL is required (e.g. $YOUTUBE_PRIMARY_RTMP).")
+                return ConfigValidationResult(false, "Stream RTMP URL is required (e.g. rtmp:// or rtmps:// ingest server).")
             }
             val primaryUriError = validateServerUrl(cleanPrimary, "Primary Server URL")
             if (primaryUriError != null) {
@@ -287,7 +317,7 @@ class RtmpPublisher {
      * Safe to invoke anytime without starting a live broadcast on YouTube.
      */
     fun testConnection(serverUrl: String, streamKey: String): ConnectionTestOutcome {
-        val cleanUrl = serverUrl.trim().trimEnd('/')
+        val cleanUrl = normalizeEndpointUrl(serverUrl)
         val validation = validateConfig(primaryUrl = cleanUrl, streamKey = streamKey)
         if (!validation.valid) {
             return ConnectionTestOutcome(
@@ -396,7 +426,7 @@ class RtmpPublisher {
     private fun connectInternal(rtmpBaseUrl: String, streamKey: String, usedBackup: Boolean): Result<ConnectSuccess> {
         return try {
             close()
-            val cleanBase = rtmpBaseUrl.trim().trimEnd('/')
+            val cleanBase = normalizeEndpointUrl(rtmpBaseUrl)
             val cleanKey = streamKey.trim()
             val validation = validateConfig(primaryUrl = cleanBase, streamKey = cleanKey)
             if (!validation.valid) {
@@ -787,23 +817,49 @@ class RtmpPublisher {
     }
 
     private fun openSocket(ep: ParsedEndpoint): Socket {
-        val rawSocket = if (ep.isSecure) {
-            SSLSocketFactory.getDefault().createSocket()
-        } else {
-            Socket()
-        }
-        rawSocket.tcpNoDelay = true
-        rawSocket.sendBufferSize = 256 * 1024
-        rawSocket.soTimeout = HANDSHAKE_READ_TIMEOUT_MS
-        rawSocket.connect(InetSocketAddress(ep.host, ep.port), SOCKET_CONNECT_TIMEOUT_MS)
+        // Connect plain TCP socket first so socket connect timeout applies AND Conscrypt SSLSocket
+        // receives the exact target DNS hostname for SNI and SAN certificate verification.
+        val plainSocket = Socket()
+        plainSocket.tcpNoDelay = true
+        plainSocket.sendBufferSize = 256 * 1024
+        plainSocket.soTimeout = HANDSHAKE_READ_TIMEOUT_MS
+        plainSocket.connect(InetSocketAddress(ep.host, ep.port), SOCKET_CONNECT_TIMEOUT_MS)
 
-        if (rawSocket is SSLSocket) {
-            val sslParams: SSLParameters = rawSocket.sslParameters
-            sslParams.endpointIdentificationAlgorithm = "HTTPS"
-            rawSocket.sslParameters = sslParams
-            rawSocket.startHandshake()
+        if (!ep.isSecure) {
+            return plainSocket
         }
-        return rawSocket
+
+        val sslFactory = SSLSocketFactory.getDefault() as SSLSocketFactory
+        val sslSocket = try {
+            sslFactory.createSocket(plainSocket, ep.host, ep.port, true) as SSLSocket
+        } catch (e: Exception) {
+            runCatching { plainSocket.close() }
+            throw e
+        }
+
+        return try {
+            sslSocket.tcpNoDelay = true
+            sslSocket.sendBufferSize = 256 * 1024
+            sslSocket.soTimeout = HANDSHAKE_READ_TIMEOUT_MS
+
+            val sslParams: SSLParameters = sslSocket.sslParameters
+            sslParams.endpointIdentificationAlgorithm = "HTTPS"
+            if (isDnsHostname(ep.host)) {
+                sslParams.serverNames = listOf(SNIHostName(ep.host))
+            }
+            sslSocket.sslParameters = sslParams
+            sslSocket.startHandshake()
+
+            // Explicit strict hostname verification against server TLS certificate SANs
+            val verifier = HttpsURLConnection.getDefaultHostnameVerifier()
+            if (!verifier.verify(ep.host, sslSocket.session)) {
+                throw SSLPeerUnverifiedException("TLS certificate hostname does not match ${ep.host}")
+            }
+            sslSocket
+        } catch (e: Exception) {
+            runCatching { sslSocket.close() }
+            throw e
+        }
     }
 
     private fun performHandshake(dataIn: DataInputStream, dataOut: DataOutputStream) {
@@ -1323,6 +1379,14 @@ class RtmpPublisher {
     private fun sanitizeErrorMessage(e: Exception, streamKey: String): String {
         val raw = e.localizedMessage ?: e.message ?: "Connection failed."
         val key = streamKey.trim()
-        return if (key.isNotEmpty()) raw.replace(key, maskStreamKey(key)) else raw
+        val scrubbed = if (key.isNotEmpty()) raw.replace(key, maskStreamKey(key)) else raw
+        if (e is SSLPeerUnverifiedException ||
+            e is SSLHandshakeException ||
+            scrubbed.contains("subjectAltNames", ignoreCase = true) ||
+            scrubbed.contains("Hostname", ignoreCase = true) && scrubbed.contains("not verified", ignoreCase = true)
+        ) {
+            return "TLS certificate verification failed: server certificate does not match the hostname. Verify your RTMPS host (for YouTube RTMPS use rtmps://a.rtmps.youtube.com/live2, or rtmp://a.rtmp.youtube.com/live2)."
+        }
+        return scrubbed
     }
 }

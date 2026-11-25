@@ -124,8 +124,10 @@ class CropMergeRemotePreviewTest {
 
     @Test
     fun `studio crop merge and rename controls work end to end in UI`() {
-        // App launches cleanly without white-screen crash
-        composeRule.onNodeWithTag("nav_studio").assertIsDisplayed().performClick()
+        // App launches cleanly without white-screen crash; Studio is now opened via Remote -> Layers
+        composeRule.onNodeWithTag("nav_dual").assertIsDisplayed().performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("remote_layers_btn").assertIsDisplayed().performClick()
         composeRule.waitForIdle()
 
         // Toggle canvas Crop mode in horizontal toolbar

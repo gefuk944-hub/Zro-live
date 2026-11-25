@@ -159,9 +159,10 @@ class GraphicAdjustmentVerificationTest {
 
     @Test
     fun `studio graphics dock tab exposes presets sliders before after preview and reset without breaking existing ui`() {
-        // Navigate to OBS Scene Studio
-        composeRule.onNodeWithTag("nav_studio").performClick()
-        composeRule.onNodeWithText("OBS Scene Studio").assertIsDisplayed()
+        // Navigate to Layers & Studio via Remote -> Layers button
+        composeRule.onNodeWithTag("nav_dual").performClick()
+        composeRule.onNodeWithTag("remote_layers_btn").performClick()
+        composeRule.onNodeWithText("Layers & Studio").assertIsDisplayed()
 
         // Select Gameplay source
         composeRule.onNodeWithTag("obs_studio_list")

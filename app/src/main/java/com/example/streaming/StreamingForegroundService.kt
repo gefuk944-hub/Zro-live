@@ -23,12 +23,19 @@ import android.util.Log
 import android.view.Surface
 import android.view.WindowManager
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.content.ComponentCallbacks2
 import com.example.audio.ZroAudioEngine
+import com.example.data.SettingsStore
 import com.example.data.model.CaptureMode
+import com.example.data.model.LiveVideoSource
 import com.example.data.model.PerformanceProfile
 import com.example.data.model.StreamHealth
 import com.example.data.model.StreamLifecycleState
@@ -36,8 +43,11 @@ import com.example.data.model.StreamOrientation
 import com.example.dualphone.DualPhoneEngine
 import com.example.studio.DualLinkState
 import com.example.studio.DualPhoneRole
+import com.example.telemetry.ActiveLiveSessionSnapshot
+import com.example.telemetry.CrashRecoveryStore
 import com.example.telemetry.DeviceTelemetryMonitor
 import java.io.ByteArrayOutputStream
+import kotlin.random.Random
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -72,12 +82,16 @@ class StreamingForegroundService : Service() {
         const val ACTION_TOGGLE_MIC = "com.example.zro.ACTION_TOGGLE_MIC"
         const val ACTION_START_VOICE_FG = "com.example.zro.ACTION_START_VOICE_FG"
         const val ACTION_STOP_VOICE_FG = "com.example.zro.ACTION_STOP_VOICE_FG"
+        const val ACTION_SWITCH_VIDEO_SOURCE = "com.example.zro.ACTION_SWITCH_VIDEO_SOURCE"
         const val EXTRA_SESSION_ID = "extra_session_id"
+        const val EXTRA_VIDEO_SOURCE = "extra_video_source"
+        const val EXTRA_IS_RECONNECT = "extra_is_reconnect"
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var notifManager: StreamNotificationManager
     private lateinit var telemetryMonitor: DeviceTelemetryMonitor
+    private lateinit var settingsStore: SettingsStore
 
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
@@ -92,6 +106,7 @@ class StreamingForegroundService : Service() {
     private var videoDrainJob: Job? = null
     private var audioDrainJob: Job? = null
     private var monitorJob: Job? = null
+    private var remoteFramePumpJob: Job? = null
 
     private val isStreaming = AtomicBoolean(false)
     private val isLiveConfirmed = AtomicBoolean(false)
@@ -104,7 +119,11 @@ class StreamingForegroundService : Service() {
     private val peakBitrateKbps = AtomicInteger(0)
 
     private var activeBitrateKbps = 4500
-    private var activeCaptureMode = CaptureMode.GAME_APP_ONLY
+    private var activeCaptureMode = CaptureMode.FULL_SCREEN
+    @Volatile private var activeVideoSource = LiveVideoSource.LOCAL_FULL_SCREEN
+    private var activeIsReconnect = false
+    private var activeRtmpUrlUsed = ""
+    private var activePlatformLabel = "RTMP Live"
     private var streamStartEpochMs = 0L
     private var activeSessionId: String? = null
     private var activeSessionTitle = "Mobile Gaming Live"
@@ -124,6 +143,22 @@ class StreamingForegroundService : Service() {
         super.onCreate()
         notifManager = StreamNotificationManager(this)
         telemetryMonitor = DeviceTelemetryMonitor(this)
+        settingsStore = SettingsStore(applicationContext)
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW && isStreaming.get()) {
+            if (activeBitrateKbps > 1500) {
+                val reduced = (activeBitrateKbps * 0.85f).toInt().coerceAtLeast(1500)
+                applyDynamicVideoBitrate(reduced)
+                CrashRecoveryStore.recordEvent(
+                    applicationContext,
+                    "MEMORY",
+                    "Trim memory level $level — stepped bitrate to ${reduced} kbps for stability."
+                )
+            }
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -135,7 +170,13 @@ class StreamingForegroundService : Service() {
             ACTION_STOP_CAPTURE -> stopAllCaptureAndBroadcast(error = null)
             ACTION_START_STREAM -> {
                 val sessionId = intent.getStringExtra(EXTRA_SESSION_ID)
-                startBroadcastSession(sessionId)
+                val isReconnect = intent.getBooleanExtra(EXTRA_IS_RECONNECT, false)
+                startBroadcastSession(sessionId, isReconnect)
+            }
+            ACTION_SWITCH_VIDEO_SOURCE -> {
+                val raw = intent.getStringExtra(EXTRA_VIDEO_SOURCE)
+                val target = LiveVideoSource.entries.firstOrNull { it.name == raw } ?: LiveVideoSource.LOCAL_FULL_SCREEN
+                switchActiveVideoSource(target)
             }
             ACTION_STOP_STREAM -> stopAllCaptureAndBroadcast(error = null)
             ACTION_TOGGLE_PAUSE -> {
@@ -363,22 +404,29 @@ class StreamingForegroundService : Service() {
     }
 
     /**
-     * Stage 2: Starts YouTube Live broadcast.
-     * Reuses the active Capture Preview MediaProjection if present (zero double-prompt),
-     * or initializes a fresh MediaProjection from pending consent if user started directly.
+     * Stage 2: Starts RTMP / YouTube Live broadcast.
+     * - Default (1-Phone): captures Phone 1's full screen directly.
+     * - 2-Phone Connected: streams the connected 2nd phone's mirrored screen immediately
+     *   and supports automatic mid-stream switching between Phone 1 and Phone 2.
      */
-    private fun startBroadcastSession(sessionId: String?) {
+    private fun startBroadcastSession(sessionId: String?, isReconnect: Boolean = false) {
         if (!ZroStreamCoordinator.tryAcquireSessionLock()) {
             Log.w(TAG, "Ignored duplicate stream start request")
             return
         }
 
+        val dualState = DualPhoneEngine.shared.telemetry.value
+        val secondPhoneAlreadyConnected =
+            dualState.linkState == DualLinkState.CONNECTED &&
+                dualState.role == DualPhoneRole.PHONE2_STUDIO
+
         val existingProjection = mediaProjection
         val resultCode = ZroStreamCoordinator.pendingMediaProjectionResultCode
         val resultData = ZroStreamCoordinator.pendingMediaProjectionData
+        val hasLocalProjectionGrant = existingProjection != null || (resultCode == Activity.RESULT_OK && resultData != null)
 
-        if (existingProjection == null && (resultCode != Activity.RESULT_OK || resultData == null)) {
-            ZroStreamCoordinator.resetToIdle("Select a game to capture before starting your stream.")
+        if (!hasLocalProjectionGrant && !secondPhoneAlreadyConnected) {
+            ZroStreamCoordinator.resetToIdle("Grant screen capture permission or connect a 2nd phone to start live.")
             return
         }
 
@@ -405,7 +453,10 @@ class StreamingForegroundService : Service() {
             .coerceAtMost(minOf(profileCap, lowRamCap, lowDataCap))
             .coerceAtLeast(1000)
 
-        activeSessionId = sessionId
+        activeSessionId = sessionId ?: "live_${System.currentTimeMillis()}"
+        activeIsReconnect = isReconnect
+        activeRtmpUrlUsed = primaryUrl
+        activePlatformLabel = if (primaryUrl.contains("youtube.com", ignoreCase = true)) "YouTube Live" else "Custom RTMP"
         activeSessionTitle = settings.streamTitle
         activeSessionVisibility = settings.visibility.name
         activeSessionResolutionLabel = settings.resolution.shortLabel
@@ -418,6 +469,11 @@ class StreamingForegroundService : Service() {
         activeStereoAudio = ZroStreamCoordinator.currentAudioSettings.stereoOutput
         if (existingProjection == null) {
             activeCaptureMode = ZroStreamCoordinator.pendingCaptureMode
+        }
+        activeVideoSource = if (secondPhoneAlreadyConnected) {
+            LiveVideoSource.REMOTE_SECOND_PHONE
+        } else {
+            LiveVideoSource.LOCAL_FULL_SCREEN
         }
 
         peakBitrateKbps.set(0)
@@ -433,16 +489,19 @@ class StreamingForegroundService : Service() {
         firstVideoPtsUs = -1L
         firstAudioPtsUs = -1L
 
-        val sourceLabel = if (activeCaptureMode == CaptureMode.GAME_APP_ONLY) {
-            "Selected Game / App Window (Private)"
-        } else {
-            "Full Phone Screen (Opt-In)"
+        val sourceLabel = when (activeVideoSource) {
+            LiveVideoSource.REMOTE_SECOND_PHONE -> "2nd Phone Screen (Live Source)"
+            LiveVideoSource.LOCAL_FULL_SCREEN -> if (activeCaptureMode == CaptureMode.GAME_APP_ONLY) {
+                "Selected App Window"
+            } else {
+                "This Phone Full Screen"
+            }
         }
 
         ZroStreamCoordinator.updateTelemetry {
             it.copy(
                 state = StreamLifecycleState.CONNECTING,
-                statusDetail = "Initializing encoders & connecting to server…",
+                statusDetail = if (isReconnect) "Reconnecting to previous live session…" else "Initializing encoders & connecting to server…",
                 activeServerUrl = primaryUrl,
                 usingBackupServer = false,
                 videoEncoderReady = false,
@@ -460,37 +519,57 @@ class StreamingForegroundService : Service() {
                 captureActive = true,
                 capturePreviewActive = false,
                 captureMode = activeCaptureMode,
+                activeVideoSource = activeVideoSource,
+                isReconnectedSession = isReconnect,
                 captureSourceLabel = sourceLabel,
                 thermalThrottled = false,
                 errorMessage = null,
-                activeSessionId = sessionId
+                activeSessionId = activeSessionId
             )
         }
 
         // Android 14+ requirement: call startForeground(MEDIA_PROJECTION) BEFORE getMediaProjection()
-        promoteForeground(includeMediaProjection = true)
+        promoteForeground(includeMediaProjection = hasLocalProjectionGrant)
 
         serviceScope.launch {
             try {
-                // Obtain or reuse MediaProjection
-                val projection = existingProjection ?: run {
+                // Persist active session snapshot for crash recovery (never writes stream key!)
+                persistRecoverySnapshot(cleanlyEnded = false, lastError = null)
+                if (isReconnect) {
+                    CrashRecoveryStore.recordEvent(
+                        applicationContext,
+                        "RECOVERY",
+                        "Reconnecting to previous live session (${activeSessionId ?: "unknown"})."
+                    )
+                }
+
+                // Obtain or reuse MediaProjection if granted (kept ready for automatic fallback if 2nd phone disconnects)
+                val projection: MediaProjection? = existingProjection ?: if (resultCode == Activity.RESULT_OK && resultData != null) {
                     val projMgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                    val p = projMgr.getMediaProjection(resultCode, resultData!!)
+                    val p = projMgr.getMediaProjection(resultCode, resultData)
                         ?: throw IllegalStateException("MediaProjection could not be initialized.")
                     ZroStreamCoordinator.clearPendingMediaProjection()
                     ZroStreamCoordinator.tryAcquireCaptureLock()
                     mediaProjection = p
                     registerProjectionCallback(p)
                     p
+                } else {
+                    null
                 }
 
-                // Step 2: Initialize Hardware Video Encoder & bind VirtualDisplay
+                // Step 2: Initialize Video Encoder & attach active video source (Phone 1 screen OR 2nd Phone feed)
                 val (width, height) = resolveDimensions(settings.resolution.width, settings.resolution.height, settings.orientation)
                 activeStreamWidth = width
                 activeStreamHeight = height
                 val encoderName = setupVideoEncoder(width, height, activeSessionFps, activeBitrateKbps)
-                createOrUpdateVirtualDisplay(projection, width, height, videoInputSurface)
-                startDualPhoneMirrorCaptureIfNeeded(projection)
+                if (activeVideoSource == LiveVideoSource.REMOTE_SECOND_PHONE) {
+                    // Phone 1 full-screen capture stays stopped; pump 2nd phone screen directly into H.264 encoder
+                    releaseVirtualDisplayOnly()
+                    startRemoteSecondPhoneFramePump()
+                } else if (projection != null) {
+                    createOrUpdateVirtualDisplay(projection, width, height, videoInputSurface)
+                    startDualPhoneMirrorCaptureIfNeeded(projection)
+                }
                 ZroStreamCoordinator.updateTelemetry {
                     it.copy(
                         activeEncoderName = encoderName,
@@ -511,13 +590,13 @@ class StreamingForegroundService : Service() {
                 ZroStreamCoordinator.updateTelemetry {
                     it.copy(
                         audioEncoderReady = true,
-                        gameAudioCaptureActive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q,
+                        gameAudioCaptureActive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && projection != null,
                         gameAudioCaptureNote = ZroAudioEngine.gameCaptureStatus.value,
                         statusDetail = "Encoders ready. Handshaking with streaming server…"
                     )
                 }
 
-                // Step 4: Connect to Primary (or Backup failover) RTMP/RTMPS server with real AMF0 confirmation
+                // Step 4: Connect to RTMP/RTMPS server with strict TLS & real AMF0 confirmation
                 val publisher = RtmpPublisher()
                 rtmpPublisher = publisher
                 val connectResult = publisher.connectWithFailover(
@@ -528,7 +607,7 @@ class StreamingForegroundService : Service() {
                 )
                 if (connectResult.isFailure) {
                     val msg = connectResult.exceptionOrNull()?.localizedMessage
-                        ?: "Unable to connect to RTMP server. Verify your Server URL, Stream Key, and internet connection."
+                        ?: "Unable to connect to RTMP server. Verify your Stream RTMP URL, Stream Key, and internet connection."
                     stopAllCaptureAndBroadcast(error = msg)
                     return@launch
                 }
@@ -563,7 +642,7 @@ class StreamingForegroundService : Service() {
                 ZroStreamCoordinator.updateTelemetry {
                     it.copy(
                         state = StreamLifecycleState.SENDING_VIDEO,
-                        statusDetail = "Sending video & audio packets to server…"
+                        statusDetail = "Sending H.264 video & AAC audio packets…"
                     )
                 }
                 refreshNotification()
@@ -575,8 +654,181 @@ class StreamingForegroundService : Service() {
                 startTelemetryAndStabilityLoop()
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start broadcast: ${e.message}", e)
+                CrashRecoveryStore.recordEvent(applicationContext, "ENCODER", "Broadcast init error: ${e.localizedMessage}")
                 stopAllCaptureAndBroadcast(error = e.localizedMessage ?: "Broadcast initialization failed.")
             }
+        }
+    }
+
+    /**
+     * Switches live video source on the fly without disconnecting RTMP/YouTube Live:
+     * - REMOTE_SECOND_PHONE: stops Phone 1 full-screen VirtualDisplay capture and draws 2nd phone mirrored frames.
+     * - LOCAL_FULL_SCREEN: stops 2nd-phone frame pump and restores Phone 1 full-screen VirtualDisplay capture.
+     */
+    private fun switchActiveVideoSource(target: LiveVideoSource) {
+        if (activeVideoSource == target) return
+        activeVideoSource = target
+        val surface = videoInputSurface
+        if (!isStreaming.get() || surface == null) {
+            ZroStreamCoordinator.updateTelemetry {
+                it.copy(
+                    activeVideoSource = target,
+                    captureSourceLabel = if (target == LiveVideoSource.REMOTE_SECOND_PHONE) {
+                        "2nd Phone Screen (Live Source)"
+                    } else {
+                        "This Phone Full Screen"
+                    }
+                )
+            }
+            return
+        }
+
+        if (target == LiveVideoSource.REMOTE_SECOND_PHONE) {
+            // Stop Phone 1 full-screen capture immediately!
+            releaseVirtualDisplayOnly()
+            startRemoteSecondPhoneFramePump()
+            requestVideoKeyFrame()
+            ZroStreamCoordinator.updateTelemetry {
+                it.copy(
+                    activeVideoSource = LiveVideoSource.REMOTE_SECOND_PHONE,
+                    captureSourceLabel = "2nd Phone Screen (Auto-Switched)",
+                    statusDetail = "Live — switched stream source to 2nd phone screen"
+                )
+            }
+        } else {
+            // 2nd phone disconnected -> resume Phone 1 full-screen capture cleanly
+            stopRemoteSecondPhoneFramePump()
+            val proj = mediaProjection
+            if (proj != null) {
+                createOrUpdateVirtualDisplay(proj, activeStreamWidth, activeStreamHeight, surface)
+                requestVideoKeyFrame()
+                ZroStreamCoordinator.updateTelemetry {
+                    it.copy(
+                        activeVideoSource = LiveVideoSource.LOCAL_FULL_SCREEN,
+                        captureSourceLabel = "This Phone Full Screen",
+                        statusDetail = "Live — returned stream source to this phone's screen"
+                    )
+                }
+            } else {
+                // Keep encoder alive with clean standby frame until user grants local screen capture
+                startRemoteSecondPhoneFramePump()
+                ZroStreamCoordinator.updateTelemetry {
+                    it.copy(
+                        activeVideoSource = LiveVideoSource.LOCAL_FULL_SCREEN,
+                        captureSourceLabel = "Waiting for Phone 1 Screen Permission",
+                        statusDetail = "2nd phone disconnected. Grant screen capture or reconnect 2nd phone."
+                    )
+                }
+            }
+        }
+        refreshNotification()
+    }
+
+    private fun startRemoteSecondPhoneFramePump() {
+        stopRemoteSecondPhoneFramePump()
+        val surface = videoInputSurface ?: return
+        val intervalMs = (1000L / activeSessionFps.coerceIn(15, 60)).coerceAtLeast(16L)
+        remoteFramePumpJob = serviceScope.launch {
+            val bgPaint = Paint().apply { color = Color.rgb(10, 14, 24) }
+            val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE
+                textSize = (activeStreamHeight * 0.042f).coerceIn(22f, 44f)
+                textAlign = Paint.Align.CENTER
+            }
+            val subPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(155, 175, 200)
+                textSize = (activeStreamHeight * 0.026f).coerceIn(14f, 28f)
+                textAlign = Paint.Align.CENTER
+            }
+            val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+            while (isActive && isStreaming.get()) {
+                if (activeVideoSource != LiveVideoSource.REMOTE_SECOND_PHONE && mediaProjection != null) {
+                    break
+                }
+                try {
+                    if (!surface.isValid) break
+                    val canvas: Canvas = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        surface.lockHardwareCanvas()
+                    } else {
+                        surface.lockCanvas(null)
+                    }
+                    try {
+                        val cw = canvas.width
+                        val ch = canvas.height
+                        canvas.drawRect(0f, 0f, cw.toFloat(), ch.toFloat(), bgPaint)
+                        val frame = DualPhoneEngine.shared.mirroredFrame.value
+                        if (frame != null && !frame.isRecycled && frame.width > 0 && frame.height > 0) {
+                            // Fit 2nd phone screen proportionally inside YouTube 16:9 canvas
+                            val scale = minOf(cw.toFloat() / frame.width.toFloat(), ch.toFloat() / frame.height.toFloat())
+                            val dstW = (frame.width * scale).toInt()
+                            val dstH = (frame.height * scale).toInt()
+                            val left = (cw - dstW) / 2
+                            val top = (ch - dstH) / 2
+                            val dstRect = Rect(left, top, left + dstW, top + dstH)
+                            canvas.drawBitmap(frame, null, dstRect, bitmapPaint)
+                        } else {
+                            canvas.drawText(
+                                if (activeVideoSource == LiveVideoSource.REMOTE_SECOND_PHONE) {
+                                    "2ND PHONE CONNECTED — STREAMING FEED"
+                                } else {
+                                    "ZRO LIVE — STANDBY"
+                                },
+                                cw / 2f,
+                                ch / 2f - 10f,
+                                textPaint
+                            )
+                            canvas.drawText(
+                                "Waiting for gameplay video frames…",
+                                cw / 2f,
+                                ch / 2f + 30f,
+                                subPaint
+                            )
+                        }
+                    } finally {
+                        surface.unlockCanvasAndPost(canvas)
+                    }
+                } catch (_: Exception) {
+                    // Surface released or locked during source transition
+                    delay(50L)
+                }
+                delay(intervalMs)
+            }
+        }
+    }
+
+    private fun stopRemoteSecondPhoneFramePump() {
+        remoteFramePumpJob?.cancel()
+        remoteFramePumpJob = null
+    }
+
+    private fun releaseVirtualDisplayOnly() {
+        runCatching { virtualDisplay?.release() }
+        virtualDisplay = null
+    }
+
+    private suspend fun persistRecoverySnapshot(cleanlyEnded: Boolean, lastError: String?) {
+        val sid = activeSessionId ?: return
+        val cfg = ZroStreamCoordinator.currentStreamSettings
+        val now = System.currentTimeMillis()
+        val elapsed = if (streamStartEpochMs > 0L) (now - streamStartEpochMs) / 1000L else 0L
+        runCatching {
+            settingsStore.saveActiveLiveSnapshot(
+                ActiveLiveSessionSnapshot(
+                    sessionId = sid,
+                    title = activeSessionTitle,
+                    rtmpUrl = activeRtmpUrlUsed.ifBlank { cfg.effectivePrimaryServerUrl() },
+                    platformLabel = activePlatformLabel,
+                    resolutionName = cfg.resolution.name,
+                    fps = activeSessionFps,
+                    bitrateKbps = activeBitrateKbps,
+                    activeSceneSlotName = ZroStreamCoordinator.activeSceneSlotName,
+                    startedAtEpochMs = if (streamStartEpochMs > 0L) streamStartEpochMs else now,
+                    lastUpdatedEpochMs = now,
+                    durationSec = elapsed,
+                    cleanlyEnded = cleanlyEnded,
+                    lastError = lastError?.let { CrashRecoveryStore.scrubSecrets(it) }
+                )
+            )
         }
     }
 
@@ -628,10 +880,15 @@ class StreamingForegroundService : Service() {
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
             setInteger(MediaFormat.KEY_PRIORITY, 0) // Real-time priority
+            // CRITICAL for YouTube Live: emit frames continuously even when phone screen is static!
+            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            }
         }
 
         val hwName = selectHardwareAvcEncoderName()
-        val codec = try {
+        var codec = try {
             if (hwName != null) MediaCodec.createByCodecName(hwName)
             else MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         } catch (e: Exception) {
@@ -639,19 +896,36 @@ class StreamingForegroundService : Service() {
             MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         }
 
-        try {
+        val configured = try {
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            true
         } catch (e: Exception) {
-            // Some low-end devices reject CBR; retry with VBR cleanly
-            Log.w(TAG, "CBR configure rejected, retrying default bitrate mode: ${e.message}")
-            format.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            Log.w(TAG, "CBR configure rejected, retrying VBR: ${e.message}")
+            try {
+                format.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                true
+            } catch (vbrErr: Exception) {
+                Log.w(TAG, "Hardware VBR configure failed, falling back to software AVC encoder: ${vbrErr.message}")
+                runCatching { codec.release() }
+                codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                val fallbackFmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                    setInteger(MediaFormat.KEY_BIT_RATE, bitrateKbps * 1000)
+                    setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+                    setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
+                }
+                codec.configure(fallbackFmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                true
+            }
         }
+        if (!configured) throw IllegalStateException("Could not configure H.264 video encoder on this device.")
 
         videoInputSurface = codec.createInputSurface()
         codec.start()
         videoEncoder = codec
-        return hwName ?: codec.name
+        return codec.name
     }
 
     private fun createOrUpdateVirtualDisplay(projection: MediaProjection, width: Int, height: Int, surface: Surface?) {
@@ -952,6 +1226,11 @@ class StreamingForegroundService : Service() {
                             applyDynamicVideoBitrate(recovered)
                         }
                     }
+
+                    // Persist active live session heartbeat every 5s for instant crash recovery
+                    if (isLiveConfirmed.get()) {
+                        persistRecoverySnapshot(cleanlyEnded = false, lastError = null)
+                    }
                 }
 
                 val dropRatio = if (total > 0) dropped.toFloat() / total.toFloat() else 0f
@@ -1012,7 +1291,10 @@ class StreamingForegroundService : Service() {
                 )
             }
             refreshNotification()
-            delay(attempt * 2000L)
+            // Jittered exponential backoff prevents thundering-herd reconnect spikes across concurrent users
+            val baseMs = (1500L shl (attempt - 1)).coerceAtMost(10_000L)
+            val jitterMs = Random.nextLong(250L, 1200L)
+            delay(baseMs + jitterMs)
             if (!hasActiveInternetConnection()) continue
 
             val res = publisher.connectWithFailover(
@@ -1038,6 +1320,7 @@ class StreamingForegroundService : Service() {
                 if (sps != null && pps != null) publisher.sendAvcSequenceHeader(sps, pps)
                 publisher.sendAacSequenceHeader(asc)
                 requestVideoKeyFrame()
+                CrashRecoveryStore.recordEvent(applicationContext, "NETWORK", "Auto-reconnected to ${info.serverUrl} on attempt $attempt.")
                 ZroStreamCoordinator.updateTelemetry {
                     it.copy(
                         state = when {
@@ -1047,7 +1330,7 @@ class StreamingForegroundService : Service() {
                         },
                         activeServerUrl = info.serverUrl,
                         usingBackupServer = info.usedBackup,
-                        statusDetail = if (info.usedBackup) "Reconnected via Backup server" else "Reconnected to Primary server",
+                        statusDetail = if (info.usedBackup) "Reconnected via Backup server" else "Reconnected to stream server",
                         reconnectAttempt = 0
                     )
                 }
@@ -1055,7 +1338,9 @@ class StreamingForegroundService : Service() {
                 return
             }
         }
-        stopAllCaptureAndBroadcast(error = "Stream disconnected after 4 reconnection attempts. Check your network stability and YouTube Studio ingest status.")
+        val errMsg = "Stream disconnected after 4 reconnection attempts. Use Reconnect to Previous Live once network stabilizes."
+        CrashRecoveryStore.recordEvent(applicationContext, "NETWORK", errMsg)
+        stopAllCaptureAndBroadcast(error = errMsg)
     }
 
     private fun duplicateToBytes(buf: ByteBuffer): ByteArray {
@@ -1181,7 +1466,7 @@ class StreamingForegroundService : Service() {
 
     private fun stopAllCaptureAndBroadcast(error: String?) {
         val wasStreaming = isStreaming.getAndSet(false)
-        isLiveConfirmed.set(false)
+        val wasConfirmedLive = isLiveConfirmed.getAndSet(false)
         isPaused.set(false)
         isPrivacyShieldActive.set(false)
 
@@ -1189,12 +1474,15 @@ class StreamingForegroundService : Service() {
         val finalDropped = droppedVideoFrames.get()
         val finalPeak = peakBitrateKbps.get()
         val finishedSessionId = activeSessionId
+        val finishedUrl = activeRtmpUrlUsed
+        val finishedPlatform = activePlatformLabel
         activeSessionId = null
         streamStartEpochMs = 0L
 
         videoDrainJob?.cancel(); videoDrainJob = null
         audioDrainJob?.cancel(); audioDrainJob = null
         monitorJob?.cancel(); monitorJob = null
+        stopRemoteSecondPhoneFramePump()
 
         stopDualPhoneMirrorCapture()
         ZroAudioEngine.stopStreamingAudio()
@@ -1204,6 +1492,36 @@ class StreamingForegroundService : Service() {
         runCatching { videoEncoder?.stop() }; runCatching { videoEncoder?.release() }; videoEncoder = null
         runCatching { audioEncoder?.stop() }; runCatching { audioEncoder?.release() }; audioEncoder = null
         runCatching { mediaProjection?.stop() }; mediaProjection = null
+
+        val wasCleanStop = error == null
+        if (wasCleanStop) {
+            serviceScope.launch { runCatching { settingsStore.markActiveLiveCleanlyEnded() } }
+        } else if (finishedSessionId != null && (wasStreaming || wasConfirmedLive)) {
+            val sanitizedErr = CrashRecoveryStore.scrubSecrets(error ?: "")
+            CrashRecoveryStore.recordEvent(applicationContext, "NETWORK", "Interrupted live ($finishedSessionId): $sanitizedErr")
+            serviceScope.launch {
+                val cfg = ZroStreamCoordinator.currentStreamSettings
+                runCatching {
+                    settingsStore.saveActiveLiveSnapshot(
+                        ActiveLiveSessionSnapshot(
+                            sessionId = finishedSessionId,
+                            title = activeSessionTitle,
+                            rtmpUrl = finishedUrl.ifBlank { cfg.effectivePrimaryServerUrl() },
+                            platformLabel = finishedPlatform,
+                            resolutionName = cfg.resolution.name,
+                            fps = activeSessionFps,
+                            bitrateKbps = activeBitrateKbps,
+                            activeSceneSlotName = ZroStreamCoordinator.activeSceneSlotName,
+                            startedAtEpochMs = System.currentTimeMillis() - (finalDuration * 1000L),
+                            lastUpdatedEpochMs = System.currentTimeMillis(),
+                            durationSec = finalDuration,
+                            cleanlyEnded = false,
+                            lastError = sanitizedErr
+                        )
+                    )
+                }
+            }
+        }
 
         ZroStreamCoordinator.resetToIdle(error = error)
         if (wasStreaming || finishedSessionId != null) {
@@ -1217,7 +1535,12 @@ class StreamingForegroundService : Service() {
                     bitrateKbps = activeBitrateKbps,
                     durationSec = finalDuration,
                     droppedFrames = finalDropped,
-                    peakBitrateKbps = finalPeak
+                    peakBitrateKbps = finalPeak,
+                    platformLabel = finishedPlatform,
+                    rtmpUrl = finishedUrl,
+                    sceneSlotName = ZroStreamCoordinator.activeSceneSlotName,
+                    wasCleanStop = wasCleanStop,
+                    errorMessage = error
                 )
             )
         }

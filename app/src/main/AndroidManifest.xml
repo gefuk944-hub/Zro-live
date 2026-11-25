@@ -11,9 +11,10 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
-    <!-- Optional Camera (for Dual-Phone QR Scanning & Facecam Overlay Source) -->
+    <!-- Optional Camera & USB Host (for Dual-Phone QR Scanning, Facecam & DJI/UVC Cameras) -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
     <!-- Foreground Services (Android 14+ typed permissions) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

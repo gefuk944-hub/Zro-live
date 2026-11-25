@@ -30,7 +30,9 @@ import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Chat
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -87,12 +89,16 @@ import com.example.data.model.StreamHealth
 import com.example.data.model.StreamLifecycleState
 import com.example.data.model.StreamPreset
 import com.example.data.model.StreamRuntimeTelemetry
+import com.example.data.model.StreamSessionDoc
 import com.example.data.model.StreamSettings
 import com.example.data.model.StreamVisibility
 import com.example.data.model.VideoResolution
 import com.example.data.model.YouTubeChatState
 import com.example.streaming.ZroStreamCoordinator
+import com.example.telemetry.ActiveLiveSessionSnapshot
+import com.example.telemetry.CrashLogEntry
 import com.example.telemetry.DeviceTelemetryMonitor
+import com.example.telemetry.SavedLiveConfigProfile
 import com.example.ui.components.AudioLevelMeter
 import com.example.ui.components.BrandGradientButton
 import com.example.ui.components.GlassCard
@@ -109,9 +115,10 @@ import com.example.ui.theme.ZroObsidian
 import com.example.ui.theme.ZroViolet
 
 enum class LiveStudioTab(val label: String) {
+    LIVE_MANAGER("Manager"),
     BROADCAST("Broadcast"),
-    AUDIO_MIXER("Audio & DSP"),
-    YOUTUBE_CHAT("Live Chat")
+    AUDIO_MIXER("Audio"),
+    YOUTUBE_CHAT("Chat")
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -143,7 +150,22 @@ fun LiveStudioScreen(
     onSendChatMessage: (String) -> Unit,
     onRenameScreenCapture: (String) -> Unit = {},
     onBack: (() -> Unit)? = null,
-    subpageTitle: String = "Audio & Broadcast Studio"
+    subpageTitle: String = "Audio & Broadcast Studio",
+    recoverableSession: ActiveLiveSessionSnapshot? = null,
+    recentSessions: List<StreamSessionDoc> = emptyList(),
+    savedProfiles: List<SavedLiveConfigProfile> = emptyList(),
+    crashLogs: List<CrashLogEntry> = emptyList(),
+    onReconnectPreviousLive: () -> Unit = {},
+    onDismissRecovery: () -> Unit = {},
+    onCreateNewLive: (String) -> Unit = {},
+    onOpenLiveSetup: () -> Unit = {},
+    onOpenFullScreenPreview: () -> Unit = {},
+    onResumeSavedSession: (StreamSessionDoc) -> Unit = {},
+    onDeleteSession: (String) -> Unit = {},
+    onSaveCurrentProfile: (String) -> Unit = {},
+    onApplyProfile: (SavedLiveConfigProfile) -> Unit = {},
+    onDeleteProfile: (String) -> Unit = {},
+    onClearCrashLogs: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var showEndStreamDialog by remember { mutableStateOf(false) }
@@ -206,10 +228,10 @@ fun LiveStudioScreen(
                     Surface(
                         modifier = Modifier
                             .weight(1f)
-                            .clip(RoundedCornerShape(14.dp))
+                            .clip(RoundedCornerShape(10.dp))
                             .clickable { onSelectTab(tab) }
                             .testTag("studio_tab_${tab.name.lowercase()}"),
-                        shape = RoundedCornerShape(14.dp),
+                        shape = RoundedCornerShape(10.dp),
                         color = if (active) ZroCobalt.copy(alpha = 0.22f) else MaterialTheme.colorScheme.surfaceContainer,
                         border = BorderStroke(
                             1.dp,
@@ -217,24 +239,26 @@ fun LiveStudioScreen(
                         )
                     ) {
                         Row(
-                            modifier = Modifier.padding(vertical = 11.dp, horizontal = 8.dp),
+                            modifier = Modifier.padding(vertical = 10.dp, horizontal = 4.dp),
                             horizontalArrangement = Arrangement.Center,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
                                 imageVector = when (tab) {
+                                    LiveStudioTab.LIVE_MANAGER -> Icons.Rounded.History
                                     LiveStudioTab.BROADCAST -> Icons.Rounded.RadioButtonChecked
                                     LiveStudioTab.AUDIO_MIXER -> Icons.Rounded.GraphicEq
                                     LiveStudioTab.YOUTUBE_CHAT -> Icons.Rounded.Chat
                                 },
                                 contentDescription = tab.label,
                                 tint = if (active) ZroCobalt else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(15.dp)
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
                             Text(
                                 text = tab.label,
-                                style = MaterialTheme.typography.labelLarge,
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1,
                                 color = if (active) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
@@ -243,6 +267,26 @@ fun LiveStudioScreen(
             }
 
             when (selectedTab) {
+                LiveStudioTab.LIVE_MANAGER -> LiveManagerContent(
+                    streamSettings = streamSettings,
+                    streamTelemetry = streamTelemetry,
+                    recoverableSession = recoverableSession,
+                    recentSessions = recentSessions,
+                    savedProfiles = savedProfiles,
+                    crashLogs = crashLogs,
+                    onReconnectPreviousLive = onReconnectPreviousLive,
+                    onDismissRecovery = onDismissRecovery,
+                    onCreateNewLive = onCreateNewLive,
+                    onOpenLiveSetup = onOpenLiveSetup,
+                    onOpenFullScreenPreview = onOpenFullScreenPreview,
+                    onResumeSavedSession = onResumeSavedSession,
+                    onDeleteSession = onDeleteSession,
+                    onSaveCurrentProfile = onSaveCurrentProfile,
+                    onApplyProfile = onApplyProfile,
+                    onDeleteProfile = onDeleteProfile,
+                    onClearCrashLogs = onClearCrashLogs
+                )
+
                 LiveStudioTab.BROADCAST -> BroadcastTabContent(
                     streamSettings = streamSettings,
                     performanceSettings = performanceSettings,
@@ -256,7 +300,8 @@ fun LiveStudioScreen(
                     onPauseResumeStreaming = onPauseResumeStreaming,
                     onRequestEndStreaming = { showEndStreamDialog = true },
                     onRenameScreenCapture = onRenameScreenCapture,
-                    onOpenYouTubeStudio = { YouTubeLiveChatClient.openYouTubeStudioExternally(context) }
+                    onOpenYouTubeStudio = { YouTubeLiveChatClient.openYouTubeStudioExternally(context) },
+                    onOpenFullScreenPreview = onOpenFullScreenPreview
                 )
 
                 LiveStudioTab.AUDIO_MIXER -> AudioMixerTabContent(
@@ -300,7 +345,8 @@ private fun BroadcastTabContent(
     onPauseResumeStreaming: () -> Unit,
     onRequestEndStreaming: () -> Unit,
     onRenameScreenCapture: (String) -> Unit = {},
-    onOpenYouTubeStudio: () -> Unit
+    onOpenYouTubeStudio: () -> Unit,
+    onOpenFullScreenPreview: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var showStreamKey by remember { mutableStateOf(false) }
@@ -402,23 +448,44 @@ private fun BroadcastTabContent(
                             lifecycleState = streamTelemetry.state,
                             durationText = if (isLive || isPaused) ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec) else ""
                         )
-                        Surface(
-                            shape = RoundedCornerShape(999.dp),
-                            color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.85f)
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = when {
-                                    streamTelemetry.privacyShieldActive -> "Privacy Shield ON"
-                                    streamTelemetry.concurrentViewers != null -> "${streamTelemetry.concurrentViewers} watching"
-                                    streamTelemetry.capturePreviewActive -> "Live Preview Active"
-                                    isLive -> streamTelemetry.captureMode.shortLabel
-                                    else -> streamSettings.captureMode.shortLabel
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                fontFamily = JetBrainsMonoFontFamily,
-                                color = if (streamTelemetry.privacyShieldActive || streamTelemetry.capturePreviewActive) ZroEmerald else Color.White,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                            )
+                            Surface(
+                                onClick = onOpenFullScreenPreview,
+                                shape = RoundedCornerShape(999.dp),
+                                color = ZroCobalt.copy(alpha = 0.28f),
+                                border = BorderStroke(1.dp, ZroCobalt),
+                                modifier = Modifier.testTag("broadcast_fullscreen_preview_btn")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                ) {
+                                    Icon(Icons.Rounded.Fullscreen, contentDescription = "16:9 Live Output Preview", tint = Color.White, modifier = Modifier.size(13.dp))
+                                    Text("16:9", style = MaterialTheme.typography.labelSmall, color = Color.White)
+                                }
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.85f)
+                            ) {
+                                Text(
+                                    text = when {
+                                        streamTelemetry.privacyShieldActive -> "Privacy Shield ON"
+                                        streamTelemetry.concurrentViewers != null -> "${streamTelemetry.concurrentViewers} watching"
+                                        streamTelemetry.capturePreviewActive -> "Live Preview Active"
+                                        isLive -> streamTelemetry.captureMode.shortLabel
+                                        else -> streamSettings.captureMode.shortLabel
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    color = if (streamTelemetry.privacyShieldActive || streamTelemetry.capturePreviewActive) ZroEmerald else Color.White,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                )
+                            }
                         }
                     }
 
@@ -731,7 +798,8 @@ private fun BroadcastTabContent(
                 OutlinedTextField(
                     value = streamSettings.rtmpUrl,
                     onValueChange = { onUpdateStreamSettings(streamSettings.copy(rtmpUrl = it)) },
-                    label = { Text("RTMP Server URL") },
+                    label = { Text("Stream RTMP URL") },
+                    placeholder = { Text("rtmp:// or rtmps:// ingest server URL") },
                     singleLine = true,
                     enabled = !isRunning,
                     modifier = Modifier
@@ -743,8 +811,8 @@ private fun BroadcastTabContent(
                 OutlinedTextField(
                     value = streamSettings.streamKey,
                     onValueChange = { onUpdateStreamSettings(streamSettings.copy(streamKey = it)) },
-                    label = { Text("YouTube Stream Key") },
-                    placeholder = { Text("xxxx-xxxx-xxxx-xxxx-xxxx") },
+                    label = { Text("Stream Key") },
+                    placeholder = { Text("Enter your stream key") },
                     singleLine = true,
                     enabled = !isRunning,
                     visualTransformation = if (showStreamKey) VisualTransformation.None else PasswordVisualTransformation(),

@@ -74,7 +74,7 @@ enum class CaptureMode(
 
     companion object {
         fun fromName(raw: String?): CaptureMode =
-            entries.firstOrNull { it.name == raw } ?: GAME_APP_ONLY
+            entries.firstOrNull { it.name == raw } ?: FULL_SCREEN
     }
 }
 
@@ -195,8 +195,8 @@ enum class StreamPlatform(val label: String, val defaultRtmpUrl: String) {
 
 data class StreamSettings(
     val platform: StreamPlatform = StreamPlatform.YOUTUBE,
-    val rtmpUrl: String = "rtmp://a.rtmp.youtube.com/live2",
-    val backupRtmpUrl: String = "rtmp://b.rtmp.youtube.com/live2",
+    val rtmpUrl: String = "",
+    val backupRtmpUrl: String = "",
     val useRtmps: Boolean = false,
     val useBackupServer: Boolean = false,
     val streamKey: String = "",
@@ -212,9 +212,9 @@ data class StreamSettings(
     val encoder: EncoderPreference = EncoderPreference.HARDWARE,
     val orientation: StreamOrientation = StreamOrientation.LANDSCAPE,
     val streamDelaySec: Int = 0,
-    // Privacy-first capture configuration: GAME_APP_ONLY by default; FULL_SCREEN disabled by default
-    val captureMode: CaptureMode = CaptureMode.GAME_APP_ONLY,
-    val fullScreenExplicitlyEnabled: Boolean = false,
+    // Default 1-phone full screen capture; switches automatically to 2nd phone when paired
+    val captureMode: CaptureMode = CaptureMode.FULL_SCREEN,
+    val fullScreenExplicitlyEnabled: Boolean = true,
     val screenCaptureName: String = "Gameplay Capture",
     // YouTube Live Chat API credentials (optional, honest fallback to YouTube Live URL)
     val youtubeVideoId: String = "",
@@ -225,22 +225,25 @@ data class StreamSettings(
     val lowDataMode: Boolean = false
 ) {
     fun effectivePrimaryServerUrl(): String {
-        val raw = rtmpUrl.trim().ifBlank { "rtmp://a.rtmp.youtube.com/live2" }
-        return if (useRtmps && raw.startsWith("rtmp://", ignoreCase = true)) {
+        val raw = rtmpUrl.trim()
+        if (raw.isBlank()) return ""
+        val withScheme = if (useRtmps && raw.startsWith("rtmp://", ignoreCase = true)) {
             "rtmps://" + raw.removePrefix("rtmp://")
         } else {
             raw
         }
+        return com.example.streaming.RtmpPublisher.normalizeEndpointUrl(withScheme)
     }
 
     fun effectiveBackupServerUrl(): String {
         val raw = backupRtmpUrl.trim()
         if (raw.isBlank()) return ""
-        return if (useRtmps && raw.startsWith("rtmp://", ignoreCase = true)) {
+        val withScheme = if (useRtmps && raw.startsWith("rtmp://", ignoreCase = true)) {
             "rtmps://" + raw.removePrefix("rtmp://")
         } else {
             raw
         }
+        return com.example.streaming.RtmpPublisher.normalizeEndpointUrl(withScheme)
     }
 }
 
@@ -341,7 +344,15 @@ enum class StreamLifecycleState(val displayLabel: String) {
     LIVE("LIVE"),
     PAUSED("PAUSED"),
     RECONNECTING("RECONNECTING"),
-    ERROR("ERROR")
+    ERROR("ERROR");
+
+    val isActive: Boolean
+        get() = this == CONNECTING ||
+            this == CONNECTED ||
+            this == SENDING_VIDEO ||
+            this == LIVE ||
+            this == PAUSED ||
+            this == RECONNECTING
 }
 
 enum class StreamHealth(val label: String) {
@@ -350,6 +361,11 @@ enum class StreamHealth(val label: String) {
     FAIR("Fair"),
     POOR("Poor"),
     OFFLINE("Offline")
+}
+
+enum class LiveVideoSource(val label: String) {
+    LOCAL_FULL_SCREEN("This Phone Screen"),
+    REMOTE_SECOND_PHONE("2nd Phone Screen")
 }
 
 data class StreamRuntimeTelemetry(
@@ -369,11 +385,13 @@ data class StreamRuntimeTelemetry(
     val reconnectAttempt: Int = 0,
     val errorMessage: String? = null,
     val activeSessionId: String? = null,
-    // Game / App-Only Capture & Privacy Shield state
+    // Capture & Dual-Phone auto source switching state
     val captureActive: Boolean = false,
     val capturePreviewActive: Boolean = false,
-    val captureMode: CaptureMode = CaptureMode.GAME_APP_ONLY,
-    val captureSourceLabel: String = "No game selected",
+    val captureMode: CaptureMode = CaptureMode.FULL_SCREEN,
+    val activeVideoSource: LiveVideoSource = LiveVideoSource.LOCAL_FULL_SCREEN,
+    val isReconnectedSession: Boolean = false,
+    val captureSourceLabel: String = "This Phone Full Screen",
     val capturedContentVisible: Boolean = true,
     val privacyShieldActive: Boolean = false,
     val capturedWidth: Int = 0,
@@ -488,6 +506,10 @@ data class StreamSessionDoc(
     val droppedFrames: Long = 0L,
     val peakBitrateKbps: Long = 0L,
     val status: String = "ENDED",
+    val platformLabel: String = "YouTube / RTMP",
+    val rtmpUrl: String = "",
+    val sceneSlotName: String = "GAMEPLAY_LIVE",
+    val startedAtEpochMs: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )

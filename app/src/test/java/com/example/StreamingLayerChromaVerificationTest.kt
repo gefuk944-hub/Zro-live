@@ -64,12 +64,11 @@ class StreamingLayerChromaVerificationTest {
     @Test
     fun `rtmp validation enforces separated server URL and stream key with masking`() {
         val defaults = StreamSettings()
-        assertEquals("rtmp://a.rtmp.youtube.com/live2", defaults.effectivePrimaryServerUrl())
-        assertEquals("rtmp://b.rtmp.youtube.com/live2", defaults.effectiveBackupServerUrl())
+        assertEquals("", defaults.effectivePrimaryServerUrl())
+        assertEquals("", defaults.effectiveBackupServerUrl())
 
-        val rtmpsSettings = defaults.copy(useRtmps = true)
-        assertEquals("rtmps://a.rtmp.youtube.com/live2", rtmpsSettings.effectivePrimaryServerUrl())
-        assertEquals("rtmps://b.rtmp.youtube.com/live2", rtmpsSettings.effectiveBackupServerUrl())
+        val rtmpsSettings = defaults.copy(rtmpUrl = "rtmp://a.rtmp.youtube.com/live2", useRtmps = true)
+        assertEquals("rtmps://a.rtmps.youtube.com/live2", rtmpsSettings.effectivePrimaryServerUrl())
 
         // Reject RTMP URL accidentally pasted into Stream Key
         val urlInKey = RtmpPublisher.validateConfig(
@@ -459,9 +458,10 @@ class StreamingLayerChromaVerificationTest {
         composeRule.onNodeWithTag("live_setup_list")
             .performScrollToNode(hasTestTag("live_setup_primary_url_input"))
         composeRule.onNodeWithTag("live_setup_primary_url_input").assertIsDisplayed()
-        composeRule.onNodeWithTag("live_setup_list")
-            .performScrollToNode(hasTestTag("live_setup_backup_url_input"))
-        composeRule.onNodeWithTag("live_setup_backup_url_input").assertIsDisplayed()
+        // Removed red-marked controls must NOT exist
+        composeRule.onNodeWithTag("live_setup_backup_url_input").assertDoesNotExist()
+        composeRule.onNodeWithTag("live_setup_paste_key_btn").assertDoesNotExist()
+        composeRule.onNodeWithTag("live_setup_copy_key_btn").assertDoesNotExist()
         composeRule.onNodeWithTag("live_setup_list")
             .performScrollToNode(hasTestTag("live_setup_stream_key_input"))
         composeRule.onNodeWithTag("live_setup_stream_key_input").assertIsDisplayed()

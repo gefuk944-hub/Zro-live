@@ -110,10 +110,12 @@ enum class FacecamShape(val label: String) {
 }
 
 enum class CameraSourceMode(val label: String, val subtitle: String) {
-    PHONE2_FRONT("Phone 2 Front Cam", "Built-in front camera on this studio device"),
-    PHONE2_REAR("Phone 2 Rear Cam", "Built-in rear camera on this studio device"),
-    EXTERNAL_UVC("External Camera", "Compatible USB/external camera where OS supports CameraX"),
-    PHONE1_REMOTE("Phone 1 Camera", "Authorized paired Phone 1 camera feed over local link");
+    PHONE2_FRONT("Front Camera", "Built-in front facecam on this device"),
+    PHONE2_REAR("Rear Camera", "Built-in rear camera on this device"),
+    DJI_USB_UVC("DJI / USB-UVC & HDMI Card", "DJI Osmo Pocket 3 / Action 4-5 Pro (UVC mode) or HDMI-to-USB capture card"),
+    DJI_WIRELESS("DJI Wireless Companion", "Wireless DJI Mimo / RTMP-LAN camera companion feed over local Wi-Fi"),
+    EXTERNAL_UVC("External USB Camera", "Generic USB Video Class (UVC) camera supported by Android Camera2/CameraX"),
+    PHONE1_REMOTE("2nd Phone Camera", "Authorized paired second-phone camera feed over local link");
 
     companion object {
         fun fromName(raw: String?): CameraSourceMode =
