@@ -25,9 +25,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.automirrored.rounded.Send
-import androidx.compose.material.icons.rounded.Chat
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Fullscreen
@@ -103,6 +103,7 @@ import com.example.ui.components.AudioLevelMeter
 import com.example.ui.components.BrandGradientButton
 import com.example.ui.components.GlassCard
 import com.example.ui.components.LiveStatusBadge
+import java.util.Locale
 import com.example.ui.components.ProSubpageTopBar
 import com.example.ui.components.RenameScreenCaptureDialog
 import com.example.ui.components.SectionHeader
@@ -248,7 +249,7 @@ fun LiveStudioScreen(
                                     LiveStudioTab.LIVE_MANAGER -> Icons.Rounded.History
                                     LiveStudioTab.BROADCAST -> Icons.Rounded.RadioButtonChecked
                                     LiveStudioTab.AUDIO_MIXER -> Icons.Rounded.GraphicEq
-                                    LiveStudioTab.YOUTUBE_CHAT -> Icons.Rounded.Chat
+                                    LiveStudioTab.YOUTUBE_CHAT -> Icons.AutoMirrored.Rounded.Chat
                                 },
                                 contentDescription = tab.label,
                                 tint = if (active) ZroCobalt else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -544,8 +545,8 @@ private fun BroadcastTabContent(
                             )
                             HudMetricPill(
                                 "BITRATE",
-                                if (isLive) "${String.format("%.1f", streamTelemetry.actualBitrateKbps / 1000f)}M"
-                                else "${String.format("%.1f", streamSettings.bitrateKbps / 1000f)}M",
+                                if (isLive) "${String.format(Locale.US, "%.1f", streamTelemetry.actualBitrateKbps / 1000f)}M"
+                                else "${String.format(Locale.US, "%.1f", streamSettings.bitrateKbps / 1000f)}M",
                                 Modifier.weight(1f)
                             )
                             HudMetricPill(
@@ -922,7 +923,7 @@ private fun BroadcastTabContent(
                 ) {
                     Text("Target Bitrate", style = MaterialTheme.typography.titleSmall, color = Color.White)
                     Text(
-                        text = "${String.format("%.1f", streamSettings.bitrateKbps / 1000f)} Mbps (${streamSettings.bitrateKbps} kbps)",
+                        text = "${String.format(Locale.US, "%.1f", streamSettings.bitrateKbps / 1000f)} Mbps (${streamSettings.bitrateKbps} kbps)",
                         style = MaterialTheme.typography.labelMedium,
                         fontFamily = JetBrainsMonoFontFamily,
                         color = ZroCobalt
@@ -1045,7 +1046,7 @@ private fun AudioMixerTabContent(
                     level = audioMeters.masterLevel,
                     peak = audioMeters.masterPeak,
                     label = "MASTER BROADCAST OUTPUT (${if (audioSettings.stereoOutput) "STEREO" else "MONO"})",
-                    dbText = "${String.format("%.1f", audioMeters.masterDb)} dBFS"
+                    dbText = "${String.format(Locale.US, "%.1f", audioMeters.masterDb)} dBFS"
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
@@ -1291,7 +1292,7 @@ private fun MixerChannelControl(
         }
         AudioLevelMeter(
             level = meterLevel,
-            dbText = "${String.format("%.1f", meterDb)} dB",
+            dbText = "${String.format(Locale.US, "%.1f", meterDb)} dB",
             muted = !enabled
         )
         Slider(

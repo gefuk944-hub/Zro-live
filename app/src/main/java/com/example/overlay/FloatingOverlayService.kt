@@ -1,5 +1,6 @@
 package com.example.overlay
 
+import android.annotation.SuppressLint
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -286,6 +287,7 @@ class FloatingOverlayService : Service() {
         }
     }
 
+    @SuppressLint("ClickableViewAccessibility")
     private fun attachDragAndTapHandler(
         badge: View,
         lp: WindowManager.LayoutParams,
@@ -298,7 +300,7 @@ class FloatingOverlayService : Service() {
         var startY = 0
         var dragged = false
 
-        badge.setOnTouchListener { _, event ->
+        badge.setOnTouchListener { v, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.rawX
@@ -323,6 +325,7 @@ class FloatingOverlayService : Service() {
                 }
                 MotionEvent.ACTION_UP -> {
                     if (!dragged) {
+                        v.performClick()
                         toggleDrawer(!isExpanded)
                     }
                     true

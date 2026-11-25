@@ -174,7 +174,7 @@ class StreamingForegroundService : Service() {
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW && isStreaming.get()) {
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND && isStreaming.get()) {
             if (activeBitrateKbps > 1500) {
                 val reduced = (activeBitrateKbps * 0.85f).toInt().coerceAtLeast(1500)
                 applyDynamicVideoBitrate(reduced)
@@ -344,8 +344,12 @@ class StreamingForegroundService : Service() {
             ).valid
             ZroStreamCoordinator.updateTelemetry {
                 it.copy(
-                    state = if (readyConfig) StreamLifecycleState.READY else StreamLifecycleState.IDLE,
-                    statusDetail = if (readyConfig) "Game capture ready. Press START LIVE to broadcast." else "Game capture active. Configure Stream Key in Live Setup.",
+                    state = StreamLifecycleState.IDLE,
+                    statusDetail = if (readyConfig) {
+                        "Offline — screen capture preview active. Press START LIVE to connect."
+                    } else {
+                        "Offline — capture preview active. Configure RTMP URL & Stream Key in Live Setup."
+                    },
                     captureActive = true,
                     capturePreviewActive = true,
                     captureMode = activeCaptureMode,
@@ -583,52 +587,14 @@ class StreamingForegroundService : Service() {
                     null
                 }
 
-                // Step 2: Initialize Video Encoder & attach active video source (Phone 1 screen OR 2nd Phone feed)
-                val (width, height) = resolveDimensions(settings.resolution.width, settings.resolution.height, settings.orientation)
-                activeStreamWidth = width
-                activeStreamHeight = height
-                val encoderName = setupVideoEncoder(width, height, activeSessionFps, activeBitrateKbps)
-                if (activeVideoSource == LiveVideoSource.REMOTE_SECOND_PHONE) {
-                    // Phone 1 full-screen capture stays stopped; pump 2nd phone screen directly into H.264 encoder
-                    releaseVirtualDisplayOnly()
-                    startRemoteSecondPhoneFramePump()
-                } else if (projection != null) {
-                    createOrUpdateVirtualDisplay(projection, width, height, videoInputSurface)
-                    startDualPhoneMirrorCaptureIfNeeded(projection)
-                }
+                // Step 2: Connect to RTMP/RTMPS server FIRST so SPS/PPS, AAC sequence header,
+                // and the initial IDR keyframe are sent immediately with zero startup loss.
                 ZroStreamCoordinator.updateTelemetry {
                     it.copy(
-                        activeEncoderName = encoderName,
-                        videoEncoderReady = true,
-                        statusDetail = "Video encoder ready ($encoderName). Starting audio mixer…"
+                        state = StreamLifecycleState.CONNECTING,
+                        statusDetail = "Handshaking with streaming server…"
                     )
                 }
-
-                // Step 3: Initialize AAC Audio Encoder & attach unified ZroAudioEngine mixer
-                setupAudioEncoder(activeStereoAudio)
-                ZroAudioEngine.applyPerformanceSettings(perf)
-                val hasMic = ZroAudioEngine.hasMicPermission(this@StreamingForegroundService)
-                ZroAudioEngine.startStreamingAudio(this@StreamingForegroundService, projection)
-                if (hasMic) {
-                    ZroAudioEngine.setBroadcastPcmConsumer { pcmBytes, length, ptsUs ->
-                        if (!isPaused.get() && isStreaming.get()) {
-                            feedPcmToAacEncoder(pcmBytes, length, ptsUs)
-                        }
-                    }
-                } else {
-                    // Keep YouTube Live audio track alive with valid silent AAC frames if mic permission is denied
-                    startSilentAudioFallbackLoop(activeStereoAudio)
-                }
-                ZroStreamCoordinator.updateTelemetry {
-                    it.copy(
-                        audioEncoderReady = true,
-                        gameAudioCaptureActive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && projection != null,
-                        gameAudioCaptureNote = ZroAudioEngine.gameCaptureStatus.value,
-                        statusDetail = "Encoders ready. Handshaking with streaming server…"
-                    )
-                }
-
-                // Step 4: Connect to RTMP/RTMPS server with strict TLS & real AMF0 confirmation
                 val publisher = RtmpPublisher()
                 rtmpPublisher = publisher
                 val connectResult = publisher.connectWithFailover(
@@ -645,17 +611,21 @@ class StreamingForegroundService : Service() {
                 }
 
                 val connInfo = connectResult.getOrThrow()
+                val (width, height) = resolveDimensions(settings.resolution.width, settings.resolution.height, settings.orientation)
+                activeStreamWidth = width
+                activeStreamHeight = height
+
                 ZroStreamCoordinator.updateTelemetry {
                     it.copy(
                         state = StreamLifecycleState.CONNECTED,
                         activeServerUrl = connInfo.serverUrl,
                         usingBackupServer = connInfo.usedBackup,
-                        statusDetail = "Connected (${connInfo.latencyMs} ms). Sending stream metadata & video…"
+                        statusDetail = "Connected (${connInfo.latencyMs} ms). Starting H.264 video & AAC audio encoders…"
                     )
                 }
                 refreshNotification()
 
-                // Step 5: Send onMetaData & start real encoded video/audio transmission
+                // Step 3: Send onMetaData & initial AAC sequence header immediately after publish confirmation
                 publisher.sendMetaData(
                     width = width,
                     height = height,
@@ -665,21 +635,61 @@ class StreamingForegroundService : Service() {
                     audioBitrateKbps = if (activeStereoAudio) 128 else 96,
                     stereo = activeStereoAudio
                 )
-                // Proactively send AAC sequence header so audio decoder initializes immediately
                 val fallbackAsc = RtmpPublisher.buildAacAudioSpecificConfig(ZroAudioEngine.SAMPLE_RATE, activeStereoAudio)
                 cachedAsc = fallbackAsc
                 publisher.sendAacSequenceHeader(fallbackAsc)
+
+                // Step 4: Initialize Video Encoder & attach active video source (Phone 1 screen OR 2nd Phone feed)
+                val encoderName = setupVideoEncoder(width, height, activeSessionFps, activeBitrateKbps)
+                if (activeVideoSource == LiveVideoSource.REMOTE_SECOND_PHONE) {
+                    // Phone 1 full-screen capture stays stopped; pump 2nd phone screen directly into H.264 encoder
+                    releaseVirtualDisplayOnly()
+                    startRemoteSecondPhoneFramePump()
+                } else if (projection != null) {
+                    createOrUpdateVirtualDisplay(projection, width, height, videoInputSurface)
+                    startDualPhoneMirrorCaptureIfNeeded(projection)
+                }
+                ZroStreamCoordinator.updateTelemetry {
+                    it.copy(
+                        activeEncoderName = encoderName,
+                        videoEncoderReady = true,
+                        statusDetail = "Video encoder active ($encoderName). Starting AAC audio mixer…"
+                    )
+                }
+
+                // Step 5: Initialize AAC Audio Encoder & attach unified ZroAudioEngine mixer with locked stereo/mono parity
+                setupAudioEncoder(activeStereoAudio)
+                ZroAudioEngine.applyPerformanceSettings(perf)
+                val hasMic = ZroAudioEngine.hasMicPermission(this@StreamingForegroundService)
+                ZroAudioEngine.startStreamingAudio(
+                    context = this@StreamingForegroundService,
+                    mediaProjection = projection,
+                    forceStereo = activeStereoAudio
+                )
+                if (hasMic) {
+                    ZroAudioEngine.setBroadcastPcmConsumer { pcmBytes, length, ptsUs ->
+                        if (!isPaused.get() && isStreaming.get()) {
+                            feedPcmToAacEncoder(pcmBytes, length, ptsUs)
+                        }
+                    }
+                } else {
+                    // Keep YouTube Live audio track alive with valid silent AAC frames if mic permission is denied
+                    startSilentAudioFallbackLoop(activeStereoAudio)
+                }
 
                 isStreaming.set(true)
                 ZroStreamCoordinator.updateTelemetry {
                     it.copy(
                         state = StreamLifecycleState.SENDING_VIDEO,
+                        audioEncoderReady = true,
+                        gameAudioCaptureActive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && projection != null,
+                        gameAudioCaptureNote = ZroAudioEngine.gameCaptureStatus.value,
                         statusDetail = "Sending H.264 video & AAC audio packets…"
                     )
                 }
                 refreshNotification()
 
-                // Request an immediate keyframe so YouTube Studio locks signal quickly
+                // Request an immediate IDR keyframe and begin draining encoded H.264 + AAC frames
                 requestVideoKeyFrame()
                 startVideoDrainLoop()
                 startAudioDrainLoop()
@@ -779,11 +789,7 @@ class StreamingForegroundService : Service() {
                 }
                 try {
                     if (!surface.isValid) break
-                    val canvas: Canvas = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        surface.lockHardwareCanvas()
-                    } else {
-                        surface.lockCanvas(null)
-                    }
+                    val canvas: Canvas = surface.lockHardwareCanvas()
                     try {
                         val cw = canvas.width
                         val ch = canvas.height
@@ -1450,6 +1456,11 @@ class StreamingForegroundService : Service() {
             mirrorImageReader = reader
             val baos = ByteArrayOutputStream(48 * 1024)
             var lastPushMs = 0L
+            var reusablePaddedBmp: Bitmap? = null
+            var reusableCroppedBmp: Bitmap? = null
+            var reusableCropCanvas: Canvas? = null
+            val srcRect = Rect(0, 0, mirrorW, mirrorH)
+            val dstRect = Rect(0, 0, mirrorW, mirrorH)
 
             reader.setOnImageAvailableListener({ r ->
                 val img = runCatching { r.acquireLatestImage() }.getOrNull() ?: return@setOnImageAvailableListener
@@ -1467,16 +1478,27 @@ class StreamingForegroundService : Service() {
                     val rowStride = plane.rowStride
                     val rowPadding = rowStride - pixelStride * mirrorW
                     val paddedW = mirrorW + rowPadding / pixelStride
-                    val bmp = Bitmap.createBitmap(paddedW, mirrorH, Bitmap.Config.ARGB_8888)
-                    bmp.copyPixelsFromBuffer(plane.buffer)
-                    val cropped = if (paddedW != mirrorW) {
-                        Bitmap.createBitmap(bmp, 0, 0, mirrorW, mirrorH).also { bmp.recycle() }
+                    var paddedBmp = reusablePaddedBmp
+                    if (paddedBmp == null || paddedBmp.isRecycled || paddedBmp.width != paddedW || paddedBmp.height != mirrorH) {
+                        runCatching { paddedBmp?.recycle() }
+                        paddedBmp = Bitmap.createBitmap(paddedW, mirrorH, Bitmap.Config.ARGB_8888)
+                        reusablePaddedBmp = paddedBmp
+                    }
+                    paddedBmp.copyPixelsFromBuffer(plane.buffer)
+                    val outBmp = if (paddedW != mirrorW) {
+                        var cropBmp = reusableCroppedBmp
+                        if (cropBmp == null || cropBmp.isRecycled) {
+                            cropBmp = Bitmap.createBitmap(mirrorW, mirrorH, Bitmap.Config.ARGB_8888)
+                            reusableCroppedBmp = cropBmp
+                            reusableCropCanvas = Canvas(cropBmp)
+                        }
+                        reusableCropCanvas?.drawBitmap(paddedBmp, srcRect, dstRect, null)
+                        cropBmp
                     } else {
-                        bmp
+                        paddedBmp
                     }
                     baos.reset()
-                    cropped.compress(Bitmap.CompressFormat.JPEG, 72, baos)
-                    cropped.recycle()
+                    outBmp.compress(Bitmap.CompressFormat.JPEG, 70, baos)
                     DualPhoneEngine.shared.pushMirroredFrameJpeg(baos.toByteArray(), mirrorW, mirrorH, minIntervalMs = 33L)
                 } catch (_: Exception) {
                     // Best-effort mirror frame
@@ -1548,7 +1570,7 @@ class StreamingForegroundService : Service() {
         if (wasCleanStop) {
             serviceScope.launch { runCatching { settingsStore.markActiveLiveCleanlyEnded() } }
         } else if (finishedSessionId != null && (wasStreaming || wasConfirmedLive)) {
-            val sanitizedErr = CrashRecoveryStore.scrubSecrets(error ?: "")
+            val sanitizedErr = CrashRecoveryStore.scrubSecrets(error)
             CrashRecoveryStore.recordEvent(applicationContext, "NETWORK", "Interrupted live ($finishedSessionId): $sanitizedErr")
             serviceScope.launch {
                 val cfg = ZroStreamCoordinator.currentStreamSettings

@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
@@ -179,7 +180,7 @@ object ZroStreamCoordinator {
         val h = safe / 3600
         val m = (safe % 3600) / 60
         val s = safe % 60
-        return String.format("%02d:%02d:%02d", h, m, s)
+        return String.format(Locale.US, "%02d:%02d:%02d", h, m, s)
     }
 
     fun resetToIdle(error: String? = null) {

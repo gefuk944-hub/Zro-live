@@ -345,4 +345,52 @@ class ZroCompleteFixVerificationTest {
         assertFalse("Misspelled youtude.com host must fail fast before TCP connect", validation.valid)
         assertTrue(validation.errorMessage.orEmpty().contains("youtube.com"))
     }
+
+    @Test
+    fun `rotated layer drag deltas transform accurately back into canvas screen coordinates`() {
+        val (dx0, dy0) = com.example.ui.components.CanvasGestureMath.rotateLocalDragToCanvas(10f, 0f, 0f)
+        assertEquals(10f, dx0, 0.01f)
+        assertEquals(0f, dy0, 0.01f)
+
+        // 90 deg rotation: local +X maps to canvas +Y
+        val (dx90, dy90) = com.example.ui.components.CanvasGestureMath.rotateLocalDragToCanvas(10f, 0f, 90f)
+        assertEquals(0f, dx90, 0.01f)
+        assertEquals(10f, dy90, 0.01f)
+
+        // 180 deg rotation: local +X maps to canvas -X
+        val (dx180, dy180) = com.example.ui.components.CanvasGestureMath.rotateLocalDragToCanvas(10f, -5f, 180f)
+        assertEquals(-10f, dx180, 0.01f)
+        assertEquals(5f, dy180, 0.01f)
+
+        // 270 deg rotation: local +X maps to canvas -Y
+        val (dx270, dy270) = com.example.ui.components.CanvasGestureMath.rotateLocalDragToCanvas(10f, 0f, 270f)
+        assertEquals(0f, dx270, 0.01f)
+        assertEquals(-10f, dy270, 0.01f)
+    }
+
+    @Test
+    fun `proportional 8-handle resize holds aspect ratio even when hitting canvas boundary edges`() {
+        var state = StudioWorkspaceState()
+        val layer = SceneLayer(
+            id = "prop_edge",
+            name = "Browser Source",
+            type = LayerSourceType.BROWSER_WEB,
+            x = 0.65f,
+            y = 0.60f,
+            width = 0.30f,
+            height = 0.30f,
+            lockAspectRatio = true
+        )
+        state = StudioWorkspaceReducer.addLayer(state, layer)
+        val initialAspect = layer.width / layer.height
+
+        // Drag far beyond bottom-right canvas corner
+        val resized = StudioWorkspaceReducer.resizeLayerFromCorner(
+            state, layer.id, ResizeCorner.BOTTOM_RIGHT, dxNorm = 0.80f, dyNorm = 0.80f, proportional = true
+        )
+        val out = resized.activeScene.layers.first { it.id == layer.id }
+        assertTrue("Layer must stay strictly within right boundary", out.x + out.width <= 1.0001f)
+        assertTrue("Layer must stay strictly within bottom boundary", out.y + out.height <= 1.0001f)
+        assertEquals("Aspect ratio must not drift when clamped at canvas edge", initialAspect, out.width / out.height, 0.02f)
+    }
 }

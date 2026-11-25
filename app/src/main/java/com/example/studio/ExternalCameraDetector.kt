@@ -6,7 +6,6 @@ import android.hardware.camera2.CameraManager
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
-import android.os.Build
 
 data class DetectedUsbVideoDevice(
     val deviceName: String,
@@ -132,5 +131,5 @@ object ExternalCameraDetector {
         return false
     }
 
-    fun supportsExternalCamera2Api(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+    fun supportsExternalCamera2Api(): Boolean = true
 }

@@ -12,6 +12,7 @@ import com.example.MainActivity
 import com.example.R
 import com.example.data.model.StreamLifecycleState
 import com.example.data.model.StreamRuntimeTelemetry
+import java.util.Locale
 
 class StreamNotificationManager(private val context: Context) {
 
@@ -124,7 +125,7 @@ class StreamNotificationManager(private val context: Context) {
                 "Zro live Ready"
         }
 
-        val bitrateMbps = String.format("%.1f", telemetry.actualBitrateKbps / 1000f)
+        val bitrateMbps = String.format(Locale.US, "%.1f", telemetry.actualBitrateKbps / 1000f)
         val contentText = when {
             telemetry.privacyShieldActive && isStreaming ->
                 "Video paused automatically while selected game is in background."

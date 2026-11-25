@@ -365,12 +365,14 @@ class DualPhoneEngine {
             }
             runCatching { client.close() }
             if (!intentionalStop.get() && controlServerSocket?.isClosed == false) {
+                _mirroredFrame.value = null
                 _telemetry.update {
                     it.copy(
                         linkState = DualLinkState.HOSTING,
                         connectedDeviceName = "",
                         signalQualityLabel = "Waiting for Phone 1",
-                        mirroredFps = 0
+                        mirroredFps = 0,
+                        uploadKbps = 0
                     )
                 }
             }
@@ -387,8 +389,24 @@ class DualPhoneEngine {
             try {
                 client.tcpNoDelay = true
                 client.receiveBufferSize = 128 * 1024
-                activeVideoSocket = client
+                client.soTimeout = 4000
                 val dataIn = DataInputStream(BufferedInputStream(client.getInputStream(), 131072))
+
+                // Security: authenticate the video mirror socket with the active pairing token
+                val presentedToken = runCatching { dataIn.readUTF().trim().uppercase() }.getOrNull().orEmpty()
+                val expectedToken = _telemetry.value.pairingToken.trim().uppercase()
+                val tokenValid = expectedToken.isNotBlank() && java.security.MessageDigest.isEqual(
+                    presentedToken.toByteArray(Charsets.UTF_8),
+                    expectedToken.toByteArray(Charsets.UTF_8)
+                )
+                if (!tokenValid) {
+                    Log.w(TAG, "Rejected unauthenticated video mirror connection")
+                    runCatching { client.close() }
+                    continue
+                }
+                client.soTimeout = 0
+                activeVideoSocket = client
+
                 var lastStatMs = System.currentTimeMillis()
                 var framesInSec = 0
                 var bytesInSec = 0L
@@ -423,7 +441,10 @@ class DualPhoneEngine {
             } catch (e: Exception) {
                 Log.w(TAG, "Video mirror stream closed: ${e.message}")
             } finally {
-                if (activeVideoSocket == client) activeVideoSocket = null
+                if (activeVideoSocket == client) {
+                    activeVideoSocket = null
+                    _mirroredFrame.value = null
+                }
                 runCatching { client.close() }
             }
         }
@@ -516,8 +537,8 @@ class DualPhoneEngine {
                 activeControlSocket = socket
                 controlWriter = writer
 
-                // Connect auxiliary video mirroring channel (best-effort; control still works if blocked)
-                connectPhone1VideoChannel(lastConnectIp, negotiatedVideoPort)
+                // Connect authenticated video mirroring channel with automatic recovery
+                connectPhone1VideoChannel(lastConnectIp, negotiatedVideoPort, lastConnectToken)
 
                 _telemetry.update {
                     it.copy(
@@ -564,7 +585,7 @@ class DualPhoneEngine {
                     Log.w(TAG, "Phone 1 connection interrupted: ${e.message}")
                     _telemetry.update {
                         it.copy(
-                            linkState = if (it.autoReconnect && attempt < 8) DualLinkState.RECONNECTING else DualLinkState.ERROR,
+                            linkState = if (it.autoReconnect && attempt < 20) DualLinkState.RECONNECTING else DualLinkState.ERROR,
                             signalQualityLabel = "Disconnected",
                             lastError = e.localizedMessage ?: "Connection to Phone 2 lost."
                         )
@@ -578,29 +599,36 @@ class DualPhoneEngine {
                 runCatching { socket?.close() }
                 closeVideoChannel()
 
-                if (!intentionalStop.get() && _telemetry.value.autoReconnect && attempt < 8) {
+                if (!intentionalStop.get() && _telemetry.value.autoReconnect && attempt < 20) {
                     scheduleAutoReconnect(attempt + 1)
                 }
             }
         }
     }
 
-    private fun connectPhone1VideoChannel(ip: String, videoPort: Int) {
+    private fun connectPhone1VideoChannel(ip: String, videoPort: Int, token: String) {
         videoLoopJob?.cancel()
         videoSenderJob?.cancel()
         videoLoopJob = scope.launch {
-            try {
-                val vs = Socket().apply {
-                    tcpNoDelay = true
-                    sendBufferSize = 128 * 1024
-                    connect(InetSocketAddress(ip, videoPort), 4000)
-                }
-                activeVideoSocket = vs
-                val out = DataOutputStream(BufferedOutputStream(vs.getOutputStream(), 131072))
-                videoDataOut = out
-                videoSenderJob = scope.launch {
+            var retryDelayMs = 1000L
+            while (isActive && !intentionalStop.get() && activeControlSocket?.isClosed == false) {
+                var vs: Socket? = null
+                try {
+                    vs = Socket().apply {
+                        tcpNoDelay = true
+                        sendBufferSize = 128 * 1024
+                        connect(InetSocketAddress(ip, videoPort), 4000)
+                    }
+                    activeVideoSocket = vs
+                    val out = DataOutputStream(BufferedOutputStream(vs.getOutputStream(), 131072))
+                    // Send pairing token header before streaming frames
+                    out.writeUTF(token)
+                    out.flush()
+                    videoDataOut = out
+                    retryDelayMs = 1000L
+
                     for (jpegBytes in latestMirrorFrameChannel) {
-                        if (intentionalStop.get() || vs.isClosed) break
+                        if (intentionalStop.get() || vs.isClosed || activeControlSocket?.isClosed == true) break
                         try {
                             synchronized(out) {
                                 out.writeInt(jpegBytes.size)
@@ -614,9 +642,17 @@ class DualPhoneEngine {
                             break
                         }
                     }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Video mirror socket warning: ${e.message}")
+                } finally {
+                    videoDataOut = null
+                    if (activeVideoSocket == vs) activeVideoSocket = null
+                    runCatching { vs?.close() }
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "Optional video mirror socket unavailable: ${e.message}")
+                if (!intentionalStop.get() && activeControlSocket?.isClosed == false) {
+                    delay(retryDelayMs)
+                    retryDelayMs = (retryDelayMs * 2L).coerceAtMost(5000L)
+                }
             }
         }
     }

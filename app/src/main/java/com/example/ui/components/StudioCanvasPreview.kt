@@ -482,6 +482,7 @@ private fun StudioLayerNode(
         else -> null
     }
 
+    val latestRotationDeg by rememberUpdatedState(layer.rotationDeg)
     val effectiveOpacity = if (bypassGraphicAdjustment) 1.0f else layer.opacity.coerceIn(0.05f, 1f)
 
     Box(
@@ -529,8 +530,13 @@ private fun StudioLayerNode(
                         onDragCancel = { latestOnDragFinished() },
                         onDrag = { change, dragAmount ->
                             change.consume()
-                            val dx = dragAmount.x / canvasWidthPx
-                            val dy = dragAmount.y / canvasHeightPx
+                            val (canvasDxPx, canvasDyPx) = CanvasGestureMath.rotateLocalDragToCanvas(
+                                localDx = dragAmount.x,
+                                localDy = dragAmount.y,
+                                rotationDeg = latestRotationDeg
+                            )
+                            val dx = canvasDxPx / canvasWidthPx
+                            val dy = canvasDyPx / canvasHeightPx
                             val moveTo = latestOnMoveTo
                             if (moveTo != null) {
                                 dragRawX += dx
@@ -546,10 +552,19 @@ private fun StudioLayerNode(
             val hasCrop = layer.cropLeft > 0.001f || layer.cropTop > 0.001f ||
                 layer.cropRight > 0.001f || layer.cropBottom > 0.001f
 
-            // Real-time visual crop clipping applied to the layer content for both selected & unselected states
+            // Real-time RenderNode + DrawScope visual crop clipping applied to both Compose layers and AndroidViews (WebView/Camera/Video)
+            val cropShape = remember(layer.cropLeft, layer.cropTop, layer.cropRight, layer.cropBottom) {
+                CropRectShape(
+                    cropLeft = layer.cropLeft,
+                    cropTop = layer.cropTop,
+                    cropRight = layer.cropRight,
+                    cropBottom = layer.cropBottom
+                )
+            }
             Box(
                 modifier = Modifier
                     .fillMaxSize()
+                    .then(if (hasCrop) Modifier.clip(cropShape) else Modifier)
                     .drawWithContent {
                         if (hasCrop) {
                             val leftPx = (size.width * layer.cropLeft).coerceIn(0f, size.width * 0.9f)
@@ -638,7 +653,7 @@ private fun SelectedLayerHandlesOverlay(
     onDragFinished: () -> Unit
 ) {
     val density = LocalDensity.current
-    val handleTouchDp = 24.dp
+    val handleTouchDp = 32.dp
     val handlePx = with(density) { handleTouchDp.toPx() }
     val halfHandlePx = handlePx / 2f
     val leftPx = layer.x * canvasWidthPx
@@ -760,18 +775,53 @@ private fun TransformBoundaryHandle(
             modifier = Modifier
                 .size(
                     width = when {
-                        isHorizontalEdge -> 14.dp
-                        isVerticalEdge -> 6.dp
-                        else -> 10.dp
+                        isHorizontalEdge -> 16.dp
+                        isVerticalEdge -> 7.dp
+                        else -> 11.dp
                     },
                     height = when {
-                        isHorizontalEdge -> 6.dp
-                        isVerticalEdge -> 14.dp
-                        else -> 10.dp
+                        isHorizontalEdge -> 7.dp
+                        isVerticalEdge -> 16.dp
+                        else -> 11.dp
                     }
                 )
                 .background(Color.White, RoundedCornerShape(2.dp))
                 .border(1.5.dp, ZroCobalt, RoundedCornerShape(2.dp))
+        )
+    }
+}
+
+object CanvasGestureMath {
+    /**
+     * Converts a local drag delta measured inside a rotated Compose Box back into unrotated
+     * canvas screen coordinates so dragging a rotated layer always follows the user's finger.
+     */
+    fun rotateLocalDragToCanvas(localDx: Float, localDy: Float, rotationDeg: Float): Pair<Float, Float> {
+        if (kotlin.math.abs(rotationDeg) <= 0.5f) return localDx to localDy
+        val rad = Math.toRadians(rotationDeg.toDouble())
+        val c = cos(rad).toFloat()
+        val s = sin(rad).toFloat()
+        return (localDx * c - localDy * s) to (localDx * s + localDy * c)
+    }
+}
+
+private class CropRectShape(
+    private val cropLeft: Float,
+    private val cropTop: Float,
+    private val cropRight: Float,
+    private val cropBottom: Float
+) : androidx.compose.ui.graphics.Shape {
+    override fun createOutline(
+        size: Size,
+        layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+        density: androidx.compose.ui.unit.Density
+    ): androidx.compose.ui.graphics.Outline {
+        val left = (size.width * cropLeft).coerceIn(0f, size.width * 0.9f)
+        val top = (size.height * cropTop).coerceIn(0f, size.height * 0.9f)
+        val right = (size.width * (1f - cropRight)).coerceIn(left + 1f, size.width)
+        val bottom = (size.height * (1f - cropBottom)).coerceIn(top + 1f, size.height)
+        return androidx.compose.ui.graphics.Outline.Rectangle(
+            androidx.compose.ui.geometry.Rect(left, top, right, bottom)
         )
     }
 }

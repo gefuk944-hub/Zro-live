@@ -223,7 +223,9 @@ object StudioWorkspaceReducer {
             val top = layer.y.coerceIn(0f, 1f - MIN_HEIGHT)
             val right = (left + layer.width).coerceIn(left + MIN_WIDTH, 1.0f)
             val bottom = (top + layer.height).coerceIn(top + MIN_HEIGHT, 1.0f)
-            val aspect = ((right - left) / (bottom - top).coerceAtLeast(0.001f)).coerceIn(0.1f, 10f)
+            val origW = (right - left).coerceAtLeast(MIN_WIDTH)
+            val origH = (bottom - top).coerceAtLeast(MIN_HEIGHT)
+            val aspect = (origW / origH).coerceIn(0.1f, 10f)
             val useProportional = proportional || layer.lockAspectRatio
 
             var newLeft = left
@@ -236,9 +238,22 @@ object StudioWorkspaceReducer {
                 val safeMaxH = maxH.coerceAtLeast(MIN_HEIGHT)
                 val upperW = minOf(safeMaxW, safeMaxH * aspect).coerceAtLeast(MIN_WIDTH)
                 val lowerW = maxOf(MIN_WIDTH, MIN_HEIGHT * aspect).coerceAtMost(upperW)
-                val w = desiredW.coerceIn(lowerW, upperW)
-                val h = (w / aspect).coerceIn(MIN_HEIGHT, safeMaxH)
+                var w = desiredW.coerceIn(lowerW, upperW)
+                var h = w / aspect
+                if (h > safeMaxH) {
+                    h = safeMaxH
+                    w = (h * aspect).coerceIn(MIN_WIDTH, safeMaxW)
+                } else if (h < MIN_HEIGHT) {
+                    h = MIN_HEIGHT
+                    w = (h * aspect).coerceIn(MIN_WIDTH, safeMaxW)
+                }
                 return w to h
+            }
+
+            fun chooseProportionalWidth(rawW: Float, rawH: Float): Float {
+                val relW = abs((rawW - origW) / origW)
+                val relH = abs((rawH - origH) / origH)
+                return if (relW >= relH) rawW else rawH * aspect
             }
 
             when (corner) {
@@ -246,8 +261,7 @@ object StudioWorkspaceReducer {
                     val rawW = (right - (left + dxNorm))
                     val rawH = (bottom - (top + dyNorm))
                     if (useProportional) {
-                        val desiredW = if (abs(dxNorm) >= abs(dyNorm)) rawW else rawH * aspect
-                        val (w, h) = fitProportional(desiredW, maxW = right, maxH = bottom)
+                        val (w, h) = fitProportional(chooseProportionalWidth(rawW, rawH), maxW = right, maxH = bottom)
                         newLeft = right - w
                         newTop = bottom - h
                     } else {
@@ -259,8 +273,7 @@ object StudioWorkspaceReducer {
                     val rawW = (right + dxNorm) - left
                     val rawH = bottom - (top + dyNorm)
                     if (useProportional) {
-                        val desiredW = if (abs(dxNorm) >= abs(dyNorm)) rawW else rawH * aspect
-                        val (w, h) = fitProportional(desiredW, maxW = 1f - left, maxH = bottom)
+                        val (w, h) = fitProportional(chooseProportionalWidth(rawW, rawH), maxW = 1f - left, maxH = bottom)
                         newRight = left + w
                         newTop = bottom - h
                     } else {
@@ -272,8 +285,7 @@ object StudioWorkspaceReducer {
                     val rawW = right - (left + dxNorm)
                     val rawH = (bottom + dyNorm) - top
                     if (useProportional) {
-                        val desiredW = if (abs(dxNorm) >= abs(dyNorm)) rawW else rawH * aspect
-                        val (w, h) = fitProportional(desiredW, maxW = right, maxH = 1f - top)
+                        val (w, h) = fitProportional(chooseProportionalWidth(rawW, rawH), maxW = right, maxH = 1f - top)
                         newLeft = right - w
                         newBottom = top + h
                     } else {
@@ -285,8 +297,7 @@ object StudioWorkspaceReducer {
                     val rawW = (right + dxNorm) - left
                     val rawH = (bottom + dyNorm) - top
                     if (useProportional) {
-                        val desiredW = if (abs(dxNorm) >= abs(dyNorm)) rawW else rawH * aspect
-                        val (w, h) = fitProportional(desiredW, maxW = 1f - left, maxH = 1f - top)
+                        val (w, h) = fitProportional(chooseProportionalWidth(rawW, rawH), maxW = 1f - left, maxH = 1f - top)
                         newRight = left + w
                         newBottom = top + h
                     } else {

@@ -197,22 +197,59 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
     val context = LocalContext.current
     val localDisplayName = "Mobile Gaming Studio"
 
+    // Reactive FirebaseAuth state: automatically activates Firestore cloud sync when signed in with Google/YouTube,
+    // while keeping manual RTMP streaming & studio 100% usable without login.
+    var signedInUid by remember { mutableStateOf<String?>(null) }
+    var signedInName by remember { mutableStateOf(localDisplayName) }
+    var signedInPhoto by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(Unit) {
+        val auth = runCatching { com.google.firebase.auth.FirebaseAuth.getInstance() }.getOrNull()
+        val syncUser: (com.google.firebase.auth.FirebaseUser?) -> Unit = { user ->
+            if (user != null && !user.isAnonymous) {
+                signedInUid = user.uid
+                signedInName = user.displayName?.takeIf { it.isNotBlank() } ?: "YouTube Creator"
+                signedInPhoto = user.photoUrl?.toString()
+            } else {
+                signedInUid = null
+                signedInName = localDisplayName
+                signedInPhoto = null
+            }
+        }
+        syncUser(auth?.currentUser)
+        val listener = com.google.firebase.auth.FirebaseAuth.AuthStateListener { firebaseAuth ->
+            syncUser(firebaseAuth.currentUser)
+        }
+        runCatching { auth?.addAuthStateListener(listener) }
+        onDispose {
+            runCatching { auth?.removeAuthStateListener(listener) }
+        }
+    }
+
+    val activeUid = signedInUid
+    val sessionKey = activeUid ?: "zro_local_session"
+
     val viewModel: ZroMainViewModel = viewModel(
-        key = "zro_local_session",
+        key = sessionKey,
         factory = viewModelFactory {
             initializer {
                 val app = checkNotNull(this[APPLICATION_KEY]) {
                     "APPLICATION_KEY missing from CreationExtras"
                 }
+                val firestoreRepo = if (!activeUid.isNullOrBlank()) {
+                    runCatching { com.example.data.ZroFirestoreRepository(app) }.getOrNull()
+                } else {
+                    null
+                }
                 ZroMainViewModel(
                     appContext = app,
-                    repository = null,
+                    repository = firestoreRepo,
                     settingsStore = settingsStore,
                     telemetryMonitor = DeviceTelemetryMonitor(app),
                     chatClient = YouTubeLiveChatClient(),
-                    currentUserId = null,
-                    userDisplayName = localDisplayName,
-                    userAvatarUrl = null
+                    currentUserId = activeUid,
+                    userDisplayName = signedInName,
+                    userAvatarUrl = signedInPhoto
                 )
             }
         }

@@ -462,7 +462,7 @@ class RtmpPublisher {
     }
 
     fun connect(rtmpBaseUrl: String, streamKey: String): Result<Unit> {
-        return connectInternal(rtmpBaseUrl.trim().trimEnd('/'), streamKey, usedBackup = false).map { Unit }
+        return connectInternal(rtmpBaseUrl.trim().trimEnd('/'), streamKey, usedBackup = false).map {}
     }
 
     private fun connectInternal(rtmpBaseUrl: String, streamKey: String, usedBackup: Boolean): Result<ConnectSuccess> {

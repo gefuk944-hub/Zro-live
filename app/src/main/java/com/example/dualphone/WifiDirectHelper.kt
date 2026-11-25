@@ -164,6 +164,7 @@ class WifiDirectHelper(private val appContext: Context) {
     }
 
     companion object {
+        @SuppressLint("InlinedApi")
         fun requiredPermissionForSdk(sdkInt: Int = Build.VERSION.SDK_INT): String? {
             return if (sdkInt >= Build.VERSION_CODES.TIRAMISU) {
                 Manifest.permission.NEARBY_WIFI_DEVICES

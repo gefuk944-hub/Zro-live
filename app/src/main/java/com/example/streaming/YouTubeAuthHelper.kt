@@ -1,5 +1,6 @@
 package com.example.streaming
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Log
 import androidx.credentials.ClearCredentialStateRequest
@@ -45,6 +46,7 @@ object YouTubeAuthHelper {
         }.getOrDefault(YouTubeAccountState(signedIn = false))
     }
 
+    @SuppressLint("DiscouragedApi")
     private fun resolveWebClientId(context: Context): String? {
         return runCatching {
             val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)

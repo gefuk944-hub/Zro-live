@@ -573,8 +573,9 @@ fun StudioWebSourceView(
             factory = { ctx ->
                 WebView(ctx).apply {
                     setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    isFocusable = true
-                    isFocusableInTouchMode = true
+                    isClickable = allowPageInteraction
+                    isFocusable = allowPageInteraction
+                    isFocusableInTouchMode = allowPageInteraction
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.useWideViewPort = true
@@ -593,7 +594,7 @@ fun StudioWebSourceView(
 
                     // In Interact Mode: let user click, scroll, and interact directly inside the webpage
                     // (preventing parent LazyColumn from stealing vertical scroll).
-                    // In Layout Edit Mode: let Compose drag/resize/crop handles control the layer cleanly.
+                    // In Layout Edit Mode: never consume touch events so Compose drag/resize/crop handles work.
                     setOnTouchListener { v, event ->
                         if (allowPageInteraction) {
                             if (event.action == android.view.MotionEvent.ACTION_DOWN ||
@@ -603,7 +604,7 @@ fun StudioWebSourceView(
                             }
                             false
                         } else {
-                            interactiveEditing
+                            false
                         }
                     }
 
@@ -632,8 +633,13 @@ fun StudioWebSourceView(
                         ) {
                             if (request?.isForMainFrame == true) {
                                 isLoading = false
-                                errorText = error?.description?.toString()?.takeIf { it.isNotBlank() }
-                                    ?: "Unable to load website"
+                                val desc = error?.description?.toString().orEmpty()
+                                errorText = when {
+                                    desc.contains("CLEARTEXT", ignoreCase = true) ->
+                                        "Insecure HTTP blocked. Change URL to https://"
+                                    desc.isNotBlank() -> desc
+                                    else -> "Unable to load website"
+                                }
                             }
                         }
 
@@ -656,6 +662,9 @@ fun StudioWebSourceView(
                 }
             },
             update = { webView ->
+                webView.isClickable = allowPageInteraction
+                webView.isFocusable = allowPageInteraction
+                webView.isFocusableInTouchMode = allowPageInteraction
                 webView.isVerticalScrollBarEnabled = allowPageInteraction
                 webView.isHorizontalScrollBarEnabled = allowPageInteraction
                 webView.setOnTouchListener { v, event ->
@@ -667,7 +676,7 @@ fun StudioWebSourceView(
                         }
                         false
                     } else {
-                        interactiveEditing
+                        false
                     }
                 }
                 if (lastLoadedUrl != validatedUrl) {
@@ -686,6 +695,16 @@ fun StudioWebSourceView(
                 }
             }
         )
+
+        // In Layout Edit Mode, cover the AndroidView WebView with a transparent Compose surface
+        // so taps and drags propagate cleanly to the parent layer's selection & drag modifiers.
+        if (!allowPageInteraction && interactiveEditing) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("studio_web_source_edit_shield")
+            )
+        }
 
         if (isLoading) {
             LinearProgressIndicator(

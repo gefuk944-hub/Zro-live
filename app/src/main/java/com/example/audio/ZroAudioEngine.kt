@@ -70,6 +70,7 @@ object ZroAudioEngine {
 
     @Volatile private var lightweightDsp = false
     @Volatile private var meterEmitIntervalMs = 85L
+    @Volatile private var lockedBroadcastStereo: Boolean? = null
 
     private var captureJob: Job? = null
     private var udpReceiveJob: Job? = null
@@ -200,7 +201,12 @@ object ZroAudioEngine {
         stopIfIdle()
     }
 
-    fun startStreamingAudio(context: Context, mediaProjection: MediaProjection?) {
+    fun startStreamingAudio(
+        context: Context,
+        mediaProjection: MediaProjection?,
+        forceStereo: Boolean? = null
+    ) {
+        lockedBroadcastStereo = forceStereo
         isStreamingActive.set(true)
         if (mediaProjection != null) {
             attachGameAudioCapture(context, mediaProjection)
@@ -212,6 +218,7 @@ object ZroAudioEngine {
 
     fun stopStreamingAudio() {
         isStreamingActive.set(false)
+        lockedBroadcastStereo = null
         broadcastConsumer.set(null)
         releaseGameAudioRecord()
         stopIfIdle()
@@ -394,7 +401,7 @@ object ZroAudioEngine {
                     val shouldEmitMeter = isUiForeground.get() && (nowMs - lastMeterEmitMs >= meterEmitIntervalMs)
                     if (consumer != null || shouldEmitMeter) {
                         var masterSumSq = 0f
-                        val stereo = currentSettings.stereoOutput
+                        val stereo = lockedBroadcastStereo ?: currentSettings.stereoOutput
                         val byteBuf = if (stereo) stereoByteBuf else monoByteBuf
                         byteBuf.clear()
 

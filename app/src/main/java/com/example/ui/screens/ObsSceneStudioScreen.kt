@@ -401,7 +401,11 @@ fun ObsSceneStudioScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        val maxCanvasHeight = (maxHeight * 0.28f).coerceIn(104.dp, 220.dp)
+        val maxCanvasHeight = if (maxHeight < 600.dp) {
+            (maxHeight * 0.28f).coerceIn(104.dp, 180.dp)
+        } else {
+            (maxHeight * 0.34f).coerceIn(180.dp, 260.dp)
+        }
         Column(
             modifier = Modifier.fillMaxSize()
         ) {

@@ -392,13 +392,15 @@ class ZroMainViewModel(
                             }
                         }
                     }
-                } else if (dt.linkState == DualLinkState.DISCONNECTED) {
+                } else if (dt.linkState != DualLinkState.CONNECTED) {
                     lastAutoRestoredDeviceKey = null
                     if (wasSecondPhoneConnected) {
                         wasSecondPhoneConnected = false
                         ZroStreamCoordinator.requestSwitchVideoSource(appContext, LiveVideoSource.LOCAL_FULL_SCREEN)
                         if (ZroStreamCoordinator.isSessionActive()) {
                             showMessage("2nd phone disconnected — returned stream source to this phone's screen.")
+                        } else {
+                            showMessage("2nd phone disconnected — ready for auto-reconnect or local capture.")
                         }
                     }
                 }

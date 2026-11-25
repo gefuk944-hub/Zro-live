@@ -16,6 +16,7 @@ import com.example.data.model.PerformanceProfile
 import com.example.data.model.SmartRecommendation
 import com.example.data.model.StreamPreset
 import com.example.data.model.VideoResolution
+import java.util.Locale
 
 /**
  * Monitors genuine Android hardware telemetry with zero fabricated values:
@@ -73,7 +74,7 @@ class DeviceTelemetryMonitor(private val context: Context) {
         }
 
         if (t.isOverheating) {
-            val tempDesc = t.batteryTempCelsius?.let { "${String.format("%.1f", it)}°C" } ?: t.thermalStatusLabel
+            val tempDesc = t.batteryTempCelsius?.let { "${String.format(Locale.US, "%.1f", it)}°C" } ?: t.thermalStatusLabel
             return SmartRecommendation(
                 preset = StreamPreset.BALANCED,
                 resolution = VideoResolution.P480,
@@ -108,7 +109,7 @@ class DeviceTelemetryMonitor(private val context: Context) {
                     resolution = VideoResolution.P480,
                     fps = 30,
                     bitrateKbps = 2400,
-                    rationale = "4GB RAM + ${String.format("%.1f", up / 1000f)} Mbps uplink: 480p 30 FPS prevents stutter."
+                    rationale = "4GB RAM + ${String.format(Locale.US, "%.1f", up / 1000f)} Mbps uplink: 480p 30 FPS prevents stutter."
                 )
             }
         }
@@ -123,7 +124,7 @@ class DeviceTelemetryMonitor(private val context: Context) {
                 rationale = "Strong ${t.networkType} uplink & hardware 1080p60 encoder (${t.hardwareAvcEncoderName})."
             )
             up >= 9000 -> {
-                val thermalNote = t.batteryTempCelsius?.let { " • ${String.format("%.1f", it)}°C" } ?: ""
+                val thermalNote = t.batteryTempCelsius?.let { " • ${String.format(Locale.US, "%.1f", it)}°C" } ?: ""
                 SmartRecommendation(
                     preset = StreamPreset.FULL_HD,
                     resolution = VideoResolution.P1080,
@@ -277,7 +278,7 @@ class DeviceTelemetryMonitor(private val context: Context) {
         fun formatTemperature(telemetry: DeviceTelemetry): String {
             val temp = telemetry.batteryTempCelsius
             return if (temp != null && telemetry.isTemperatureMeasured) {
-                "${String.format("%.1f", temp)}°C"
+                "${String.format(Locale.US, "%.1f", temp)}°C"
             } else {
                 telemetry.thermalStatusLabel
             }
