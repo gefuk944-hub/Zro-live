@@ -32,41 +32,50 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36.1 & accept licenses
+        run: |
+          set +o pipefail
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          yes | sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+          yes | sdkmanager --install "platforms;android-36.1" || true
+          yes | sdkmanager --install "build-tools;36.1.0" || true
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "9.3.1"
 
-      - name: Install Android SDK 36 & accept licenses
-        run: |
-          SDKMANAGER="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
-          "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0" || true
-          "$SDKMANAGER" "platforms;android-36.1" || true
-
       - name: Prepare debug signing keystore & env file
         run: |
-          if [ ! -f debug.keystore ]; then
-            if [ -f debug.keystore.base64 ]; then
-              base64 -d debug.keystore.base64 > debug.keystore
-            else
-              keytool -genkeypair -v \
-                -keystore debug.keystore \
-                -storepass android \
-                -alias androiddebugkey \
-                -keypass android \
-                -keyalg RSA \
-                -keysize 2048 \
-                -validity 10000 \
-                -dname "CN=Android Debug,O=Android,C=US"
-            fi
+          if [ ! -s debug.keystore ] && [ -f debug.keystore.base64 ]; then
+            tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore || rm -f debug.keystore
+          fi
+          if ! keytool -list -keystore debug.keystore -storepass android >/dev/null 2>&1; then
+            rm -f debug.keystore
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
           fi
           if [ ! -f .env ] && [ -f .env.example ]; then
             cp .env.example .env
           fi
 
       - name: Build Debug APK
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
+        env:
+          GRADLE_OPTS: "-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
+        run: |
+          gradle --version
+          gradle :app:assembleDebug --no-daemon --no-configuration-cache --stacktrace
 
       - name: Determine release version & rename APK
         id: release_meta
@@ -84,6 +93,10 @@ jobs:
             TAG="v1.0.${RUN_NUMBER}"
           fi
           APK_SOURCE="app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -f "$APK_SOURCE" ]; then
+            echo "Debug APK not found at $APK_SOURCE"
+            exit 1
+          fi
           APK_TARGET="Zro-Live-${TAG}.apk"
           cp "$APK_SOURCE" "$APK_TARGET"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
@@ -97,9 +110,11 @@ jobs:
           retention-days: 30
 
       - name: Publish GitHub Release
+        if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release_meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: "Zro Live ${{ steps.release_meta.outputs.tag }}"
           draft: false
           prerelease: false

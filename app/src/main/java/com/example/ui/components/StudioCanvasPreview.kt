@@ -1516,6 +1516,7 @@ private fun BroadcastMotionBackdrop(
  * (including DJI Osmo Action/Pocket UVC webcam mode and HDMI-to-USB UVC capture cards).
  * Unbinds cleanly when turned off or disposed.
  */
+@androidx.annotation.OptIn(androidx.camera.core.ExperimentalLensFacing::class)
 @Composable
 fun CameraXFacecamPreview(
     useFront: Boolean,

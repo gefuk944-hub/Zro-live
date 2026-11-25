@@ -147,9 +147,9 @@ class ConnectivityStatusMonitor(private val appContext: Context) {
 
             val linkType = when {
                 !hasInternet -> NetworkLinkType.OFFLINE
-                caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true -> NetworkLinkType.WIFI
-                caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true -> NetworkLinkType.ETHERNET
-                caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true -> NetworkLinkType.CELLULAR
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> NetworkLinkType.WIFI
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> NetworkLinkType.ETHERNET
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> NetworkLinkType.CELLULAR
                 else -> NetworkLinkType.WIFI
             }
             val detail = when (linkType) {
