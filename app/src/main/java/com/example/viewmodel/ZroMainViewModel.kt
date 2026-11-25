@@ -43,6 +43,8 @@ import com.example.data.model.YouTubeAccountState
 import com.example.dualphone.DualPhoneEngine
 import com.example.dualphone.DualPhoneProtocol
 import com.example.dualphone.DualRemoteCommand
+import com.example.dualphone.WifiDirectHelper
+import com.example.dualphone.WifiDirectState
 import com.example.overlay.FloatingOverlayService
 import com.example.streaming.RtmpPublisher
 import com.example.streaming.StreamingForegroundService
@@ -73,6 +75,8 @@ import com.example.studio.StudioMediaStore
 import com.example.studio.StudioWorkspaceReducer
 import com.example.studio.StudioWorkspaceState
 import com.example.telemetry.ActiveLiveSessionSnapshot
+import com.example.telemetry.AppConnectivitySnapshot
+import com.example.telemetry.ConnectivityStatusMonitor
 import com.example.telemetry.CrashLogEntry
 import com.example.telemetry.CrashRecoveryStore
 import com.example.telemetry.DeviceTelemetryMonitor
@@ -288,6 +292,43 @@ class ZroMainViewModel(
     private val _externalCameraInventory = MutableStateFlow(ExternalCameraInventory())
     val externalCameraInventory: StateFlow<ExternalCameraInventory> = _externalCameraInventory.asStateFlow()
 
+    private val connectivityMonitor = ConnectivityStatusMonitor(appContext)
+    private val wifiDirectHelper = WifiDirectHelper(appContext)
+    val wifiDirectState: StateFlow<WifiDirectState> = wifiDirectHelper.state
+
+    val connectivitySnapshot: StateFlow<AppConnectivitySnapshot> = combine(
+        combine(
+            connectivityMonitor.networkStatus,
+            _rtmpTestResult,
+            _isTestingRtmp,
+            connectivityMonitor.stunStatus
+        ) { net, rtmpRes, testing, stun ->
+            QuadConnectivityInput(net, rtmpRes, testing, stun)
+        },
+        streamTelemetry,
+        settings
+    ) { q, streamTel, cfg ->
+        ConnectivityStatusMonitor.buildSnapshot(
+            network = q.network,
+            rtmpTest = q.rtmpTest,
+            isTestingRtmp = q.isTestingRtmp,
+            stunState = q.stunState,
+            streamTelemetry = streamTel,
+            configuredRtmpUrl = cfg.stream.effectivePrimaryServerUrl()
+        )
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+        ConnectivityStatusMonitor.buildSnapshot(
+            network = connectivityMonitor.networkStatus.value,
+            rtmpTest = null,
+            isTestingRtmp = false,
+            stunState = null to 0L,
+            streamTelemetry = streamTelemetry.value,
+            configuredRtmpUrl = ""
+        )
+    )
+
     private val _autoSwitchToRemoteEvent = MutableSharedFlow<Boolean>(extraBufferCapacity = 4)
     val autoSwitchToRemoteEvent: SharedFlow<Boolean> = _autoSwitchToRemoteEvent.asSharedFlow()
 
@@ -295,6 +336,7 @@ class ZroMainViewModel(
     private var wasSecondPhoneConnected: Boolean = false
 
     init {
+        connectivityMonitor.startMonitoring()
         // Install secret-scrubbing crash logger so unexpected crashes never lose live state
         CrashRecoveryStore.installUncaughtHandler(appContext)
         viewModelScope.launch(Dispatchers.IO) {
@@ -1882,6 +1924,33 @@ class ZroMainViewModel(
         commitStudioState(StudioWorkspaceReducer.alignLayerCenter(_studioState.value, layerId))
     }
 
+    fun resizeLayerExact(layerId: String, newWidth: Float, newHeight: Float) {
+        val cur = _studioState.value
+        val target = cur.activeScene.layers.firstOrNull { it.id == layerId } ?: return
+        if (cur.activeScene.sceneLocked || target.locked) return
+        if (!dragSnapshotPushed) {
+            pushUndoSnapshot(cur)
+            dragSnapshotPushed = true
+        }
+        val next = StudioWorkspaceReducer.resizeLayer(cur, layerId, newWidth, newHeight)
+        commitStudioState(next, persist = false, recordUndo = false)
+    }
+
+    fun applyLayerCustomSizeUnits(layerId: String, unitsW: Float, unitsH: Float) {
+        val cur = _studioState.value
+        val target = cur.activeScene.layers.firstOrNull { it.id == layerId } ?: return
+        if (cur.activeScene.sceneLocked) {
+            showMessage("Scene is locked. Unlock scene to resize layers.")
+            return
+        }
+        if (target.locked) {
+            showMessage("'${target.name}' is locked. Unlock it first.")
+            return
+        }
+        val next = StudioWorkspaceReducer.applyCustomDimensionUnits(cur, layerId, unitsW, unitsH)
+        commitStudioState(next)
+    }
+
     fun centerLayerHorizontally(layerId: String) {
         commitStudioState(StudioWorkspaceReducer.centerLayerHorizontally(_studioState.value, layerId))
     }
@@ -2212,11 +2281,40 @@ class ZroMainViewModel(
     }
 
     fun startPhone2StudioHost() {
+        val p2pIp = wifiDirectState.value.takeIf { it.groupActive && it.groupOwnerAddress.isNotBlank() }?.groupOwnerAddress
         dualEngine.startPhone2Host(
             hostDeviceName = "Zro Studio (${Build.MODEL})",
-            method = dualTelemetry.value.connectionMethod
+            method = dualTelemetry.value.connectionMethod,
+            preferredIpOverride = p2pIp
         )
         showMessage("Phone 2 Studio Host active. Scan the QR code or enter IP + Token on Phone 1.")
+    }
+
+    fun startWifiDirectHost() {
+        wifiDirectHelper.startDirectGroup { ownerIp ->
+            dualEngine.startPhone2Host(
+                hostDeviceName = "Zro Studio (${Build.MODEL})",
+                method = DualConnectionMethod.QR_PAIRING,
+                preferredIpOverride = ownerIp
+            )
+            showMessage("Wi-Fi Direct ready ($ownerIp) — QR code updated for Phone 1.")
+        }
+    }
+
+    fun stopWifiDirectHost() {
+        wifiDirectHelper.stopDirectGroup()
+        showMessage("Wi-Fi Direct group stopped.")
+    }
+
+    fun probeStunAndRefreshConnectivity() {
+        connectivityMonitor.refreshNow()
+        viewModelScope.launch {
+            val (ok, rtt) = connectivityMonitor.probeStunServer()
+            showMessage(
+                if (ok) "STUN/ICE server reachable (${rtt} ms)."
+                else "STUN/ICE probe failed — verify active internet connection or firewall."
+            )
+        }
     }
 
     fun connectPhone1ByQrUri(rawUri: String): Boolean {
@@ -2516,5 +2614,13 @@ class ZroMainViewModel(
     override fun onCleared() {
         super.onCleared()
         chatPollJob?.cancel()
+        connectivityMonitor.stopMonitoring()
     }
 }
+
+private data class QuadConnectivityInput(
+    val network: com.example.telemetry.NetworkStatusInfo,
+    val rtmpTest: RtmpTestResult?,
+    val isTestingRtmp: Boolean,
+    val stunState: Pair<Boolean?, Long>
+)

@@ -86,6 +86,18 @@ class StreamingForegroundService : Service() {
         const val EXTRA_SESSION_ID = "extra_session_id"
         const val EXTRA_VIDEO_SOURCE = "extra_video_source"
         const val EXTRA_IS_RECONNECT = "extra_is_reconnect"
+
+        /**
+         * Preserves exact YouTube 16:9 / 9:16 broadcast resolutions (1920x1080, 1280x720, 640x360)
+         * while guaranteeing even 2px alignment required by H.264 YUV420 hardware encoders.
+         */
+        fun resolveAlignedDimensions(rawW: Int, rawH: Int, portrait: Boolean): Pair<Int, Int> {
+            val w = if (portrait) minOf(rawW, rawH) else maxOf(rawW, rawH)
+            val h = if (portrait) maxOf(rawW, rawH) else minOf(rawW, rawH)
+            val alignedW = (w / 2) * 2
+            val alignedH = (h / 2) * 2
+            return alignedW.coerceAtLeast(320) to alignedH.coerceAtLeast(180)
+        }
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -105,8 +117,10 @@ class StreamingForegroundService : Service() {
 
     private var videoDrainJob: Job? = null
     private var audioDrainJob: Job? = null
+    private var silentAudioFallbackJob: Job? = null
     private var monitorJob: Job? = null
     private var remoteFramePumpJob: Job? = null
+    private var dualMirrorObserverJob: Job? = null
 
     private val isStreaming = AtomicBoolean(false)
     private val isLiveConfirmed = AtomicBoolean(false)
@@ -144,6 +158,18 @@ class StreamingForegroundService : Service() {
         notifManager = StreamNotificationManager(this)
         telemetryMonitor = DeviceTelemetryMonitor(this)
         settingsStore = SettingsStore(applicationContext)
+        dualMirrorObserverJob = serviceScope.launch {
+            DualPhoneEngine.shared.telemetry.collect { dt ->
+                val proj = mediaProjection
+                if (proj != null &&
+                    dt.role == DualPhoneRole.PHONE1_GAMEPLAY &&
+                    dt.linkState == DualLinkState.CONNECTED &&
+                    mirrorVirtualDisplay == null
+                ) {
+                    startDualPhoneMirrorCaptureIfNeeded(proj)
+                }
+            }
+        }
     }
 
     override fun onTrimMemory(level: Int) {
@@ -581,11 +607,17 @@ class StreamingForegroundService : Service() {
                 // Step 3: Initialize AAC Audio Encoder & attach unified ZroAudioEngine mixer
                 setupAudioEncoder(activeStereoAudio)
                 ZroAudioEngine.applyPerformanceSettings(perf)
+                val hasMic = ZroAudioEngine.hasMicPermission(this@StreamingForegroundService)
                 ZroAudioEngine.startStreamingAudio(this@StreamingForegroundService, projection)
-                ZroAudioEngine.setBroadcastPcmConsumer { pcmBytes, length, ptsUs ->
-                    if (!isPaused.get() && isStreaming.get()) {
-                        feedPcmToAacEncoder(pcmBytes, length, ptsUs)
+                if (hasMic) {
+                    ZroAudioEngine.setBroadcastPcmConsumer { pcmBytes, length, ptsUs ->
+                        if (!isPaused.get() && isStreaming.get()) {
+                            feedPcmToAacEncoder(pcmBytes, length, ptsUs)
+                        }
                     }
+                } else {
+                    // Keep YouTube Live audio track alive with valid silent AAC frames if mic permission is denied
+                    startSilentAudioFallbackLoop(activeStereoAudio)
                 }
                 ZroStreamCoordinator.updateTelemetry {
                     it.copy(
@@ -849,10 +881,7 @@ class StreamingForegroundService : Service() {
             StreamOrientation.LANDSCAPE -> false
             StreamOrientation.AUTO -> resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
         }
-        val w = if (portrait) minOf(rawW, rawH) else maxOf(rawW, rawH)
-        val h = if (portrait) maxOf(rawW, rawH) else minOf(rawW, rawH)
-        // Align to 16px macroblock boundaries for broad low-end hardware encoder compatibility
-        return ((w + 15) / 16 * 16) to ((h + 15) / 16 * 16)
+        return resolveAlignedDimensions(rawW, rawH, portrait)
     }
 
     private fun selectHardwareAvcEncoderName(): String? {
@@ -975,6 +1004,20 @@ class StreamingForegroundService : Service() {
         codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         codec.start()
         audioEncoder = codec
+    }
+
+    private fun startSilentAudioFallbackLoop(stereo: Boolean) {
+        silentAudioFallbackJob?.cancel()
+        silentAudioFallbackJob = serviceScope.launch {
+            val frameBytes = ByteArray(ZroAudioEngine.FRAME_SAMPLES * if (stereo) 4 else 2)
+            val frameDurationMs = (ZroAudioEngine.FRAME_SAMPLES * 1000L) / ZroAudioEngine.SAMPLE_RATE
+            while (isActive) {
+                if (isStreaming.get() && !isPaused.get()) {
+                    feedPcmToAacEncoder(frameBytes, frameBytes.size, System.nanoTime() / 1000L)
+                }
+                delay(frameDurationMs.coerceAtLeast(20L))
+            }
+        }
     }
 
     private fun feedPcmToAacEncoder(bytes: ByteArray, length: Int, ptsUs: Long) {
@@ -1105,7 +1148,14 @@ class StreamingForegroundService : Service() {
 
     private fun computeRelativeAudioTimestampMs(ptsUs: Long): Int {
         if (ptsUs > 0L) {
-            if (firstAudioPtsUs < 0L) firstAudioPtsUs = ptsUs
+            // Anchor audio timeline cleanly to video start when both share monotonic clock
+            if (firstAudioPtsUs < 0L) {
+                firstAudioPtsUs = if (firstVideoPtsUs > 0L && kotlin.math.abs(ptsUs - firstVideoPtsUs) < 5_000_000L) {
+                    firstVideoPtsUs
+                } else {
+                    ptsUs
+                }
+            }
             return ((ptsUs - firstAudioPtsUs) / 1000L).coerceAtLeast(0L).toInt()
         }
         val base = if (streamStartEpochMs > 0L) streamStartEpochMs else System.currentTimeMillis()
@@ -1391,14 +1441,14 @@ class StreamingForegroundService : Service() {
         if (dt.role != DualPhoneRole.PHONE1_GAMEPLAY) return
         stopDualPhoneMirrorCapture()
         runCatching {
-            val mirrorW = 640
-            val mirrorH = 360
+            val mirrorW = 854
+            val mirrorH = 480
             val thread = HandlerThread("ZroDualMirror").apply { start() }
             mirrorHandlerThread = thread
             val handler = Handler(thread.looper)
             val reader = ImageReader.newInstance(mirrorW, mirrorH, PixelFormat.RGBA_8888, 2)
             mirrorImageReader = reader
-            val baos = ByteArrayOutputStream(32 * 1024)
+            val baos = ByteArrayOutputStream(48 * 1024)
             var lastPushMs = 0L
 
             reader.setOnImageAvailableListener({ r ->
@@ -1409,7 +1459,7 @@ class StreamingForegroundService : Service() {
                         return@setOnImageAvailableListener
                     }
                     val now = System.currentTimeMillis()
-                    if (now - lastPushMs < 85L) return@setOnImageAvailableListener
+                    if (now - lastPushMs < 33L) return@setOnImageAvailableListener
                     lastPushMs = now
 
                     val plane = img.planes.firstOrNull() ?: return@setOnImageAvailableListener
@@ -1425,9 +1475,9 @@ class StreamingForegroundService : Service() {
                         bmp
                     }
                     baos.reset()
-                    cropped.compress(Bitmap.CompressFormat.JPEG, 68, baos)
+                    cropped.compress(Bitmap.CompressFormat.JPEG, 72, baos)
                     cropped.recycle()
-                    DualPhoneEngine.shared.pushMirroredFrameJpeg(baos.toByteArray(), mirrorW, mirrorH, minIntervalMs = 80L)
+                    DualPhoneEngine.shared.pushMirroredFrameJpeg(baos.toByteArray(), mirrorW, mirrorH, minIntervalMs = 33L)
                 } catch (_: Exception) {
                     // Best-effort mirror frame
                 } finally {
@@ -1481,6 +1531,7 @@ class StreamingForegroundService : Service() {
 
         videoDrainJob?.cancel(); videoDrainJob = null
         audioDrainJob?.cancel(); audioDrainJob = null
+        silentAudioFallbackJob?.cancel(); silentAudioFallbackJob = null
         monitorJob?.cancel(); monitorJob = null
         stopRemoteSecondPhoneFramePump()
 

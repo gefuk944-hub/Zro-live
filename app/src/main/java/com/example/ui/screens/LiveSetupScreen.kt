@@ -80,12 +80,15 @@ import com.example.data.model.StreamSettings
 import com.example.data.model.StreamVisibility
 import com.example.data.model.YouTubeAccountState
 import com.example.streaming.RtmpPublisher
+import com.example.streaming.YouTubeAuthHelper
 import com.example.streaming.ZroStreamCoordinator
 import com.example.studio.DualLinkState
 import com.example.studio.DualPhoneTelemetry
 import com.example.studio.SceneSlot
 import com.example.studio.StudioWorkspaceState
+import com.example.telemetry.AppConnectivitySnapshot
 import com.example.ui.components.BrandGradientButton
+import com.example.ui.components.ConnectivityStatusBar
 import com.example.ui.components.GlassCard
 import com.example.ui.components.LiveStatusBadge
 import com.example.ui.components.ProSubpageTopBar
@@ -125,7 +128,9 @@ fun LiveSetupScreen(
     onConnectYouTubeAccount: () -> Unit = {},
     onDisconnectYouTubeAccount: () -> Unit = {},
     onSaveConfiguration: () -> Unit = {},
-    onTestConnection: () -> Unit = {}
+    onTestConnection: () -> Unit = {},
+    connectivitySnapshot: AppConnectivitySnapshot = AppConnectivitySnapshot(),
+    onProbeStunServer: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val isLive = streamTelemetry.state == StreamLifecycleState.LIVE ||
@@ -179,6 +184,15 @@ fun LiveSetupScreen(
             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+            // 0. Separate Network / Server / Streaming Connectivity Status
+            item {
+                ConnectivityStatusBar(
+                    snapshot = connectivitySnapshot,
+                    onCheckConnectivity = onProbeStunServer,
+                    showStunDetail = true
+                )
+            }
+
             // 1. Stream Destination (Simple Stream RTMP URL + Stream Key) & Optional YouTube Login
             item {
                 GlassCard {
@@ -236,7 +250,7 @@ fun LiveSetupScreen(
                                         text = if (youTubeAccount.signedIn) {
                                             youTubeAccount.email.ifBlank { "Signed in • RTMP ready" }
                                         } else {
-                                            "Optional — manual RTMP streaming works without sign-in"
+                                            YouTubeAuthHelper.oauthStatusSummary(context)
                                         },
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,

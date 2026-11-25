@@ -516,6 +516,7 @@ fun StudioWebSourceView(
     url: String,
     reloadNonce: Int = 0,
     interactiveEditing: Boolean = true,
+    allowPageInteraction: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val validatedUrl = remember(url) { BrowserUrlValidator.normalizeAndValidate(url) }
@@ -572,6 +573,8 @@ fun StudioWebSourceView(
             factory = { ctx ->
                 WebView(ctx).apply {
                     setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                    isFocusable = true
+                    isFocusableInTouchMode = true
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.useWideViewPort = true
@@ -579,14 +582,30 @@ fun StudioWebSourceView(
                     settings.mediaPlaybackRequiresUserGesture = false
                     settings.allowFileAccess = false
                     settings.allowContentAccess = false
-                    settings.setSupportZoom(false)
-                    settings.builtInZoomControls = false
+                    settings.setSupportZoom(true)
+                    settings.builtInZoomControls = true
                     settings.displayZoomControls = false
-                    isVerticalScrollBarEnabled = false
-                    isHorizontalScrollBarEnabled = false
+                    isVerticalScrollBarEnabled = allowPageInteraction
+                    isHorizontalScrollBarEnabled = allowPageInteraction
+                    runCatching {
+                        android.webkit.CookieManager.getInstance().setAcceptCookie(true)
+                    }
 
-                    // While arranging layers on the Studio canvas, let Compose handle drag/resize gestures cleanly
-                    setOnTouchListener { _, _ -> interactiveEditing }
+                    // In Interact Mode: let user click, scroll, and interact directly inside the webpage
+                    // (preventing parent LazyColumn from stealing vertical scroll).
+                    // In Layout Edit Mode: let Compose drag/resize/crop handles control the layer cleanly.
+                    setOnTouchListener { v, event ->
+                        if (allowPageInteraction) {
+                            if (event.action == android.view.MotionEvent.ACTION_DOWN ||
+                                event.action == android.view.MotionEvent.ACTION_MOVE
+                            ) {
+                                v.parent?.requestDisallowInterceptTouchEvent(true)
+                            }
+                            false
+                        } else {
+                            interactiveEditing
+                        }
+                    }
 
                     webChromeClient = object : WebChromeClient() {
                         override fun onProgressChanged(view: WebView?, newProgress: Int) {
@@ -637,7 +656,20 @@ fun StudioWebSourceView(
                 }
             },
             update = { webView ->
-                webView.setOnTouchListener { _, _ -> interactiveEditing }
+                webView.isVerticalScrollBarEnabled = allowPageInteraction
+                webView.isHorizontalScrollBarEnabled = allowPageInteraction
+                webView.setOnTouchListener { v, event ->
+                    if (allowPageInteraction) {
+                        if (event.action == android.view.MotionEvent.ACTION_DOWN ||
+                            event.action == android.view.MotionEvent.ACTION_MOVE
+                        ) {
+                            v.parent?.requestDisallowInterceptTouchEvent(true)
+                        }
+                        false
+                    } else {
+                        interactiveEditing
+                    }
+                }
                 if (lastLoadedUrl != validatedUrl) {
                     errorText = null
                     isLoading = true

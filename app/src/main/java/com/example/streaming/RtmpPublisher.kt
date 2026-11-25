@@ -268,6 +268,9 @@ class RtmpPublisher {
     private var publishedStreamId = 1
     private var avcHeaderSent = false
     private var aacHeaderSent = false
+    private var firstKeyframeSent = false
+    private var lastVideoTsMs = 0
+    private var lastAudioTsMs = 0
     private var cachedSps: ByteArray? = null
     private var cachedPps: ByteArray? = null
     private var activeServerUrl: String = ""
@@ -447,6 +450,9 @@ class RtmpPublisher {
             publishedStreamId = 1
             avcHeaderSent = false
             aacHeaderSent = false
+            firstKeyframeSent = false
+            lastVideoTsMs = 0
+            lastAudioTsMs = 0
             cachedSps = null
             cachedPps = null
             incomingHeaders.clear()
@@ -559,7 +565,7 @@ class RtmpPublisher {
         b.write(0x00); b.write(0x00); b.write(0x09)
         val payload = b.toByteArray()
         return writeRtmpMessage(
-            csid = 4,
+            csid = 5,
             timestampMs = 0,
             typeId = 0x12,
             streamId = publishedStreamId,
@@ -645,7 +651,14 @@ class RtmpPublisher {
             // If buffer contained only SPS/PPS codec config, nothing else to send as video frame
             if (videoNalus.isEmpty()) return avcHeaderSent
 
+            // CRITICAL for YouTube Live: NEVER transmit video NALUs before AVCDecoderConfigurationRecord
+            if (!avcHeaderSent) return false
+
             val effectiveKey = isKeyFrame || hasIdr
+            // Wait for the very first IDR keyframe after AVC sequence header so YouTube locks video cleanly
+            if (!firstKeyframeSent && !effectiveKey) {
+                return false
+            }
             if (effectiveKey) {
                 congestedUntilNextKey = false
             } else if (congestedUntilNextKey) {
@@ -674,10 +687,13 @@ class RtmpPublisher {
                 cursor += 4 + len
             }
 
+            val safeTsMs = maxOf(lastVideoTsMs, timestampMs.coerceAtLeast(0))
+            lastVideoTsMs = safeTsMs
+
             val startNs = System.nanoTime()
             val ok = writeRtmpMessageLocked(
                 csid = 6,
-                timestampMs = timestampMs,
+                timestampMs = safeTsMs,
                 typeId = 0x09,
                 streamId = publishedStreamId,
                 payload = videoScratch,
@@ -686,6 +702,7 @@ class RtmpPublisher {
             )
             val writeMs = (System.nanoTime() - startNs) / 1_000_000L
             if (ok) {
+                if (effectiveKey) firstKeyframeSent = true
                 videoFramesConfirmedCounter.incrementAndGet()
                 if (writeMs > CONGESTION_WRITE_MS) {
                     congestedUntilNextKey = true
@@ -720,6 +737,7 @@ class RtmpPublisher {
     fun sendAudioFrame(aacData: ByteArray, aacLength: Int, timestampMs: Int): Boolean {
         if (!connected.get() || aacLength <= 0) return false
         synchronized(sendLock) {
+            if (!aacHeaderSent) return false
             // Strip 7-byte ADTS header if hardware encoder prepended one (sync word 0xFFF)
             val adtsOffset = if (
                 aacLength > 7 &&
@@ -736,9 +754,13 @@ class RtmpPublisher {
             audioScratch[0] = 0xAF.toByte()
             audioScratch[1] = 0x01 // Raw AAC frame
             System.arraycopy(aacData, adtsOffset, audioScratch, 2, rawLen)
+
+            val safeTsMs = maxOf(lastAudioTsMs, timestampMs.coerceAtLeast(0))
+            lastAudioTsMs = safeTsMs
+
             val ok = writeRtmpMessageLocked(
                 csid = 4,
-                timestampMs = timestampMs,
+                timestampMs = safeTsMs,
                 typeId = 0x08,
                 streamId = publishedStreamId,
                 payload = audioScratch,
@@ -788,6 +810,9 @@ class RtmpPublisher {
         congestedUntilNextKey = false
         avcHeaderSent = false
         aacHeaderSent = false
+        firstKeyframeSent = false
+        lastVideoTsMs = 0
+        lastAudioTsMs = 0
         runCatching { output?.close() }
         runCatching { input?.close() }
         runCatching { socket?.close() }
@@ -986,6 +1011,14 @@ class RtmpPublisher {
 
             val cmd = parseAmf0Command(msg.payload)
             if (cmd.commandName == "_error") {
+                val isOptionalPreCreateCmd = !waitForPublishStatus &&
+                    kotlin.math.abs(expectedTxId - 4.0) < 0.01 &&
+                    (kotlin.math.abs(cmd.txId - 2.0) < 0.01 || kotlin.math.abs(cmd.txId - 3.0) < 0.01)
+                if (isOptionalPreCreateCmd) {
+                    // Some custom RTMP servers (Nginx-RTMP, SRS, MediaMTX) don't implement releaseStream/FCPublish;
+                    // continue awaiting createStream (_result txId=4.0).
+                    continue
+                }
                 val desc = cmd.description ?: cmd.statusCode ?: "Server returned RTMP _error."
                 return Result.failure(IllegalStateException("RTMP error: $desc"))
             }

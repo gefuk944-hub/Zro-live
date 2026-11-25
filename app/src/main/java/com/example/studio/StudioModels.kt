@@ -23,7 +23,11 @@ enum class DualConnectionMethod(val label: String) {
     QR_PAIRING("QR Code"),
     MANUAL_IP("Manual Address"),
     LOCAL_WIFI("Local Wi-Fi"),
-    HOTSPOT("Mobile Hotspot")
+    HOTSPOT("Mobile Hotspot");
+
+    companion object {
+        val VISIBLE_OPTIONS: List<DualConnectionMethod> = listOf(QR_PAIRING, MANUAL_IP)
+    }
 }
 
 enum class DualLinkState(val label: String) {
@@ -37,7 +41,7 @@ enum class DualLinkState(val label: String) {
 
 data class DualPhoneTelemetry(
     val role: DualPhoneRole = DualPhoneRole.SOLO_DEVICE,
-    val connectionMethod: DualConnectionMethod = DualConnectionMethod.LOCAL_WIFI,
+    val connectionMethod: DualConnectionMethod = DualConnectionMethod.QR_PAIRING,
     val linkState: DualLinkState = DualLinkState.DISCONNECTED,
     val localIp: String = "",
     val hostPort: Int = 47920,

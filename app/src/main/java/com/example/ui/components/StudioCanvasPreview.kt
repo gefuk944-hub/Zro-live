@@ -153,6 +153,7 @@ fun StudioCanvasPreview(
     onDragFinished: () -> Unit = {},
     onReconnectPeer: (() -> Unit)? = null,
     beforePreviewLayerId: String? = null,
+    webInteractLayerId: String? = null,
     modifier: Modifier = Modifier
 ) {
     val activeScene = workspace.activeScene
@@ -207,7 +208,7 @@ fun StudioCanvasPreview(
                     .clip(RoundedCornerShape(4.dp))
                     .background(Color(0xFF0B0E14))
                     .clipToBounds()
-                    .clickable(enabled = interactive) { onSelectLayer(null) }
+                    .clickable(enabled = interactive && webInteractLayerId == null) { onSelectLayer(null) }
                     .testTag("studio_canvas_surface")
             ) {
                 val canvasWidthPx = constraints.maxWidth.toFloat().coerceAtLeast(1f)
@@ -235,7 +236,7 @@ fun StudioCanvasPreview(
                     if (isVisible) {
                         StudioLayerNode(
                             layer = layer,
-                            selected = workspace.selectedLayerId == layer.id,
+                            selected = interactive && workspace.selectedLayerId == layer.id,
                             sceneLocked = scene.sceneLocked,
                             interactive = interactive,
                             canvasWidthPx = canvasWidthPx,
@@ -261,7 +262,8 @@ fun StudioCanvasPreview(
                             onDragFinished = onDragFinished,
                             onReconnectPeer = onReconnectPeer,
                             bypassGraphicAdjustment = beforePreviewLayerId == layer.id,
-                            cropModeActive = cropModeActive && workspace.selectedLayerId == layer.id
+                            cropModeActive = cropModeActive && workspace.selectedLayerId == layer.id,
+                            allowWebPageInteraction = webInteractLayerId == layer.id && layer.type == LayerSourceType.BROWSER_WEB
                         )
                     }
                 }
@@ -309,9 +311,13 @@ fun StudioCanvasPreview(
                     }
                 }
 
-                // Top-most OBS Selection Box & 4 Draggable Corner Resize OR 4-Edge Crop Handles
+                // Top-most OBS Selection Box & 8 Draggable Transform Handles OR 4-Edge Crop Handles
+                // Completely hidden when deselected (selectedLayerId == null) or when interacting directly inside a WebView
                 val selectedLayer = sortedLayers.firstOrNull { it.id == workspace.selectedLayerId && it.visible }
-                if (interactive && selectedLayer != null && !scene.sceneLocked && !selectedLayer.locked) {
+                val webInteractingSelected = selectedLayer != null &&
+                    selectedLayer.type == LayerSourceType.BROWSER_WEB &&
+                    webInteractLayerId == selectedLayer.id
+                if (interactive && selectedLayer != null && !scene.sceneLocked && !selectedLayer.locked && !webInteractingSelected) {
                     if (cropModeActive) {
                         SelectedLayerCropOverlay(
                             layer = selectedLayer,
@@ -358,7 +364,7 @@ fun StudioCanvasPreview(
                             )
                         }
                         Text(
-                            text = "${scene.name} • ${if (scene.isVertical) "9:16" else "16:9"}" +
+                            text = "${scene.name} • ${if (scene.isVertical) "9:16 (1080×1920)" else "16:9 (1920×1080)"}" +
                                 if (gridMode != CanvasGridMode.OFF) " • ${gridMode.label}" else "",
                             fontSize = 9.sp,
                             fontFamily = JetBrainsMonoFontFamily,
@@ -418,7 +424,8 @@ private fun StudioLayerNode(
     onDragFinished: () -> Unit,
     onReconnectPeer: (() -> Unit)?,
     bypassGraphicAdjustment: Boolean = false,
-    cropModeActive: Boolean = false
+    cropModeActive: Boolean = false,
+    allowWebPageInteraction: Boolean = false
 ) {
     val density = LocalDensity.current
     val xPx = (layer.x * canvasWidthPx).roundToInt()
@@ -426,7 +433,7 @@ private fun StudioLayerNode(
     val wDp = with(density) { (layer.width * canvasWidthPx).toDp() }
     val hDp = with(density) { (layer.height * canvasHeightPx).toDp() }
 
-    val canEdit = interactive && !sceneLocked && !layer.locked
+    val canEdit = interactive && !sceneLocked && !layer.locked && !allowWebPageInteraction
     val latestOnSelect by rememberUpdatedState(onSelect)
     val latestOnMoveBy by rememberUpdatedState(onMoveBy)
     val latestOnMoveTo by rememberUpdatedState(onMoveTo)
@@ -468,6 +475,7 @@ private fun StudioLayerNode(
     }
 
     val selectionBorder = when {
+        allowWebPageInteraction -> BorderStroke(1.5.dp, ZroEmerald)
         selected && (layer.locked || sceneLocked) -> BorderStroke(1.5.dp, ZroAmber)
         selected -> BorderStroke(1.5.dp, ZroCobalt)
         layer.borderWidthDp > 0f -> BorderStroke(layer.borderWidthDp.dp, Color(layer.borderColorHex))
@@ -502,7 +510,13 @@ private fun StudioLayerNode(
                     bypassForBeforePreview = bypassGraphicAdjustment
                 )
                 .then(if (selectionBorder != null) Modifier.border(selectionBorder, layerShape) else Modifier)
-                .clickable(enabled = interactive) { latestOnSelect() }
+                .then(
+                    if (interactive && !allowWebPageInteraction) {
+                        Modifier.clickable { latestOnSelect() }
+                    } else {
+                        Modifier
+                    }
+                )
                 .pointerInput(layer.id, canEdit, canvasWidthPx, canvasHeightPx) {
                     if (!canEdit) return@pointerInput
                     detectDragGestures(
@@ -567,6 +581,7 @@ private fun StudioLayerNode(
                     reducedMotion = reducedMotion,
                     bypassGraphicAdjustment = bypassGraphicAdjustment,
                     interactiveEditing = interactive,
+                    allowWebPageInteraction = allowWebPageInteraction,
                     onReconnectPeer = onReconnectPeer
                 )
             }
@@ -689,6 +704,7 @@ private fun SelectedLayerHandlesOverlay(
                 modifier = Modifier.offset { offset },
                 canvasWidthPx = canvasWidthPx,
                 canvasHeightPx = canvasHeightPx,
+                rotationDeg = layer.rotationDeg,
                 onResize = { dx, dy -> latestOnResizeCorner(corner, dx, dy) },
                 onEnd = { latestOnDragFinished() }
             )
@@ -704,11 +720,13 @@ private fun TransformBoundaryHandle(
     modifier: Modifier,
     canvasWidthPx: Float,
     canvasHeightPx: Float,
+    rotationDeg: Float = 0f,
     onResize: (Float, Float) -> Unit,
     onEnd: () -> Unit
 ) {
     val latestResize by rememberUpdatedState(onResize)
     val latestEnd by rememberUpdatedState(onEnd)
+    val latestRotation by rememberUpdatedState(rotationDeg)
 
     val isHorizontalEdge = corner == ResizeCorner.TOP_CENTER || corner == ResizeCorner.BOTTOM_CENTER
     val isVerticalEdge = corner == ResizeCorner.CENTER_LEFT || corner == ResizeCorner.CENTER_RIGHT
@@ -723,7 +741,15 @@ private fun TransformBoundaryHandle(
                     onDragCancel = { latestEnd() },
                     onDrag = { change, dragAmount ->
                         change.consume()
-                        latestResize(dragAmount.x / canvasWidthPx, dragAmount.y / canvasHeightPx)
+                        val (localDxPx, localDyPx) = if (kotlin.math.abs(latestRotation) > 0.5f) {
+                            val rad = Math.toRadians((-latestRotation).toDouble())
+                            val c = cos(rad).toFloat()
+                            val s = sin(rad).toFloat()
+                            (dragAmount.x * c - dragAmount.y * s) to (dragAmount.x * s + dragAmount.y * c)
+                        } else {
+                            dragAmount.x to dragAmount.y
+                        }
+                        latestResize(localDxPx / canvasWidthPx, localDyPx / canvasHeightPx)
                     }
                 )
             }
@@ -877,6 +903,7 @@ private fun LayerContentVisual(
     reducedMotion: Boolean,
     bypassGraphicAdjustment: Boolean = false,
     interactiveEditing: Boolean = true,
+    allowWebPageInteraction: Boolean = false,
     onReconnectPeer: (() -> Unit)?
 ) {
     val bgColor = if (layer.transparentBackground) Color.Transparent else Color(layer.backgroundColorHex)
@@ -913,7 +940,7 @@ private fun LayerContentVisual(
                     Image(
                         bitmap = displayFrame.asImageBitmap(),
                         contentDescription = "Authorized Phone 1 Gameplay Feed",
-                        contentScale = ContentScale.Crop,
+                        contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize()
                     )
                 } else if (isPhone2 && !isConnected) {
@@ -1199,6 +1226,7 @@ private fun LayerContentVisual(
                 url = layer.webUrl,
                 reloadNonce = layer.webReloadNonce,
                 interactiveEditing = interactiveEditing,
+                allowPageInteraction = allowWebPageInteraction,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -1209,6 +1237,7 @@ private fun LayerContentVisual(
                     url = layer.subWidgetUrl,
                     reloadNonce = layer.webReloadNonce,
                     interactiveEditing = interactiveEditing,
+                    allowPageInteraction = allowWebPageInteraction,
                     modifier = Modifier.fillMaxSize()
                 )
             } else {

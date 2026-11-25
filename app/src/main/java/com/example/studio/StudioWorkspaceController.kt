@@ -172,17 +172,18 @@ object StudioWorkspaceReducer {
         dyNormalized: Float
     ): StudioWorkspaceState {
         return updateLayer(state, layerId) { layer ->
-            val nx = (layer.x + dxNormalized).coerceIn(-0.4f, 0.95f)
-            val ny = (layer.y + dyNormalized).coerceIn(-0.4f, 0.95f)
+            val maxX = (1f - layer.width).coerceAtLeast(0f)
+            val maxY = (1f - layer.height).coerceAtLeast(0f)
+            val nx = (layer.x + dxNormalized).coerceIn(0f, maxX)
+            val ny = (layer.y + dyNormalized).coerceIn(0f, maxY)
             layer.copy(x = nx, y = ny)
         }
     }
 
     /**
      * Smooth OBS-style positioning from a continuous raw drag anchor.
-     * Applies gentle magnetic snapping only to the rendered target coordinate
-     * while the gesture caller keeps tracking the un-snapped raw drag offset,
-     * completely eliminating sticky grid traps and sudden position jumps.
+     * Strictly clamps within the 16:9 canvas bounds [0..1-w, 0..1-h] so layers never disappear
+     * off-canvas or get trapped in a corner.
      */
     fun moveLayerTo(
         state: StudioWorkspaceState,
@@ -191,11 +192,13 @@ object StudioWorkspaceReducer {
         rawY: Float
     ): StudioWorkspaceState {
         return updateLayer(state, layerId) { layer ->
-            var nx = rawX.coerceIn(-0.4f, 0.95f)
-            var ny = rawY.coerceIn(-0.4f, 0.95f)
+            val maxX = (1f - layer.width).coerceAtLeast(0f)
+            val maxY = (1f - layer.height).coerceAtLeast(0f)
+            var nx = rawX.coerceIn(0f, maxX)
+            var ny = rawY.coerceIn(0f, maxY)
             if (state.showSnapGuides) {
-                nx = snapCoordinate(nx, layer.width, state.gridMode.cols)
-                ny = snapCoordinate(ny, layer.height, state.gridMode.rows)
+                nx = snapCoordinate(nx, layer.width, state.gridMode.cols).coerceIn(0f, maxX)
+                ny = snapCoordinate(ny, layer.height, state.gridMode.rows).coerceIn(0f, maxY)
             }
             layer.copy(x = nx, y = ny)
         }
@@ -203,8 +206,9 @@ object StudioWorkspaceReducer {
 
     /**
      * Real OBS-style 8-point transform handle resizing (4 corners + 4 edge midpoints).
-     * Anchors the opposite corner or edge while dragging, supports proportional & free scaling,
-     * enforces minimum dimensions, and strictly respects layer & scene locks.
+     * - Anchors the opposite corner or edge strictly within canvas bounds [0..1]
+     * - Supports true proportional scaling across ALL 8 handles when aspect lock is active
+     * - Prevents layers from escaping canvas boundaries or getting stuck in corners
      */
     fun resizeLayerFromCorner(
         state: StudioWorkspaceState,
@@ -215,11 +219,11 @@ object StudioWorkspaceReducer {
         proportional: Boolean = false
     ): StudioWorkspaceState {
         return updateLayer(state, layerId) { layer ->
-            val left = layer.x
-            val top = layer.y
-            val right = layer.x + layer.width
-            val bottom = layer.y + layer.height
-            val aspect = if (layer.height > 0.001f) layer.width / layer.height else 16f / 9f
+            val left = layer.x.coerceIn(0f, 1f - MIN_WIDTH)
+            val top = layer.y.coerceIn(0f, 1f - MIN_HEIGHT)
+            val right = (left + layer.width).coerceIn(left + MIN_WIDTH, 1.0f)
+            val bottom = (top + layer.height).coerceIn(top + MIN_HEIGHT, 1.0f)
+            val aspect = ((right - left) / (bottom - top).coerceAtLeast(0.001f)).coerceIn(0.1f, 10f)
             val useProportional = proportional || layer.lockAspectRatio
 
             var newLeft = left
@@ -227,66 +231,124 @@ object StudioWorkspaceReducer {
             var newRight = right
             var newBottom = bottom
 
+            fun fitProportional(desiredW: Float, maxW: Float, maxH: Float): Pair<Float, Float> {
+                val safeMaxW = maxW.coerceAtLeast(MIN_WIDTH)
+                val safeMaxH = maxH.coerceAtLeast(MIN_HEIGHT)
+                val upperW = minOf(safeMaxW, safeMaxH * aspect).coerceAtLeast(MIN_WIDTH)
+                val lowerW = maxOf(MIN_WIDTH, MIN_HEIGHT * aspect).coerceAtMost(upperW)
+                val w = desiredW.coerceIn(lowerW, upperW)
+                val h = (w / aspect).coerceIn(MIN_HEIGHT, safeMaxH)
+                return w to h
+            }
+
             when (corner) {
                 ResizeCorner.TOP_LEFT -> {
-                    newLeft = (left + dxNorm).coerceIn(-0.4f, right - MIN_WIDTH)
-                    newTop = (top + dyNorm).coerceIn(-0.4f, bottom - MIN_HEIGHT)
+                    val rawW = (right - (left + dxNorm))
+                    val rawH = (bottom - (top + dyNorm))
                     if (useProportional) {
-                        val w = (right - newLeft).coerceIn(MIN_WIDTH, 1.0f)
-                        val h = (w / aspect).coerceIn(MIN_HEIGHT, 1.0f)
+                        val desiredW = if (abs(dxNorm) >= abs(dyNorm)) rawW else rawH * aspect
+                        val (w, h) = fitProportional(desiredW, maxW = right, maxH = bottom)
                         newLeft = right - w
                         newTop = bottom - h
+                    } else {
+                        newLeft = (left + dxNorm).coerceIn(0f, right - MIN_WIDTH)
+                        newTop = (top + dyNorm).coerceIn(0f, bottom - MIN_HEIGHT)
                     }
                 }
                 ResizeCorner.TOP_RIGHT -> {
-                    newRight = (right + dxNorm).coerceIn(left + MIN_WIDTH, 1.4f)
-                    newTop = (top + dyNorm).coerceIn(-0.4f, bottom - MIN_HEIGHT)
+                    val rawW = (right + dxNorm) - left
+                    val rawH = bottom - (top + dyNorm)
                     if (useProportional) {
-                        val w = (newRight - left).coerceIn(MIN_WIDTH, 1.0f)
-                        val h = (w / aspect).coerceIn(MIN_HEIGHT, 1.0f)
+                        val desiredW = if (abs(dxNorm) >= abs(dyNorm)) rawW else rawH * aspect
+                        val (w, h) = fitProportional(desiredW, maxW = 1f - left, maxH = bottom)
                         newRight = left + w
                         newTop = bottom - h
+                    } else {
+                        newRight = (right + dxNorm).coerceIn(left + MIN_WIDTH, 1.0f)
+                        newTop = (top + dyNorm).coerceIn(0f, bottom - MIN_HEIGHT)
                     }
                 }
                 ResizeCorner.BOTTOM_LEFT -> {
-                    newLeft = (left + dxNorm).coerceIn(-0.4f, right - MIN_WIDTH)
-                    newBottom = (bottom + dyNorm).coerceIn(top + MIN_HEIGHT, 1.4f)
+                    val rawW = right - (left + dxNorm)
+                    val rawH = (bottom + dyNorm) - top
                     if (useProportional) {
-                        val w = (right - newLeft).coerceIn(MIN_WIDTH, 1.0f)
-                        val h = (w / aspect).coerceIn(MIN_HEIGHT, 1.0f)
+                        val desiredW = if (abs(dxNorm) >= abs(dyNorm)) rawW else rawH * aspect
+                        val (w, h) = fitProportional(desiredW, maxW = right, maxH = 1f - top)
                         newLeft = right - w
                         newBottom = top + h
+                    } else {
+                        newLeft = (left + dxNorm).coerceIn(0f, right - MIN_WIDTH)
+                        newBottom = (bottom + dyNorm).coerceIn(top + MIN_HEIGHT, 1.0f)
                     }
                 }
                 ResizeCorner.BOTTOM_RIGHT -> {
-                    newRight = (right + dxNorm).coerceIn(left + MIN_WIDTH, 1.4f)
-                    newBottom = (bottom + dyNorm).coerceIn(top + MIN_HEIGHT, 1.4f)
+                    val rawW = (right + dxNorm) - left
+                    val rawH = (bottom + dyNorm) - top
                     if (useProportional) {
-                        val w = (newRight - left).coerceIn(MIN_WIDTH, 1.0f)
-                        val h = (w / aspect).coerceIn(MIN_HEIGHT, 1.0f)
+                        val desiredW = if (abs(dxNorm) >= abs(dyNorm)) rawW else rawH * aspect
+                        val (w, h) = fitProportional(desiredW, maxW = 1f - left, maxH = 1f - top)
                         newRight = left + w
                         newBottom = top + h
+                    } else {
+                        newRight = (right + dxNorm).coerceIn(left + MIN_WIDTH, 1.0f)
+                        newBottom = (bottom + dyNorm).coerceIn(top + MIN_HEIGHT, 1.0f)
                     }
                 }
                 ResizeCorner.TOP_CENTER -> {
-                    newTop = (top + dyNorm).coerceIn(-0.4f, bottom - MIN_HEIGHT)
+                    if (useProportional) {
+                        val rawH = bottom - (top + dyNorm)
+                        val (w, h) = fitProportional(rawH * aspect, maxW = 1f, maxH = bottom)
+                        val cx = (left + right) / 2f
+                        newTop = bottom - h
+                        newLeft = (cx - w / 2f).coerceIn(0f, (1f - w).coerceAtLeast(0f))
+                        newRight = newLeft + w
+                    } else {
+                        newTop = (top + dyNorm).coerceIn(0f, bottom - MIN_HEIGHT)
+                    }
                 }
                 ResizeCorner.BOTTOM_CENTER -> {
-                    newBottom = (bottom + dyNorm).coerceIn(top + MIN_HEIGHT, 1.4f)
+                    if (useProportional) {
+                        val rawH = (bottom + dyNorm) - top
+                        val (w, h) = fitProportional(rawH * aspect, maxW = 1f, maxH = 1f - top)
+                        val cx = (left + right) / 2f
+                        newBottom = top + h
+                        newLeft = (cx - w / 2f).coerceIn(0f, (1f - w).coerceAtLeast(0f))
+                        newRight = newLeft + w
+                    } else {
+                        newBottom = (bottom + dyNorm).coerceIn(top + MIN_HEIGHT, 1.0f)
+                    }
                 }
                 ResizeCorner.CENTER_LEFT -> {
-                    newLeft = (left + dxNorm).coerceIn(-0.4f, right - MIN_WIDTH)
+                    if (useProportional) {
+                        val rawW = right - (left + dxNorm)
+                        val (w, h) = fitProportional(rawW, maxW = right, maxH = 1f)
+                        val cy = (top + bottom) / 2f
+                        newLeft = right - w
+                        newTop = (cy - h / 2f).coerceIn(0f, (1f - h).coerceAtLeast(0f))
+                        newBottom = newTop + h
+                    } else {
+                        newLeft = (left + dxNorm).coerceIn(0f, right - MIN_WIDTH)
+                    }
                 }
                 ResizeCorner.CENTER_RIGHT -> {
-                    newRight = (right + dxNorm).coerceIn(left + MIN_WIDTH, 1.4f)
+                    if (useProportional) {
+                        val rawW = (right + dxNorm) - left
+                        val (w, h) = fitProportional(rawW, maxW = 1f - left, maxH = 1f)
+                        val cy = (top + bottom) / 2f
+                        newRight = left + w
+                        newTop = (cy - h / 2f).coerceIn(0f, (1f - h).coerceAtLeast(0f))
+                        newBottom = newTop + h
+                    } else {
+                        newRight = (right + dxNorm).coerceIn(left + MIN_WIDTH, 1.0f)
+                    }
                 }
             }
 
             val finalW = (newRight - newLeft).coerceIn(MIN_WIDTH, 1.0f)
             val finalH = (newBottom - newTop).coerceIn(MIN_HEIGHT, 1.0f)
             layer.copy(
-                x = newLeft.coerceIn(-0.45f, 0.95f),
-                y = newTop.coerceIn(-0.45f, 0.95f),
+                x = newLeft.coerceIn(0f, (1f - finalW).coerceAtLeast(0f)),
+                y = newTop.coerceIn(0f, (1f - finalH).coerceAtLeast(0f)),
                 width = finalW,
                 height = finalH
             )
@@ -300,45 +362,109 @@ object StudioWorkspaceReducer {
         newHeight: Float
     ): StudioWorkspaceState {
         return updateLayer(state, layerId) { layer ->
-            val clampedW = newWidth.coerceIn(MIN_WIDTH, 1.0f)
-            val clampedH = if (layer.lockAspectRatio && layer.width > 0.01f) {
-                val ratio = layer.height / layer.width
-                (clampedW * ratio).coerceIn(MIN_HEIGHT, 1.0f)
+            val widthChanged = abs(newWidth - layer.width) >= abs(newHeight - layer.height)
+            val aspect = (layer.width / layer.height.coerceAtLeast(0.001f)).coerceIn(0.1f, 10f)
+            val (finalW, finalH) = if (layer.lockAspectRatio) {
+                if (widthChanged) {
+                    val upperW = minOf(1.0f, 1.0f * aspect)
+                    val lowerW = maxOf(MIN_WIDTH, MIN_HEIGHT * aspect).coerceAtMost(upperW)
+                    val w = newWidth.coerceIn(lowerW, upperW)
+                    val h = (w / aspect).coerceIn(MIN_HEIGHT, 1.0f)
+                    w to h
+                } else {
+                    val upperH = minOf(1.0f, 1.0f / aspect)
+                    val lowerH = maxOf(MIN_HEIGHT, MIN_WIDTH / aspect).coerceAtMost(upperH)
+                    val h = newHeight.coerceIn(lowerH, upperH)
+                    val w = (h * aspect).coerceIn(MIN_WIDTH, 1.0f)
+                    w to h
+                }
             } else {
-                newHeight.coerceIn(MIN_HEIGHT, 1.0f)
+                newWidth.coerceIn(MIN_WIDTH, 1.0f) to newHeight.coerceIn(MIN_HEIGHT, 1.0f)
             }
-            layer.copy(width = clampedW, height = clampedH)
+            val nextX = layer.x.coerceIn(0f, (1f - finalW).coerceAtLeast(0f))
+            val nextY = layer.y.coerceIn(0f, (1f - finalH).coerceAtLeast(0f))
+            layer.copy(x = nextX, y = nextY, width = finalW, height = finalH)
+        }
+    }
+
+    /**
+     * Adjusts a layer to an exact custom dimension or grid ratio (e.g., 4x4, 6x2, 16x9, 1x1, or custom WxH units)
+     * computed accurately against the YouTube 16:9 (1920x1080) or 9:16 canvas without clipping or overflowing bounds.
+     */
+    fun applyCustomDimensionUnits(
+        state: StudioWorkspaceState,
+        layerId: String,
+        unitsW: Float,
+        unitsH: Float,
+        referenceGridCols: Float = 8f,
+        referenceGridRows: Float = 4.5f
+    ): StudioWorkspaceState {
+        val safeW = unitsW.coerceIn(0.5f, 16f)
+        val safeH = unitsH.coerceIn(0.5f, 16f)
+        val canvasAspect = if (state.activeScene.isVertical) 9f / 16f else 16f / 9f
+        return updateLayer(state, layerId) { layer ->
+            // Compute visual ratio matching unitsW : unitsH on physical canvas coordinates,
+            // scaled proportionally to grid units (e.g. 4x4 -> square tile, 6x2 -> wide 3:1 banner).
+            var normW = (safeW / referenceGridCols).coerceIn(MIN_WIDTH, 1.0f)
+            var normH = ((normW * canvasAspect) * (safeH / safeW)).coerceIn(MIN_HEIGHT, 1.0f)
+            if (normH >= 1.0f) {
+                normH = 1.0f
+                normW = ((normH / canvasAspect) * (safeW / safeH)).coerceIn(MIN_WIDTH, 1.0f)
+            }
+            val cx = layer.x + layer.width / 2f
+            val cy = layer.y + layer.height / 2f
+            val nextX = (cx - normW / 2f).coerceIn(0f, (1f - normW).coerceAtLeast(0f))
+            val nextY = (cy - normH / 2f).coerceIn(0f, (1f - normH).coerceAtLeast(0f))
+            layer.copy(x = nextX, y = nextY, width = normW, height = normH)
         }
     }
 
     fun centerLayerHorizontally(state: StudioWorkspaceState, layerId: String): StudioWorkspaceState {
         return updateLayer(state, layerId) { layer ->
-            layer.copy(x = ((1f - layer.width) / 2f).coerceIn(0f, 1f))
+            layer.copy(x = ((1f - layer.width) / 2f).coerceIn(0f, (1f - layer.width).coerceAtLeast(0f)))
         }
     }
 
     fun centerLayerVertically(state: StudioWorkspaceState, layerId: String): StudioWorkspaceState {
         return updateLayer(state, layerId) { layer ->
-            layer.copy(y = ((1f - layer.height) / 2f).coerceIn(0f, 1f))
+            layer.copy(y = ((1f - layer.height) / 2f).coerceIn(0f, (1f - layer.height).coerceAtLeast(0f)))
         }
     }
 
     fun alignLayerCenter(state: StudioWorkspaceState, layerId: String): StudioWorkspaceState {
         return updateLayer(state, layerId) { layer ->
             layer.copy(
-                x = ((1f - layer.width) / 2f).coerceIn(0f, 1f),
-                y = ((1f - layer.height) / 2f).coerceIn(0f, 1f)
+                x = ((1f - layer.width) / 2f).coerceIn(0f, (1f - layer.width).coerceAtLeast(0f)),
+                y = ((1f - layer.height) / 2f).coerceIn(0f, (1f - layer.height).coerceAtLeast(0f))
             )
         }
     }
 
+    /**
+     * Fit to 16:9 YouTube Canvas: scales layer as large as possible inside 1920x1080
+     * while preserving its aspect ratio (media aspect if known, otherwise current layer visual aspect),
+     * centered with zero cropping or clipping.
+     */
     fun fitLayerFullCanvas(state: StudioWorkspaceState, layerId: String): StudioWorkspaceState {
+        val canvasAspect = if (state.activeScene.isVertical) 9f / 16f else 16f / 9f
         return updateLayer(state, layerId) { layer ->
+            val mediaAspect = if (layer.sourceMediaWidth > 0 && layer.sourceMediaHeight > 0) {
+                layer.sourceMediaWidth.toFloat() / layer.sourceMediaHeight.toFloat()
+            } else if (layer.type == LayerSourceType.GAMEPLAY_SCREEN || layer.type == LayerSourceType.BACKGROUND) {
+                canvasAspect
+            } else {
+                ((layer.width * canvasAspect) / layer.height.coerceAtLeast(0.01f)).coerceIn(0.25f, 4.0f)
+            }
+            val (fitW, fitH) = if (mediaAspect >= canvasAspect) {
+                1.0f to (canvasAspect / mediaAspect).coerceIn(MIN_HEIGHT, 1.0f)
+            } else {
+                (mediaAspect / canvasAspect).coerceIn(MIN_WIDTH, 1.0f) to 1.0f
+            }
             layer.copy(
-                x = 0f,
-                y = 0f,
-                width = 1f,
-                height = 1f,
+                x = ((1f - fitW) / 2f).coerceIn(0f, 1f),
+                y = ((1f - fitH) / 2f).coerceIn(0f, 1f),
+                width = fitW,
+                height = fitH,
                 rotationDeg = 0f,
                 cropLeft = 0f,
                 cropTop = 0f,
@@ -348,6 +474,9 @@ object StudioWorkspaceReducer {
         }
     }
 
+    /**
+     * Fill 16:9 YouTube Canvas edge-to-edge (100% width x 100% height at origin 0,0).
+     */
     fun fillLayerCanvas(state: StudioWorkspaceState, layerId: String): StudioWorkspaceState {
         return updateLayer(state, layerId) { layer ->
             layer.copy(
@@ -584,8 +713,8 @@ object StudioWorkspaceReducer {
             visible = true,
             locked = false,
             zIndex = insertZ,
-            x = minX.coerceIn(-0.45f, 0.95f),
-            y = minY.coerceIn(-0.45f, 0.95f),
+            x = minX.coerceIn(0f, (1f - clampedW).coerceAtLeast(0f)),
+            y = minY.coerceIn(0f, (1f - clampedH).coerceAtLeast(0f)),
             width = clampedW,
             height = clampedH,
             transparentBackground = true,
@@ -615,10 +744,10 @@ object StudioWorkspaceReducer {
         }
 
         val restoredChildren = parent.mergedChildren.sortedBy { it.zIndex }.mapIndexed { idx, child ->
-            val absX = (parent.x + child.x * parent.width).coerceIn(-0.45f, 0.95f)
-            val absY = (parent.y + child.y * parent.height).coerceIn(-0.45f, 0.95f)
             val absW = (child.width * parent.width).coerceIn(MIN_WIDTH, 1.0f)
             val absH = (child.height * parent.height).coerceIn(MIN_HEIGHT, 1.0f)
+            val absX = (parent.x + child.x * parent.width).coerceIn(0f, (1f - absW).coerceAtLeast(0f))
+            val absY = (parent.y + child.y * parent.height).coerceIn(0f, (1f - absH).coerceAtLeast(0f))
             child.copy(
                 zIndex = parent.zIndex * 10 + idx,
                 x = absX,
@@ -791,11 +920,15 @@ object StudioWorkspaceReducer {
         val cr = layer.cropRight.coerceIn(0f, (0.85f - cl).coerceIn(0f, 0.45f))
         val ct = layer.cropTop.coerceIn(0f, 0.45f)
         val cb = layer.cropBottom.coerceIn(0f, (0.85f - ct).coerceIn(0f, 0.45f))
+        val safeW = layer.width.coerceIn(MIN_WIDTH, 1.0f)
+        val safeH = layer.height.coerceIn(MIN_HEIGHT, 1.0f)
+        val maxX = (1f - safeW).coerceAtLeast(0f)
+        val maxY = (1f - safeH).coerceAtLeast(0f)
         return layer.copy(
-            x = layer.x.coerceIn(-0.45f, 0.95f),
-            y = layer.y.coerceIn(-0.45f, 0.95f),
-            width = layer.width.coerceIn(MIN_WIDTH, 1.0f),
-            height = layer.height.coerceIn(MIN_HEIGHT, 1.0f),
+            x = layer.x.coerceIn(0f, maxX),
+            y = layer.y.coerceIn(0f, maxY),
+            width = safeW,
+            height = safeH,
             rotationDeg = ((layer.rotationDeg % 360f) + 360f) % 360f,
             opacity = layer.opacity.coerceIn(0.05f, 1.0f),
             cropLeft = cl,

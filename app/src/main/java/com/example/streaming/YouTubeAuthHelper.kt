@@ -47,13 +47,21 @@ object YouTubeAuthHelper {
 
     private fun resolveWebClientId(context: Context): String? {
         return runCatching {
-            val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
-            if (resId != 0) {
-                context.getString(resId).trim().takeIf { it.isNotBlank() && !it.contains("REPLACE", ignoreCase = true) }
-            } else {
-                null
-            }
+            context.getString(com.example.R.string.default_web_client_id)
+                .trim()
+                .takeIf { it.isNotBlank() && !it.contains("REPLACE", ignoreCase = true) }
         }.getOrNull()
+    }
+
+    fun isOAuthConfigured(context: Context): Boolean = resolveWebClientId(context) != null
+
+    fun oauthStatusSummary(context: Context): String {
+        val configured = isOAuthConfigured(context)
+        return if (configured) {
+            "Google OAuth configured (${context.packageName})"
+        } else {
+            "Google OAuth Web Client ID missing • Manual RTMP works without login"
+        }
     }
 
     private fun generateHashedNonce(): String {

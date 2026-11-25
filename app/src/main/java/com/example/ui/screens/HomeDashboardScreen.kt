@@ -64,7 +64,9 @@ import com.example.studio.DualLinkState
 import com.example.studio.DualPhoneTelemetry
 import com.example.studio.StudioWorkspaceState
 import com.example.telemetry.ActiveLiveSessionSnapshot
+import com.example.telemetry.AppConnectivitySnapshot
 import com.example.ui.components.BrandGradientButton
+import com.example.ui.components.ConnectivityStatusBar
 import com.example.ui.components.GlassCard
 import com.example.ui.components.LiveStatusBadge
 import com.example.ui.components.SectionHeader
@@ -111,7 +113,9 @@ fun HomeDashboardScreen(
     onReconnectPreviousLive: () -> Unit = {},
     onDismissRecovery: () -> Unit = {},
     onOpenLiveManager: () -> Unit = {},
-    onOpenFullScreenPreview: () -> Unit = {}
+    onOpenFullScreenPreview: () -> Unit = {},
+    connectivitySnapshot: AppConnectivitySnapshot = AppConnectivitySnapshot(),
+    onProbeStunServer: () -> Unit = {}
 ) {
     val isLive = streamTelemetry.state == StreamLifecycleState.LIVE
     val isPaused = streamTelemetry.state == StreamLifecycleState.PAUSED
@@ -165,6 +169,15 @@ fun HomeDashboardScreen(
                     durationText = if (isLive || isPaused) formatHomeDuration(streamTelemetry.durationSec) else ""
                 )
             }
+        }
+
+        // 1a. Separate Network / Server / Streaming Connectivity Status Bar
+        item {
+            ConnectivityStatusBar(
+                snapshot = connectivitySnapshot,
+                onCheckConnectivity = onProbeStunServer,
+                showStunDetail = false
+            )
         }
 
         // 1b. Crash Recovery Banner (rejoins exact previous session without duplicates)

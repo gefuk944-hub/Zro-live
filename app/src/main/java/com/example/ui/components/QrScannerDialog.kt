@@ -127,9 +127,12 @@ fun QrScannerDialog(
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
     val hasDelivered = remember { AtomicBoolean(false) }
+    val cameraProviderHolder = remember { arrayOfNulls<ProcessCameraProvider>(1) }
 
     DisposableEffect(Unit) {
         onDispose {
+            runCatching { cameraProviderHolder[0]?.unbindAll() }
+            cameraProviderHolder[0] = null
             runCatching { cameraExecutor.shutdown() }
         }
     }
@@ -183,6 +186,7 @@ fun QrScannerDialog(
                             providerFuture.addListener({
                                 runCatching {
                                     val cameraProvider = providerFuture.get()
+                                    cameraProviderHolder[0] = cameraProvider
                                     val preview = Preview.Builder().build().also {
                                         it.surfaceProvider = previewView.surfaceProvider
                                     }
@@ -193,13 +197,20 @@ fun QrScannerDialog(
                                         try {
                                             if (!hasDelivered.get()) {
                                                 val yPlane = imageProxy.planes[0]
-                                                val buf = yPlane.buffer
-                                                val bytes = ByteArray(buf.remaining())
-                                                buf.get(bytes)
-                                                val decoded = QrPairingHelper.decodeQrFromYuv(
-                                                    yPlaneBytes = bytes,
+                                                val packedY = QrPairingHelper.extractPackedYPlane(
+                                                    buffer = yPlane.buffer,
                                                     width = imageProxy.width,
-                                                    height = imageProxy.height
+                                                    height = imageProxy.height,
+                                                    rowStride = yPlane.rowStride,
+                                                    pixelStride = yPlane.pixelStride
+                                                )
+                                                val decoded = QrPairingHelper.decodeQrFromYuv(
+                                                    yPlaneBytes = packedY,
+                                                    width = imageProxy.width,
+                                                    height = imageProxy.height,
+                                                    rowStride = imageProxy.width,
+                                                    pixelStride = 1,
+                                                    rotationDegrees = imageProxy.imageInfo.rotationDegrees
                                                 )
                                                 if (!decoded.isNullOrBlank() && hasDelivered.compareAndSet(false, true)) {
                                                     ContextCompat.getMainExecutor(ctx).execute {

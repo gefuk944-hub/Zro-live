@@ -102,6 +102,7 @@ import com.example.data.model.StreamRuntimeTelemetry
 import com.example.data.model.YouTubeChatMessage
 import com.example.dualphone.DualPhoneProtocol
 import com.example.dualphone.DualRemoteCommand
+import com.example.dualphone.WifiDirectState
 import com.example.studio.CropEdge
 import com.example.studio.DualConnectionMethod
 import com.example.studio.DualLinkState
@@ -112,8 +113,10 @@ import com.example.studio.ResizeCorner
 import com.example.studio.SceneLayer
 import com.example.studio.SceneSlot
 import com.example.studio.StudioWorkspaceState
+import com.example.telemetry.AppConnectivitySnapshot
 import com.example.ui.components.AudioLevelMeter
 import com.example.ui.components.BrandGradientButton
+import com.example.ui.components.ConnectivityStatusBar
 import com.example.ui.components.GlassCard
 import com.example.ui.components.LiveStatusBadge
 import com.example.ui.components.ProSubpageTopBar
@@ -191,7 +194,13 @@ fun DualPhoneStudioScreen(
     onToggleLayerLock: (String) -> Unit = {},
     onToggleLayerVisibility: (String) -> Unit = {},
     onSwitchScene: (SceneSlot) -> Unit = {},
-    onOpenFullScreenPreview: () -> Unit = {}
+    onOpenFullScreenPreview: () -> Unit = {},
+    wifiDirectState: WifiDirectState = WifiDirectState(),
+    connectivitySnapshot: AppConnectivitySnapshot = AppConnectivitySnapshot(),
+    onStartWifiDirectHost: () -> Unit = {},
+    onStopWifiDirectHost: () -> Unit = {},
+    onProbeStunServer: () -> Unit = {},
+    onSharePhone1Screen: () -> Unit = {}
 ) {
     var activeSection by remember(initialSection) { mutableStateOf(initialSection) }
     var showStopConfirm by remember { mutableStateOf(false) }
@@ -1157,32 +1166,73 @@ fun DualPhoneStudioScreen(
                                 Text("Disconnect")
                             }
                         }
+                        if (connected && dualTelemetry.role == DualPhoneRole.PHONE1_GAMEPLAY) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            if (streamTelemetry.captureActive) {
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = ZroEmerald.copy(alpha = 0.16f),
+                                    border = BorderStroke(1.dp, ZroEmerald.copy(alpha = 0.7f)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = "SCREEN SHARING ACTIVE — Streaming this phone's display to Studio Phone 2",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        color = ZroEmerald,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                                    )
+                                }
+                            } else {
+                                BrandGradientButton(
+                                    text = "SHARE THIS PHONE'S SCREEN TO STUDIO",
+                                    onClick = onSharePhone1Screen,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("phone1_share_screen_btn")
+                                )
+                            }
+                        }
                     }
                 }
 
-                // Role-specific QR / Manual Address Pairing
+                // Separate Network, Server & Streaming Connectivity Status + ICE/STUN Check
+                item {
+                    ConnectivityStatusBar(
+                        snapshot = connectivitySnapshot,
+                        onCheckConnectivity = onProbeStunServer,
+                        showStunDetail = true
+                    )
+                }
+
+                // Role-specific QR / Manual Address Pairing (ONLY QR Code & Manual Address)
                 if (dualTelemetry.role == DualPhoneRole.PHONE2_STUDIO) {
                     item {
                         GlassCard {
                             SectionHeader(
                                 title = "Phone 2 Studio Host",
-                                subtitle = "Scan QR or enter manual address on Phone 1. Phone 2 NEVER captures its own screen."
+                                subtitle = "Pair via QR Code or Manual Address. Phone 2 NEVER captures its own screen."
                             )
                             Spacer(modifier = Modifier.height(8.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                DualConnectionMethod.entries.forEach { method ->
+                                DualConnectionMethod.VISIBLE_OPTIONS.forEach { method ->
+                                    val selected = dualTelemetry.connectionMethod == method ||
+                                        (dualTelemetry.connectionMethod !in DualConnectionMethod.VISIBLE_OPTIONS &&
+                                            method == DualConnectionMethod.QR_PAIRING)
                                     FilterChip(
-                                        selected = dualTelemetry.connectionMethod == method,
+                                        selected = selected,
                                         onClick = { onSelectMethod(method) },
-                                        label = { Text(method.label, fontSize = 10.sp, maxLines = 1) },
+                                        label = { Text(method.label, fontSize = 11.sp, maxLines = 1) },
                                         colors = FilterChipDefaults.filterChipColors(
                                             selectedContainerColor = ZroCobalt.copy(alpha = 0.22f),
                                             selectedLabelColor = Color.White
                                         ),
-                                        modifier = Modifier.weight(1f)
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("pairing_method_${method.name.lowercase()}")
                                     )
                                 }
                             }
@@ -1194,6 +1244,32 @@ fun DualPhoneStudioScreen(
                                     .fillMaxWidth()
                                     .testTag("start_phone2_host_button")
                             )
+                            if (wifiDirectState.supported) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                OutlinedButton(
+                                    onClick = if (wifiDirectState.groupActive) onStopWifiDirectHost else onStartWifiDirectHost,
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("wifi_direct_toggle_btn")
+                                ) {
+                                    Text(
+                                        text = if (wifiDirectState.groupActive) {
+                                            "Stop Wi-Fi Direct (${wifiDirectState.groupOwnerAddress})"
+                                        } else {
+                                            "Enable Wi-Fi Direct P2P (No Router Needed)"
+                                        },
+                                        fontSize = 11.sp
+                                    )
+                                }
+                                Text(
+                                    text = wifiDirectState.statusText,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    color = if (wifiDirectState.groupActive) ZroEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 3.dp)
+                                )
+                            }
                             if (pairingUri.isNotBlank() && dualTelemetry.pairingToken.isNotBlank()) {
                                 Spacer(modifier = Modifier.height(10.dp))
                                 QrPairingDisplayCard(
@@ -1274,10 +1350,10 @@ fun DualPhoneStudioScreen(
                         if (showSetupGuide) {
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = "1. Connect both phones to the same Wi-Fi or turn on a Mobile Hotspot.\n" +
-                                    "2. On Phone 2, choose 'Phone 2 — Studio Control' and tap 'Start Phone 2 Host'.\n" +
-                                    "3. On Phone 1 (Gameplay), tap 'Scan Phone 2 QR Code' or type Phone 2's IP + Token.\n" +
-                                    "4. Start Game Capture on Phone 1. Your gameplay appears as a resizable OBS source on Phone 2 with auto-restored layout.",
+                                text = "1. Put both phones on the same Wi-Fi network, or enable Wi-Fi Direct P2P on Phone 2.\n" +
+                                    "2. On Phone 2 (Studio / Remote Control), select 'Phone 2 — Studio Control' and tap 'Start Phone 2 Host'.\n" +
+                                    "3. On Phone 1 (Gameplay), scan Phone 2's QR Code or enter its Manual Address + Secure Token.\n" +
+                                    "4. Tap 'Share This Phone's Screen to Studio' on Phone 1 — Phone 2 automatically switches the live feed to Phone 1 and shows only the Remote Control + compact preview.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

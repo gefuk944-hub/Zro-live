@@ -93,6 +93,7 @@ import com.example.data.model.YouTubeChatState
 import com.example.data.model.ZroAppSettings
 import com.example.dualphone.DualPhoneProtocol
 import com.example.dualphone.DualRemoteCommand
+import com.example.dualphone.WifiDirectHelper
 import com.example.streaming.RtmpPublisher
 import com.example.streaming.StreamNotificationManager
 import com.example.streaming.ZroStreamCoordinator
@@ -258,6 +259,8 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
     val savedLiveProfiles by viewModel.savedLiveProfiles.collectAsStateWithLifecycle()
     val crashLogs by viewModel.crashLogs.collectAsStateWithLifecycle()
     val externalCameraInventory by viewModel.externalCameraInventory.collectAsStateWithLifecycle()
+    val connectivitySnapshot by viewModel.connectivitySnapshot.collectAsStateWithLifecycle()
+    val wifiDirectState by viewModel.wifiDirectState.collectAsStateWithLifecycle()
 
     // Real Navigation History: tab history + pushable subpage back stack
     var currentTab by remember { mutableStateOf(ZroNavTab.HOME) }
@@ -484,6 +487,30 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
 
     val openCameraQrScanner: () -> Unit = {
         ensureCameraPermissionAndRun { showQrScanner = true }
+    }
+
+    var pendingWifiDirectAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val wifiDirectPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            pendingWifiDirectAction?.invoke()
+        } else {
+            viewModel.showMessage("Nearby Wi-Fi Devices permission is required for Wi-Fi Direct P2P pairing.")
+        }
+        pendingWifiDirectAction = null
+    }
+
+    val ensureWifiDirectPermissionAndRun: (() -> Unit) -> Unit = { action ->
+        val requiredPerm = WifiDirectHelper.requiredPermissionForSdk()
+        if (requiredPerm == null ||
+            ContextCompat.checkSelfPermission(context, requiredPerm) == PackageManager.PERMISSION_GRANTED
+        ) {
+            action()
+        } else {
+            pendingWifiDirectAction = action
+            wifiDirectPermissionLauncher.launch(requiredPerm)
+        }
     }
 
     val launchPrivacyAwareCapture: (PendingCapturePurpose, CaptureMode, Boolean) -> Unit = { purpose, mode, _ ->
@@ -810,7 +837,9 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                             onConnectYouTubeAccount = { viewModel.signInYouTubeAccount(context) },
                             onDisconnectYouTubeAccount = { viewModel.signOutYouTubeAccount() },
                             onSaveConfiguration = { viewModel.saveStreamConfiguration() },
-                            onTestConnection = { viewModel.testRtmpConnection() }
+                            onTestConnection = { viewModel.testRtmpConnection() },
+                            connectivitySnapshot = connectivitySnapshot,
+                            onProbeStunServer = { viewModel.probeStunAndRefreshConnectivity() }
                         )
 
                         AppSubpage.LAYERS_PANEL -> ObsSceneStudioScreen(
@@ -907,7 +936,10 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                             onUnmergeLayer = { id -> viewModel.unmergeLayer(id) },
                             onMoveLayerTo = { id, x, y -> viewModel.moveLayerTo(id, x, y) },
                             onReloadBrowserLayer = { id -> viewModel.reloadBrowserLayer(id) },
-                            onOpenFullScreenPreview = { showFullScreenPreview = true }
+                            onOpenFullScreenPreview = { showFullScreenPreview = true },
+                            onAlignCenter = { id -> viewModel.alignLayerCenter(id) },
+                            onResizeLayerExact = { id, w, h -> viewModel.resizeLayerExact(id, w, h) },
+                            onApplyCustomSizeUnits = { id, uw, uh -> viewModel.applyLayerCustomSizeUnits(id, uw, uh) }
                         )
 
                         AppSubpage.CHAT -> ChatControlScreen(
@@ -1030,7 +1062,13 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                             onToggleLayerLock = { viewModel.toggleLayerLock(it) },
                             onToggleLayerVisibility = { viewModel.toggleLayerVisibility(it) },
                             onSwitchScene = { viewModel.switchScene(it) },
-                            onOpenFullScreenPreview = { showFullScreenPreview = true }
+                            onOpenFullScreenPreview = { showFullScreenPreview = true },
+                            wifiDirectState = wifiDirectState,
+                            connectivitySnapshot = connectivitySnapshot,
+                            onStartWifiDirectHost = { ensureWifiDirectPermissionAndRun { viewModel.startWifiDirectHost() } },
+                            onStopWifiDirectHost = { viewModel.stopWifiDirectHost() },
+                            onProbeStunServer = { viewModel.probeStunAndRefreshConnectivity() },
+                            onSharePhone1Screen = requestSelectGameCapture
                         )
 
                         AppSubpage.VOICE_ROOM -> VoiceRoomScreen(
@@ -1095,7 +1133,9 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                                     studioSubTab = LiveStudioTab.LIVE_MANAGER
                                     selectTopTab(ZroNavTab.LIVE)
                                 },
-                                onOpenFullScreenPreview = { showFullScreenPreview = true }
+                                onOpenFullScreenPreview = { showFullScreenPreview = true },
+                                connectivitySnapshot = connectivitySnapshot,
+                                onProbeStunServer = { viewModel.probeStunAndRefreshConnectivity() }
                             )
 
                             ZroNavTab.DUAL -> DualPhoneStudioScreen(
@@ -1148,7 +1188,13 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                                 onToggleLayerLock = { viewModel.toggleLayerLock(it) },
                                 onToggleLayerVisibility = { viewModel.toggleLayerVisibility(it) },
                                 onSwitchScene = { viewModel.switchScene(it) },
-                                onOpenFullScreenPreview = { showFullScreenPreview = true }
+                                onOpenFullScreenPreview = { showFullScreenPreview = true },
+                                wifiDirectState = wifiDirectState,
+                                connectivitySnapshot = connectivitySnapshot,
+                                onStartWifiDirectHost = { ensureWifiDirectPermissionAndRun { viewModel.startWifiDirectHost() } },
+                                onStopWifiDirectHost = { viewModel.stopWifiDirectHost() },
+                                onProbeStunServer = { viewModel.probeStunAndRefreshConnectivity() },
+                                onSharePhone1Screen = requestSelectGameCapture
                             )
 
                             ZroNavTab.LIVE -> LiveStudioScreen(

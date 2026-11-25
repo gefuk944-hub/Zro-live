@@ -35,9 +35,12 @@ import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
+import kotlinx.coroutines.channels.Channel
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.random.Random
 
 /**
  * Real LAN / Mobile Hotspot Dual-Phone Streaming Engine:
@@ -113,12 +116,15 @@ class DualPhoneEngine {
     private val bytesCounter = AtomicLong(0L)
     private val droppedMirrorFrames = AtomicInteger(0)
 
+    private var videoSenderJob: Job? = null
+    private val latestMirrorFrameChannel = Channel<ByteArray>(capacity = Channel.CONFLATED)
+
     private var lastConnectIp: String = ""
     private var lastConnectControlPort: Int = DualPhoneProtocol.DEFAULT_CONTROL_PORT
     private var lastConnectVideoPort: Int = DualPhoneProtocol.DEFAULT_VIDEO_PORT
     private var lastConnectToken: String = ""
     private var lastConnectDeviceName: String = "Phone 1 Gameplay"
-    private var lastConnectMethod: DualConnectionMethod = DualConnectionMethod.LOCAL_WIFI
+    private var lastConnectMethod: DualConnectionMethod = DualConnectionMethod.QR_PAIRING
 
     fun setRole(role: DualPhoneRole) {
         if (_telemetry.value.role != role) {
@@ -171,13 +177,15 @@ class DualPhoneEngine {
         controlPort: Int = DualPhoneProtocol.DEFAULT_CONTROL_PORT,
         videoPort: Int = DualPhoneProtocol.DEFAULT_VIDEO_PORT,
         method: DualConnectionMethod = _telemetry.value.connectionMethod,
-        presetToken: String? = null
+        presetToken: String? = null,
+        preferredIpOverride: String? = null
     ) {
         disconnect(clearRole = false)
         intentionalStop.set(false)
 
         val token = presetToken?.takeIf { it.length >= 4 } ?: DualPhoneProtocol.generateSecureToken()
-        val ip = discoverLocalIpv4Address()
+        val ip = preferredIpOverride?.trim()?.takeIf { DualPhoneProtocol.isValidIpv4OrHost(it) }
+            ?: discoverLocalIpv4Address()
 
         controlLoopJob = scope.launch {
             try {
@@ -270,7 +278,11 @@ class DualPhoneEngine {
                 return
             }
             val providedToken = authObj.optString("token", "")
-            if (providedToken != expectedToken) {
+            val tokenValid = MessageDigest.isEqual(
+                providedToken.toByteArray(Charsets.UTF_8),
+                expectedToken.toByteArray(Charsets.UTF_8)
+            )
+            if (!tokenValid) {
                 writeLineSafe(writer, DualPhoneProtocol.encodeAuthFail("Invalid pairing token."))
                 runCatching { client.close() }
                 _telemetry.update { it.copy(lastError = "Rejected pairing attempt with invalid token.") }
@@ -374,8 +386,9 @@ class DualPhoneEngine {
             }
             try {
                 client.tcpNoDelay = true
+                client.receiveBufferSize = 128 * 1024
                 activeVideoSocket = client
-                val dataIn = DataInputStream(BufferedInputStream(client.getInputStream(), 65536))
+                val dataIn = DataInputStream(BufferedInputStream(client.getInputStream(), 131072))
                 var lastStatMs = System.currentTimeMillis()
                 var framesInSec = 0
                 var bytesInSec = 0L
@@ -551,7 +564,7 @@ class DualPhoneEngine {
                     Log.w(TAG, "Phone 1 connection interrupted: ${e.message}")
                     _telemetry.update {
                         it.copy(
-                            linkState = if (it.autoReconnect && attempt < 5) DualLinkState.RECONNECTING else DualLinkState.ERROR,
+                            linkState = if (it.autoReconnect && attempt < 8) DualLinkState.RECONNECTING else DualLinkState.ERROR,
                             signalQualityLabel = "Disconnected",
                             lastError = e.localizedMessage ?: "Connection to Phone 2 lost."
                         )
@@ -565,7 +578,7 @@ class DualPhoneEngine {
                 runCatching { socket?.close() }
                 closeVideoChannel()
 
-                if (!intentionalStop.get() && _telemetry.value.autoReconnect && attempt < 5) {
+                if (!intentionalStop.get() && _telemetry.value.autoReconnect && attempt < 8) {
                     scheduleAutoReconnect(attempt + 1)
                 }
             }
@@ -574,14 +587,34 @@ class DualPhoneEngine {
 
     private fun connectPhone1VideoChannel(ip: String, videoPort: Int) {
         videoLoopJob?.cancel()
+        videoSenderJob?.cancel()
         videoLoopJob = scope.launch {
             try {
                 val vs = Socket().apply {
                     tcpNoDelay = true
+                    sendBufferSize = 128 * 1024
                     connect(InetSocketAddress(ip, videoPort), 4000)
                 }
                 activeVideoSocket = vs
-                videoDataOut = DataOutputStream(BufferedOutputStream(vs.getOutputStream(), 65536))
+                val out = DataOutputStream(BufferedOutputStream(vs.getOutputStream(), 131072))
+                videoDataOut = out
+                videoSenderJob = scope.launch {
+                    for (jpegBytes in latestMirrorFrameChannel) {
+                        if (intentionalStop.get() || vs.isClosed) break
+                        try {
+                            synchronized(out) {
+                                out.writeInt(jpegBytes.size)
+                                out.write(jpegBytes)
+                                out.flush()
+                            }
+                            framesCounter.incrementAndGet()
+                            bytesCounter.addAndGet(jpegBytes.size.toLong())
+                        } catch (_: Exception) {
+                            droppedMirrorFrames.incrementAndGet()
+                            break
+                        }
+                    }
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "Optional video mirror socket unavailable: ${e.message}")
             }
@@ -591,7 +624,9 @@ class DualPhoneEngine {
     private fun scheduleAutoReconnect(nextAttempt: Int) {
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
-            delay(nextAttempt * 1500L)
+            val baseDelay = (1000L shl (nextAttempt - 1).coerceAtMost(3)).coerceAtMost(8000L)
+            val jitter = Random.nextLong(150L, 650L)
+            delay(baseDelay + jitter)
             if (!intentionalStop.get() && _telemetry.value.role == DualPhoneRole.PHONE1_GAMEPLAY) {
                 startPhone1ConnectionAttempt(nextAttempt)
             }
@@ -599,30 +634,18 @@ class DualPhoneEngine {
     }
 
     /**
-     * Pushes a compressed JPEG gameplay frame from Phone 1 to Phone 2 over the Video Mirror socket.
-     * Throttled to ~15 FPS so 4GB RAM devices stay cool and responsive.
+     * Pushes a compressed JPEG gameplay frame from Phone 1 to Phone 2 over a single-slot
+     * CONFLATED latest-frame channel (up to 30 FPS) so stale frames are dropped immediately
+     * instead of queueing up glass-to-glass latency.
      */
-    fun pushMirroredFrameJpeg(jpegBytes: ByteArray, width: Int, height: Int, minIntervalMs: Long = 66L) {
+    fun pushMirroredFrameJpeg(jpegBytes: ByteArray, width: Int, height: Int, minIntervalMs: Long = 33L) {
         if (_telemetry.value.linkState != DualLinkState.CONNECTED) return
-        val out = videoDataOut ?: return
+        if (videoDataOut == null) return
         val now = System.currentTimeMillis()
         if (now - lastFrameSentMs.get() < minIntervalMs) return
         lastFrameSentMs.set(now)
         if (jpegBytes.isEmpty() || jpegBytes.size > MAX_MIRROR_FRAME_BYTES) return
-
-        scope.launch {
-            try {
-                synchronized(out) {
-                    out.writeInt(jpegBytes.size)
-                    out.write(jpegBytes)
-                    out.flush()
-                }
-                framesCounter.incrementAndGet()
-                bytesCounter.addAndGet(jpegBytes.size.toLong())
-            } catch (_: Exception) {
-                droppedMirrorFrames.incrementAndGet()
-            }
-        }
+        latestMirrorFrameChannel.trySend(jpegBytes)
     }
 
     fun sendRemoteCommand(cmd: DualRemoteCommand): Boolean {
@@ -693,6 +716,7 @@ class DualPhoneEngine {
     }
 
     private fun closeVideoChannel() {
+        videoSenderJob?.cancel(); videoSenderJob = null
         runCatching { videoDataOut?.close() }; videoDataOut = null
         runCatching { activeVideoSocket?.close() }; activeVideoSocket = null
     }

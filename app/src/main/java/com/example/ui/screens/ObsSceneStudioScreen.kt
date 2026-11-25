@@ -66,7 +66,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -196,7 +199,10 @@ fun ObsSceneStudioScreen(
     onUnmergeLayer: (String) -> Unit = {},
     onMoveLayerTo: ((String, Float, Float) -> Unit)? = null,
     onReloadBrowserLayer: (String) -> Unit = {},
-    onOpenFullScreenPreview: (() -> Unit)? = null
+    onOpenFullScreenPreview: (() -> Unit)? = null,
+    onAlignCenter: (String) -> Unit = { id -> onCenterH(id); onCenterV(id) },
+    onResizeLayerExact: (String, Float, Float) -> Unit = { id, w, h -> onUpdateLayerProps(id) { it.copy(width = w, height = h) } },
+    onApplyCustomSizeUnits: (String, Float, Float) -> Unit = { _, _, _ -> }
 ) {
     val activeScene = workspace.activeScene
     val selectedLayer = activeScene.layers.firstOrNull { it.id == workspace.selectedLayerId }
@@ -204,11 +210,18 @@ fun ObsSceneStudioScreen(
     var beforePreviewActive by remember { mutableStateOf(false) }
     var graphicCategory by remember { mutableStateOf(GraphicCategoryTab.TONE) }
     var cropModeActive by remember { mutableStateOf(false) }
+    var webInteractLayerId by remember { mutableStateOf<String?>(null) }
     var renameTargetLayer by remember { mutableStateOf<SceneLayer?>(null) }
     var showRenameCaptureDialog by remember { mutableStateOf(false) }
     var showMergeDialog by remember { mutableStateOf(false) }
     var showResetLayoutConfirm by remember { mutableStateOf(false) }
     var showAddSourceDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(workspace.selectedLayerId) {
+        if (workspace.selectedLayerId != webInteractLayerId) {
+            webInteractLayerId = null
+        }
+    }
 
     if (showResetLayoutConfirm) {
         AlertDialog(
@@ -561,7 +574,15 @@ fun ObsSceneStudioScreen(
                 enableLiveCameraPreview = workspace.cameraEnabled && cameraPermissionGranted,
                 interactive = true,
                 cropModeActive = cropModeActive,
-                onSelectLayer = onSelectLayer,
+                webInteractLayerId = webInteractLayerId,
+                onSelectLayer = { id ->
+                    onSelectLayer(id)
+                    if (id == null) {
+                        webInteractLayerId = null
+                    } else if (dockTab == StudioDockTab.SOURCES || dockTab == StudioDockTab.CUSTOMIZE) {
+                        dockTab = StudioDockTab.TRANSFORM
+                    }
+                },
                 onMoveLayerBy = onMoveLayerBy,
                 onMoveLayerTo = onMoveLayerTo,
                 onResizeLayerCorner = onResizeLayerCorner,
@@ -571,6 +592,87 @@ fun ObsSceneStudioScreen(
                 beforePreviewLayerId = if (beforePreviewActive && dockTab == StudioDockTab.GRAPHICS) selectedLayer?.id else null,
                 modifier = Modifier.heightIn(max = maxCanvasHeight)
             )
+
+            // Quick Selected Layer Bar (shows exact 1920x1080 px, Browser Interact toggle, and instant Deselect)
+            if (selectedLayer != null) {
+                val canvasBaseW = if (activeScene.isVertical) 1080 else 1920
+                val canvasBaseH = if (activeScene.isVertical) 1920 else 1080
+                val pxW = (selectedLayer.width * canvasBaseW).toInt()
+                val pxH = (selectedLayer.height * canvasBaseH).toInt()
+                val isWebInteracting = webInteractLayerId == selectedLayer.id
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceContainerLow, RoundedCornerShape(6.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "${selectedLayer.name} • ${pxW}×${pxH}px",
+                        fontSize = 10.sp,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (selectedLayer.type == LayerSourceType.BROWSER_WEB) {
+                        Surface(
+                            onClick = {
+                                webInteractLayerId = if (isWebInteracting) null else selectedLayer.id
+                            },
+                            shape = RoundedCornerShape(5.dp),
+                            color = if (isWebInteracting) ZroEmerald.copy(alpha = 0.24f) else ZroCobalt.copy(alpha = 0.22f),
+                            border = BorderStroke(1.dp, if (isWebInteracting) ZroEmerald else ZroCobalt),
+                            modifier = Modifier.testTag("browser_interact_toggle_btn")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.TouchApp,
+                                    contentDescription = if (isWebInteracting) "Exit webpage interaction" else "Interact with webpage",
+                                    tint = if (isWebInteracting) ZroEmerald else Color.White,
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Text(
+                                    text = if (isWebInteracting) "Edit Layout" else "Interact Web",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.White
+                                )
+                            }
+                        }
+                    }
+                    Surface(
+                        onClick = {
+                            webInteractLayerId = null
+                            onSelectLayer(null)
+                        },
+                        shape = RoundedCornerShape(5.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)),
+                        modifier = Modifier.testTag("studio_deselect_layer_btn")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Close,
+                                contentDescription = "Deselect layer",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Text("Deselect", fontSize = 10.sp, color = Color.White)
+                        }
+                    }
+                }
+            }
         }
 
         LazyColumn(
@@ -1042,17 +1144,18 @@ fun ObsSceneStudioScreen(
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
 
-                                // Quick Alignment & Fit buttons
+                                // Quick Alignment & Fit buttons (Fit, Fill, Center, Center H/V, Reset)
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .horizontalScroll(rememberScrollState()),
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    SmallActionButton("Center H", Icons.Rounded.CenterFocusStrong) { onCenterH(selectedLayer.id) }
-                                    SmallActionButton("Center V", Icons.Rounded.CenterFocusStrong) { onCenterV(selectedLayer.id) }
                                     SmallActionButton("Fit", Icons.Rounded.FitScreen) { onFitCanvas(selectedLayer.id) }
                                     SmallActionButton("Fill", Icons.Rounded.FitScreen) { onFillCanvas(selectedLayer.id) }
+                                    SmallActionButton("Center", Icons.Rounded.CenterFocusStrong) { onAlignCenter(selectedLayer.id) }
+                                    SmallActionButton("Center H", Icons.Rounded.CenterFocusStrong) { onCenterH(selectedLayer.id) }
+                                    SmallActionButton("Center V", Icons.Rounded.CenterFocusStrong) { onCenterV(selectedLayer.id) }
                                     SmallActionButton("Reset", Icons.Rounded.RestartAlt) { onResetTransform(selectedLayer.id) }
                                 }
 
@@ -1071,29 +1174,143 @@ fun ObsSceneStudioScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text("Proportional Resize Lock", style = MaterialTheme.typography.labelMedium, color = Color.White)
+                                    Text("Aspect Ratio Lock (Proportional)", style = MaterialTheme.typography.labelMedium, color = Color.White)
                                     Switch(
                                         checked = selectedLayer.lockAspectRatio,
                                         onCheckedChange = { locked ->
                                             onUpdateLayerProps(selectedLayer.id) { it.copy(lockAspectRatio = locked) }
-                                        }
+                                        },
+                                        modifier = Modifier.testTag("studio_aspect_lock_switch")
                                     )
                                 }
 
-                                StudioSlider("X Position", "${(selectedLayer.x * 100).toInt()}%", selectedLayer.x, 0f..0.95f) { v ->
-                                    onUpdateLayerProps(selectedLayer.id) { it.copy(x = v) }
+                                // Custom Grid / Ratio Size Presets (4x4, 6x2, 16:9, 1:1) & Exact Custom W x H
+                                var customWText by remember(selectedLayer.id) { mutableStateOf("4") }
+                                var customHText by remember(selectedLayer.id) { mutableStateOf("4") }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Custom Size Presets (W×H Grid Units)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    OutlinedButton(
+                                        onClick = { onApplyCustomSizeUnits(selectedLayer.id, 4f, 4f) },
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(28.dp).testTag("size_preset_4x4")
+                                    ) { Text("4×4", fontSize = 11.sp, color = Color.White) }
+                                    OutlinedButton(
+                                        onClick = { onApplyCustomSizeUnits(selectedLayer.id, 6f, 2f) },
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(28.dp).testTag("size_preset_6x2")
+                                    ) { Text("6×2", fontSize = 11.sp, color = Color.White) }
+                                    OutlinedButton(
+                                        onClick = { onApplyCustomSizeUnits(selectedLayer.id, 16f, 9f) },
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(28.dp).testTag("size_preset_16x9")
+                                    ) { Text("16:9", fontSize = 11.sp, color = Color.White) }
+                                    OutlinedButton(
+                                        onClick = { onApplyCustomSizeUnits(selectedLayer.id, 3f, 3f) },
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(28.dp).testTag("size_preset_3x3")
+                                    ) { Text("3×3", fontSize = 11.sp, color = Color.White) }
                                 }
-                                StudioSlider("Y Position", "${(selectedLayer.y * 100).toInt()}%", selectedLayer.y, 0f..0.95f) { v ->
-                                    onUpdateLayerProps(selectedLayer.id) { it.copy(y = v) }
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    OutlinedTextField(
+                                        value = customWText,
+                                        onValueChange = { customWText = it.filter { ch -> ch.isDigit() || ch == '.' }.take(5) },
+                                        label = { Text("W", fontSize = 10.sp) },
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1f).testTag("custom_size_w_input")
+                                    )
+                                    OutlinedTextField(
+                                        value = customHText,
+                                        onValueChange = { customHText = it.filter { ch -> ch.isDigit() || ch == '.' }.take(5) },
+                                        label = { Text("H", fontSize = 10.sp) },
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1f).testTag("custom_size_h_input")
+                                    )
+                                    Button(
+                                        onClick = {
+                                            val w = customWText.toFloatOrNull() ?: 4f
+                                            val h = customHText.toFloatOrNull() ?: 4f
+                                            onApplyCustomSizeUnits(selectedLayer.id, w, h)
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = ZroCobalt, contentColor = Color.White),
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                        modifier = Modifier.testTag("apply_custom_size_btn")
+                                    ) {
+                                        Text("Apply", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                    }
                                 }
-                                StudioSlider("Width", "${(selectedLayer.width * 100).toInt()}%", selectedLayer.width, 0.08f..1f) { v ->
-                                    onUpdateLayerProps(selectedLayer.id) { it.copy(width = v) }
-                                }
-                                StudioSlider("Height", "${(selectedLayer.height * 100).toInt()}%", selectedLayer.height, 0.08f..1f) { v ->
-                                    onUpdateLayerProps(selectedLayer.id) { it.copy(height = v) }
-                                }
-                                StudioSlider("Rotate", "${selectedLayer.rotationDeg.toInt()}°", selectedLayer.rotationDeg, -180f..180f) { v ->
+
+                                val maxX = (1f - selectedLayer.width).coerceAtLeast(0.01f)
+                                val maxY = (1f - selectedLayer.height).coerceAtLeast(0.01f)
+                                val canvasW = if (activeScene.isVertical) 1080 else 1920
+                                val canvasH = if (activeScene.isVertical) 1920 else 1080
+                                StudioSlider(
+                                    label = "X Position",
+                                    valueText = "${(selectedLayer.x * 100).toInt()}% (${(selectedLayer.x * canvasW).toInt()}px)",
+                                    value = selectedLayer.x.coerceIn(0f, maxX),
+                                    range = 0f..maxX,
+                                    onChange = { v -> onUpdateLayerProps(selectedLayer.id) { it.copy(x = v) } }
+                                )
+                                StudioSlider(
+                                    label = "Y Position",
+                                    valueText = "${(selectedLayer.y * 100).toInt()}% (${(selectedLayer.y * canvasH).toInt()}px)",
+                                    value = selectedLayer.y.coerceIn(0f, maxY),
+                                    range = 0f..maxY,
+                                    onChange = { v -> onUpdateLayerProps(selectedLayer.id) { it.copy(y = v) } }
+                                )
+                                StudioSlider(
+                                    label = "Width",
+                                    valueText = "${(selectedLayer.width * 100).toInt()}% (${(selectedLayer.width * canvasW).toInt()}px)",
+                                    value = selectedLayer.width,
+                                    range = 0.08f..1f,
+                                    onChange = { v -> onResizeLayerExact(selectedLayer.id, v, selectedLayer.height) },
+                                    onChangeFinished = onDragFinished
+                                )
+                                StudioSlider(
+                                    label = "Height",
+                                    valueText = "${(selectedLayer.height * 100).toInt()}% (${(selectedLayer.height * canvasH).toInt()}px)",
+                                    value = selectedLayer.height,
+                                    range = 0.08f..1f,
+                                    onChange = { v -> onResizeLayerExact(selectedLayer.id, selectedLayer.width, v) },
+                                    onChangeFinished = onDragFinished
+                                )
+                                StudioSlider("Rotate", "${selectedLayer.rotationDeg.toInt()}°", selectedLayer.rotationDeg.coerceIn(0f, 360f), 0f..360f) { v ->
                                     onUpdateLayerProps(selectedLayer.id) { it.copy(rotationDeg = v) }
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    listOf(0f, 90f, 180f, 270f).forEach { deg ->
+                                        OutlinedButton(
+                                            onClick = { onUpdateLayerProps(selectedLayer.id) { it.copy(rotationDeg = deg) } },
+                                            shape = RoundedCornerShape(6.dp),
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                            modifier = Modifier.weight(1f).height(26.dp)
+                                        ) {
+                                            Text("${deg.toInt()}°", fontSize = 10.sp, color = Color.White)
+                                        }
+                                    }
                                 }
                                 StudioSlider("Opacity", "${(selectedLayer.opacity * 100).toInt()}%", selectedLayer.opacity, 0.1f..1f) { v ->
                                     onUpdateLayerProps(selectedLayer.id) { it.copy(opacity = v) }
@@ -1382,23 +1599,52 @@ fun ObsSceneStudioScreen(
                                                     Spacer(modifier = Modifier.width(4.dp))
                                                     Text("Reload", fontSize = 11.sp)
                                                 }
+                                                    OutlinedButton(
+                                                        onClick = {
+                                                            urlDraft = ""
+                                                            urlError = null
+                                                            onUpdateLayerProps(selectedLayer.id) { it.copy(webUrl = "") }
+                                                        },
+                                                        enabled = !selectedLayer.locked && selectedLayer.webUrl.isNotBlank(),
+                                                        shape = RoundedCornerShape(6.dp),
+                                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                                        modifier = Modifier.testTag("studio_browser_clear_btn")
+                                                    ) {
+                                                        Text("Clear", fontSize = 11.sp)
+                                                    }
+                                                }
+                                                val interactingNow = webInteractLayerId == selectedLayer.id
                                                 OutlinedButton(
                                                     onClick = {
-                                                        urlDraft = ""
-                                                        urlError = null
-                                                        onUpdateLayerProps(selectedLayer.id) { it.copy(webUrl = "") }
+                                                        webInteractLayerId = if (interactingNow) null else selectedLayer.id
                                                     },
-                                                    enabled = !selectedLayer.locked && selectedLayer.webUrl.isNotBlank(),
+                                                    enabled = selectedLayer.webUrl.isNotBlank(),
                                                     shape = RoundedCornerShape(6.dp),
-                                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                                                    modifier = Modifier.testTag("studio_browser_clear_btn")
+                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .testTag("studio_browser_interact_panel_btn")
                                                 ) {
-                                                    Text("Clear", fontSize = 11.sp)
+                                                    Icon(
+                                                        Icons.Rounded.TouchApp,
+                                                        contentDescription = null,
+                                                        tint = if (interactingNow) ZroEmerald else ZroCobalt,
+                                                        modifier = Modifier.size(14.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Text(
+                                                        text = if (interactingNow) {
+                                                            "Web Interaction ACTIVE (Tap to return to Drag/Resize)"
+                                                        } else {
+                                                            "Interact with Website (Click & Scroll inside page)"
+                                                        },
+                                                        fontSize = 11.sp,
+                                                        color = Color.White
+                                                    )
                                                 }
                                             }
                                         }
                                     }
-                                }
 
                                 if (selectedLayer.type == LayerSourceType.SUBSCRIBER_COUNTER) {
                                     Spacer(modifier = Modifier.height(6.dp))
