@@ -14,9 +14,14 @@ import com.example.data.model.AudioSettings
 import com.example.data.model.RtmpTestResult
 import com.example.data.model.StreamLifecycleState
 import com.example.data.model.StreamRuntimeTelemetry
+import com.example.data.model.LiveBroadcastMode
 import com.example.data.model.StreamSettings
-import com.example.data.model.YouTubeAccountState
 import com.example.streaming.RtmpPublisher
+import com.example.streaming.ZroStreamingEngine
+import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import com.example.studio.ChromaKeyPreset
 import com.example.studio.ChromaKeyProcessor
 import com.example.studio.CropEdge
@@ -98,6 +103,95 @@ class StreamingLayerChromaVerificationTest {
         val masked = RtmpPublisher.maskStreamKey("abcd-1234-efgh-5678")
         assertTrue(masked.endsWith("5678"))
         assertFalse(masked.contains("abcd"))
+    }
+
+    @Test
+    fun `zro streaming engine runs callbacks on dedicated HandlerThread looper without DefaultDispatcher crash and validates preflight`() = runBlocking {
+        val engine = ZroStreamingEngine()
+        try {
+            assertTrue("Engine HandlerThread looper must be active", engine.isEngineLooperActive)
+            assertEquals(ZroStreamingEngine.ENGINE_THREAD_NAME, engine.engineThreadName)
+            assertNotNull(engine.engineLooper)
+
+            // Verify calling from Dispatchers.Default (where bare Handler() crashes) runs safely on ZroLiveEngineThread with an active Looper
+            val executedOnEngineThread = withContext(Dispatchers.Default) {
+                engine.runOnEngineThread {
+                    val currentLooper = android.os.Looper.myLooper()
+                    assertNotNull("Looper.myLooper() must be non-null on engine thread", currentLooper)
+                    assertEquals(engine.engineLooper, currentLooper)
+                    // Creating a Handler with current looper must succeed without Looper.prepare() crash
+                    val h = android.os.Handler(currentLooper!!)
+                    assertNotNull(h)
+                    Thread.currentThread().name == ZroStreamingEngine.ENGINE_THREAD_NAME
+                }
+            }
+            assertTrue("Callback must execute on ZroLiveEngineThread", executedOnEngineThread)
+
+            // Verify preflight checks
+            val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
+            val validSettings = StreamSettings(
+                rtmpUrl = RtmpPublisher.YOUTUBE_PRIMARY_RTMP,
+                streamKey = "abcd-1234-efgh-5678",
+                broadcastMode = LiveBroadcastMode.LANDSCAPE_16_9
+            )
+
+            // 1. Fails cleanly without projection grant or 2nd phone
+            val noGrant = engine.validatePreflight(
+                context = ctx,
+                settings = validSettings,
+                hasLocalProjectionGrant = false,
+                secondPhoneConnected = false,
+                hasActiveInternet = true
+            )
+            assertFalse(noGrant.ready)
+            assertTrue(noGrant.errorMessage.orEmpty().contains("permission", ignoreCase = true))
+
+            // 2. Fails cleanly without internet
+            val noNet = engine.validatePreflight(
+                context = ctx,
+                settings = validSettings,
+                hasLocalProjectionGrant = true,
+                secondPhoneConnected = false,
+                hasActiveInternet = false
+            )
+            assertFalse(noNet.ready)
+            assertTrue(noNet.errorMessage.orEmpty().contains("internet", ignoreCase = true))
+
+            // 3. Fails cleanly when Dual Live reuses identical stream key
+            val dupDual = engine.validatePreflight(
+                context = ctx,
+                settings = validSettings.copy(
+                    broadcastMode = LiveBroadcastMode.DUAL_LIVE,
+                    shortsRtmpUrl = RtmpPublisher.YOUTUBE_PRIMARY_RTMP,
+                    shortsStreamKey = "abcd-1234-efgh-5678"
+                ),
+                hasLocalProjectionGrant = true,
+                secondPhoneConnected = false,
+                hasActiveInternet = true,
+                dualLiveSupportCheck = { true to "Supported" }
+            )
+            assertFalse(dupDual.ready)
+            assertTrue(dupDual.errorMessage.orEmpty().contains("separate Stream Keys", ignoreCase = true))
+
+            // 4. Passes cleanly when valid
+            val ok = engine.validatePreflight(
+                context = ctx,
+                settings = validSettings,
+                hasLocalProjectionGrant = true,
+                secondPhoneConnected = false,
+                hasActiveInternet = true
+            )
+            assertTrue("Valid config should pass preflight: ${ok.errorMessage}", ok.ready)
+
+            // 5. Exponential backoff bounds
+            val d1 = ZroStreamingEngine.computeReconnectBackoffMs(1)
+            val d4 = ZroStreamingEngine.computeReconnectBackoffMs(4)
+            assertTrue("Attempt 1 backoff should be >= 1750ms", d1 in 1750L..2700L)
+            assertTrue("Attempt 4 backoff should be >= 10250ms", d4 in 10250L..11200L)
+        } finally {
+            engine.shutdown()
+        }
+        assertFalse("Engine looper must report inactive after shutdown", engine.isEngineLooperActive)
     }
 
     // --- 2. H.264 MULTI-NAL ANNEX-B SPLITTING & AAC CONFIG ---

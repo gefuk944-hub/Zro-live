@@ -284,8 +284,8 @@ class DualPhoneStudioVerificationTest {
         )
 
         ws = StudioWorkspaceReducer.switchScene(ws, SceneSlot.SHORTS_VERTICAL)
-        ws = StudioWorkspaceReducer.renameActiveScene(ws, "My Shorts 9:16")
-        assertTrue(ws.activeScene.isVertical)
+        ws = StudioWorkspaceReducer.renameActiveScene(ws, "My Starting Soon 16:9")
+        assertFalse(ws.activeScene.isVertical)
 
         ws = StudioWorkspaceReducer.switchScene(ws, SceneSlot.BRB_BREAK)
         ws = StudioWorkspaceReducer.updateSceneTransition(ws, SceneTransitionType.SLIDE, 500)
@@ -311,8 +311,8 @@ class DualPhoneStudioVerificationTest {
         assertTrue(s1.layers.any { it.id == "custom_web_1" && it.webUrl == "https://example.com/alerts" })
 
         val s2 = restored.scenes[SceneSlot.SHORTS_VERTICAL]!!
-        assertEquals("My Shorts 9:16", s2.name)
-        assertTrue(s2.isVertical)
+        assertEquals("My Starting Soon 16:9", s2.name)
+        assertFalse(s2.isVertical)
         assertFalse("Scene 1 custom image must NOT leak into Scene 2", s2.layers.any { it.id == "custom_img_1" })
 
         val s3 = restored.scenes[SceneSlot.BRB_BREAK]!!

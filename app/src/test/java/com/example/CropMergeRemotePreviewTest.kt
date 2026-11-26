@@ -79,14 +79,14 @@ class CropMergeRemotePreviewTest {
     fun `layer merging persists merged children through JSON and unmerges cleanly`() {
         val initial = StudioWorkspaceState()
         val originalCount = initial.activeScene.layers.size
-        val mergeIds = listOf("s1_gameplay", "s1_logo")
+        val mergeIds = listOf("s1_gameplay", "s1_branding")
 
-        val mergedState = StudioWorkspaceReducer.mergeLayers(initial, mergeIds, "Game + Logo Bundle")
+        val mergedState = StudioWorkspaceReducer.mergeLayers(initial, mergeIds, "Game + Branding Bundle")
         assertEquals(originalCount - 1, mergedState.activeScene.layers.size)
 
         val mergedLayer = mergedState.activeScene.layers.firstOrNull { it.type == LayerSourceType.MERGED_GROUP }
         assertNotNull(mergedLayer)
-        assertEquals("Game + Logo Bundle", mergedLayer!!.name)
+        assertEquals("Game + Branding Bundle", mergedLayer!!.name)
         assertEquals(2, mergedLayer.mergedChildren.size)
 
         // Round-trip JSON persistence preserves mergedChildren
@@ -102,23 +102,24 @@ class CropMergeRemotePreviewTest {
         assertEquals(originalCount, unmerged.activeScene.layers.size)
         assertTrue(unmerged.activeScene.layers.none { it.type == LayerSourceType.MERGED_GROUP })
         assertTrue(unmerged.activeScene.layers.any { it.type == LayerSourceType.GAMEPLAY_SCREEN })
-        assertTrue(unmerged.activeScene.layers.any { it.type == LayerSourceType.LOGO })
+        assertTrue(unmerged.activeScene.layers.any { it.id == "s1_branding" })
     }
 
     @Test
     fun `rename layer and rename screen capture sync across scenes`() {
         val initial = StudioWorkspaceState()
-        val renamedLayerState = StudioWorkspaceReducer.renameLayer(initial, "s1_logo", "Pro Squad Badge")
-        assertEquals("Pro Squad Badge", renamedLayerState.activeScene.layers.first { it.id == "s1_logo" }.name)
+        val renamedLayerState = StudioWorkspaceReducer.renameLayer(initial, "s1_branding", "Pro Squad Banner")
+        assertEquals("Pro Squad Banner", renamedLayerState.activeScene.layers.first { it.id == "s1_branding" }.name)
 
         val renamedCaptureState = StudioWorkspaceReducer.renameGameplayCaptureLayers(renamedLayerState, "BGMI Ultra Feed")
         assertEquals(
             "BGMI Ultra Feed",
             renamedCaptureState.scenes[SceneSlot.GAMEPLAY_LIVE]!!.layers.first { it.type == LayerSourceType.GAMEPLAY_SCREEN }.name
         )
+        // Scene 2 is now 16:9 Starting Soon ("STREAMING START SOON")
         assertEquals(
-            "BGMI Ultra Feed",
-            renamedCaptureState.scenes[SceneSlot.SHORTS_VERTICAL]!!.layers.first { it.type == LayerSourceType.GAMEPLAY_SCREEN }.name
+            "STREAMING START SOON",
+            renamedCaptureState.scenes[SceneSlot.SHORTS_VERTICAL]!!.layers.first().textContent
         )
     }
 
@@ -146,22 +147,22 @@ class CropMergeRemotePreviewTest {
         assertTrue(composeRule.onAllNodesWithText("Free Fire Live", substring = true).fetchSemanticsNodes().isNotEmpty())
 
         // Rename an individual layer via dialog
-        composeRule.onNodeWithTag("obs_studio_list").performScrollToNode(hasTestTag("layer_rename_btn_s1_logo"))
-        composeRule.onNodeWithTag("layer_rename_btn_s1_logo").performClick()
+        composeRule.onNodeWithTag("obs_studio_list").performScrollToNode(hasTestTag("layer_rename_btn_s1_branding"))
+        composeRule.onNodeWithTag("layer_rename_btn_s1_branding").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("rename_layer_dialog").assertIsDisplayed()
         composeRule.onNodeWithTag("rename_layer_input").performTextClearance()
-        composeRule.onNodeWithTag("rename_layer_input").performTextInput("Channel Logo HD")
+        composeRule.onNodeWithTag("rename_layer_input").performTextInput("Channel Banner HD")
         composeRule.onNodeWithTag("rename_layer_confirm_btn").performClick()
         composeRule.waitForIdle()
-        assertTrue(composeRule.onAllNodesWithText("Channel Logo HD", substring = true).fetchSemanticsNodes().isNotEmpty())
+        assertTrue(composeRule.onAllNodesWithText("Channel Banner HD", substring = true).fetchSemanticsNodes().isNotEmpty())
 
         // Open Merge Layers dialog, select 2 layers, merge!
         composeRule.onNodeWithTag("obs_studio_list").performScrollToNode(hasTestTag("studio_merge_layers_btn"))
         composeRule.onNodeWithTag("studio_merge_layers_btn").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("merge_layers_dialog").assertIsDisplayed()
-        composeRule.onNodeWithTag("merge_pick_s1_logo").performClick()
+        composeRule.onNodeWithTag("merge_pick_s1_branding").performClick()
         composeRule.onNodeWithTag("merge_layers_name_input").performTextClearance()
         composeRule.onNodeWithTag("merge_layers_name_input").performTextInput("Combined HUD")
         composeRule.onNodeWithTag("merge_layers_confirm_btn").performClick()

@@ -35,7 +35,7 @@ class GraphicAdjustmentVerificationTest {
     fun `layer graphic adjustments are strictly independent per layer and survive persistence and scene switching`() {
         val initial = StudioWorkspaceState()
         val gameplayId = "s1_gameplay"
-        val logoId = "s1_logo"
+        val logoId = "s1_branding"
 
         val adjusted = StudioWorkspaceReducer.updateLayerGraphicAdjustment(initial, gameplayId) {
             it.copy(
@@ -127,24 +127,24 @@ class GraphicAdjustmentVerificationTest {
     fun `presets copy to layer reset selected layer only and color matrix math work accurately`() {
         val base = StudioWorkspaceState()
         val withCinematic = StudioWorkspaceReducer.applyGraphicPresetToLayer(base, "s1_gameplay", GraphicPresetId.CINEMATIC)
-        val withVibrantOnLogo = StudioWorkspaceReducer.applyGraphicPresetToLayer(withCinematic, "s1_logo", GraphicPresetId.VIBRANT)
+        val withVibrantOnLogo = StudioWorkspaceReducer.applyGraphicPresetToLayer(withCinematic, "s1_branding", GraphicPresetId.VIBRANT)
 
-        // Reset ONLY gameplay layer — logo's Vibrant preset must stay intact!
+        // Reset ONLY gameplay layer — branding's Vibrant preset must stay intact!
         val afterResetGameplay = StudioWorkspaceReducer.resetLayerGraphicAdjustment(withVibrantOnLogo, "s1_gameplay")
         assertEquals(GraphicPresetId.ORIGINAL, afterResetGameplay.activeScene.layers.first { it.id == "s1_gameplay" }.graphicAdjustment.presetId)
-        assertEquals(GraphicPresetId.VIBRANT, afterResetGameplay.activeScene.layers.first { it.id == "s1_logo" }.graphicAdjustment.presetId)
+        assertEquals(GraphicPresetId.VIBRANT, afterResetGameplay.activeScene.layers.first { it.id == "s1_branding" }.graphicAdjustment.presetId)
 
-        // Copy Logo's Vibrant adjustment to Gameplay
-        val copied = StudioWorkspaceReducer.copyGraphicAdjustmentToLayer(afterResetGameplay, "s1_logo", "s1_gameplay")
+        // Copy Branding's Vibrant adjustment to Gameplay
+        val copied = StudioWorkspaceReducer.copyGraphicAdjustmentToLayer(afterResetGameplay, "s1_branding", "s1_gameplay")
         assertEquals(
-            copied.activeScene.layers.first { it.id == "s1_logo" }.graphicAdjustment.vibrance,
+            copied.activeScene.layers.first { it.id == "s1_branding" }.graphicAdjustment.vibrance,
             copied.activeScene.layers.first { it.id == "s1_gameplay" }.graphicAdjustment.vibrance,
             0.01f
         )
 
         // Locked layer cannot be overwritten by copy
         val lockedWebcam = StudioWorkspaceReducer.toggleLayerLock(copied, "s1_webcam")
-        val attemptCopyLocked = StudioWorkspaceReducer.copyGraphicAdjustmentToLayer(lockedWebcam, "s1_logo", "s1_webcam")
+        val attemptCopyLocked = StudioWorkspaceReducer.copyGraphicAdjustmentToLayer(lockedWebcam, "s1_branding", "s1_webcam")
         assertEquals(GraphicPresetId.ORIGINAL, attemptCopyLocked.activeScene.layers.first { it.id == "s1_webcam" }.graphicAdjustment.presetId)
 
         // ColorMatrix math: Original is identity; Cinematic modifies values cleanly

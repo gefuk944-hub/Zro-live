@@ -140,6 +140,7 @@ class StreamingForegroundService : Service() {
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private lateinit var streamingEngine: ZroStreamingEngine
     private lateinit var notifManager: StreamNotificationManager
     private lateinit var telemetryMonitor: DeviceTelemetryMonitor
     private lateinit var settingsStore: SettingsStore
@@ -207,6 +208,7 @@ class StreamingForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        streamingEngine = ZroStreamingEngine()
         notifManager = StreamNotificationManager(this)
         telemetryMonitor = DeviceTelemetryMonitor(this)
         settingsStore = SettingsStore(applicationContext)
@@ -428,61 +430,35 @@ class StreamingForegroundService : Service() {
     }
 
     private fun registerProjectionCallback(projection: MediaProjection) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            Api34ProjectionCallbackHelper.register(
-                projection = projection,
-                onStopped = {
-                    Log.i(TAG, "MediaProjection stopped by system or captured app ended")
-                    stopAllCaptureAndBroadcast(error = null)
-                },
-                onResized = { width, height ->
-                    if (width > 0 && height > 0) {
-                        ZroStreamCoordinator.updateTelemetry {
-                            it.copy(capturedWidth = width, capturedHeight = height)
-                        }
-                    }
-                },
-                onVisibilityChanged = { isVisible ->
-                    val shieldOn = !isVisible
-                    isPrivacyShieldActive.set(shieldOn)
-                    Log.i(TAG, "Captured content visibility changed: visible=$isVisible, privacyShield=$shieldOn")
+        streamingEngine.registerProjectionCallback(
+            projection = projection,
+            onStopped = {
+                Log.i(TAG, "MediaProjection stopped by system or captured app ended")
+                stopAllCaptureAndBroadcast(error = null)
+            },
+            onResized = { width, height ->
+                if (width > 0 && height > 0) {
                     ZroStreamCoordinator.updateTelemetry {
-                        it.copy(
-                            capturedContentVisible = isVisible,
-                            privacyShieldActive = shieldOn
-                        )
+                        it.copy(capturedWidth = width, capturedHeight = height)
                     }
-                    if (isVisible && isStreaming.get() && !isPaused.get()) {
-                        requestVideoKeyFrame()
-                    }
-                    refreshNotification()
                 }
-            )
-        } else {
-            // Android 10-13 (API 29-33): register standard MediaProjection.Callback without API 34 overrides
-            projection.registerCallback(object : MediaProjection.Callback() {
-                override fun onStop() {
-                    Log.i(TAG, "MediaProjection stopped by system")
-                    stopAllCaptureAndBroadcast(error = null)
+            },
+            onVisibilityChanged = { isVisible ->
+                val shieldOn = !isVisible
+                isPrivacyShieldActive.set(shieldOn)
+                Log.i(TAG, "Captured content visibility changed: visible=$isVisible, privacyShield=$shieldOn")
+                ZroStreamCoordinator.updateTelemetry {
+                    it.copy(
+                        capturedContentVisible = isVisible,
+                        privacyShieldActive = shieldOn
+                    )
                 }
-            }, null)
-        }
-    }
-
-    @androidx.annotation.RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-    private object Api34ProjectionCallbackHelper {
-        fun register(
-            projection: MediaProjection,
-            onStopped: () -> Unit,
-            onResized: (Int, Int) -> Unit,
-            onVisibilityChanged: (Boolean) -> Unit
-        ) {
-            projection.registerCallback(object : MediaProjection.Callback() {
-                override fun onStop() = onStopped()
-                override fun onCapturedContentResize(width: Int, height: Int) = onResized(width, height)
-                override fun onCapturedContentVisibilityChanged(isVisible: Boolean) = onVisibilityChanged(isVisible)
-            }, null)
-        }
+                if (isVisible && isStreaming.get() && !isPaused.get()) {
+                    requestVideoKeyFrame()
+                }
+                refreshNotification()
+            }
+        )
     }
 
     /**
@@ -507,46 +483,25 @@ class StreamingForegroundService : Service() {
         val resultData = ZroStreamCoordinator.pendingMediaProjectionData
         val hasLocalProjectionGrant = existingProjection != null || (resultCode == Activity.RESULT_OK && resultData != null)
 
-        if (!hasLocalProjectionGrant && !secondPhoneAlreadyConnected) {
-            ZroStreamCoordinator.resetToIdle("Grant screen capture permission or connect a 2nd phone to start live.")
-            return
-        }
-
         val settings = ZroStreamCoordinator.currentStreamSettings
         val primaryUrl = settings.effectivePrimaryServerUrl()
         val backupUrl = settings.effectiveBackupServerUrl()
         val isDualMode = settings.broadcastMode == LiveBroadcastMode.DUAL_LIVE
         val shortsUrl = settings.effectiveShortsServerUrl()
 
-        // Step 1: Validate streaming configuration & network BEFORE initializing encoders or connecting
-        val configValidation = RtmpPublisher.validateConfig(primaryUrl, backupUrl, settings.streamKey)
-        if (!configValidation.valid) {
-            ZroStreamCoordinator.resetToIdle(configValidation.errorMessage ?: "Invalid RTMP stream configuration.")
+        // Step 1: Strict pre-flight validation BEFORE initializing MediaProjection, encoders, or RTMP sockets
+        val preflight = streamingEngine.validatePreflight(
+            context = this,
+            settings = settings,
+            hasLocalProjectionGrant = hasLocalProjectionGrant,
+            secondPhoneConnected = secondPhoneAlreadyConnected
+        )
+        if (!preflight.ready) {
+            ZroStreamCoordinator.resetToIdle(preflight.errorMessage ?: "Stream pre-flight validation failed.")
             return
         }
-        if (isDualMode) {
-            val (dualSupported, dualReason) = checkDualLiveSupport(this)
-            if (!dualSupported) {
-                ZroStreamCoordinator.resetToIdle(dualReason)
-                return
-            }
-            val shortsValidation = RtmpPublisher.validateConfig(shortsUrl, "", settings.shortsStreamKey)
-            if (!shortsValidation.valid) {
-                ZroStreamCoordinator.resetToIdle(
-                    "Dual Live requires a valid Shorts 9:16 RTMP URL & Stream Key. ${shortsValidation.errorMessage ?: ""}".trim()
-                )
-                return
-            }
-            if (shortsUrl.equals(primaryUrl, ignoreCase = true) && settings.shortsStreamKey.trim() == settings.streamKey.trim()) {
-                ZroStreamCoordinator.resetToIdle(
-                    "Dual Live requires two separate Stream Keys (one for 16:9 Live and one for 9:16 Shorts Live)."
-                )
-                return
-            }
-        }
-        if (!hasActiveInternetConnection()) {
-            ZroStreamCoordinator.resetToIdle("No active internet connection detected. Connect to Wi-Fi or mobile data and try again.")
-            return
+        preflight.warnings.forEach { warn ->
+            Log.w(TAG, "Preflight notice: $warn")
         }
 
         val perf = ZroStreamCoordinator.currentPerfSettings
@@ -647,15 +602,42 @@ class StreamingForegroundService : Service() {
                     )
                 }
 
-                // Obtain or reuse MediaProjection if granted (kept ready for automatic fallback if 2nd phone disconnects)
+                // Obtain or reuse MediaProjection strictly on ZroLiveEngineThread (guaranteed active Looper!)
                 val projection: MediaProjection? = existingProjection ?: if (resultCode == Activity.RESULT_OK && resultData != null) {
-                    val projMgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                    val p = projMgr.getMediaProjection(resultCode, resultData)
-                        ?: throw IllegalStateException("MediaProjection could not be initialized.")
+                    val p = streamingEngine.acquireMediaProjection(
+                        context = this@StreamingForegroundService,
+                        resultCode = resultCode,
+                        resultData = resultData,
+                        onStopped = {
+                            Log.i(TAG, "MediaProjection stopped by system or captured app ended")
+                            stopAllCaptureAndBroadcast(error = null)
+                        },
+                        onResized = { width, height ->
+                            if (width > 0 && height > 0) {
+                                ZroStreamCoordinator.updateTelemetry {
+                                    it.copy(capturedWidth = width, capturedHeight = height)
+                                }
+                            }
+                        },
+                        onVisibilityChanged = { isVisible ->
+                            val shieldOn = !isVisible
+                            isPrivacyShieldActive.set(shieldOn)
+                            Log.i(TAG, "Captured content visibility changed: visible=$isVisible, privacyShield=$shieldOn")
+                            ZroStreamCoordinator.updateTelemetry {
+                                it.copy(
+                                    capturedContentVisible = isVisible,
+                                    privacyShieldActive = shieldOn
+                                )
+                            }
+                            if (isVisible && isStreaming.get() && !isPaused.get()) {
+                                requestVideoKeyFrame()
+                            }
+                            refreshNotification()
+                        }
+                    )
                     ZroStreamCoordinator.clearPendingMediaProjection()
                     ZroStreamCoordinator.tryAcquireCaptureLock()
                     mediaProjection = p
-                    registerProjectionCallback(p)
                     p
                 } else {
                     null
@@ -713,14 +695,16 @@ class StreamingForegroundService : Service() {
                 cachedAsc = fallbackAsc
                 publisher.sendAacSequenceHeader(fallbackAsc)
 
-                // Step 4: Initialize Video Encoder & attach active video source (Phone 1 screen OR 2nd Phone feed)
+                // Step 4: Initialize Video Encoder & attach active video source on ZroLiveEngineThread
                 val encoderName = setupVideoEncoder(width, height, activeSessionFps, activeBitrateKbps)
                 if (activeVideoSource == LiveVideoSource.REMOTE_SECOND_PHONE) {
                     // Phone 1 full-screen capture stays stopped; pump 2nd phone screen directly into H.264 encoder
                     releaseVirtualDisplayOnly()
                     startRemoteSecondPhoneFramePump()
                 } else if (projection != null) {
-                    createOrUpdateVirtualDisplay(projection, width, height, videoInputSurface)
+                    streamingEngine.runOnEngineThread {
+                        createOrUpdateVirtualDisplay(projection, width, height, videoInputSurface)
+                    }
                     startDualPhoneMirrorCaptureIfNeeded(projection)
                 }
 
@@ -764,7 +748,9 @@ class StreamingForegroundService : Service() {
                     secPub.sendAacSequenceHeader(fallbackAsc)
                     setupSecondaryVideoEncoder(secW, secH, secFps, secBitrate)
                     if (activeVideoSource != LiveVideoSource.REMOTE_SECOND_PHONE && projection != null) {
-                        createSecondaryVirtualDisplay(projection, secW, secH, secondaryVideoInputSurface)
+                        streamingEngine.runOnEngineThread {
+                            createSecondaryVirtualDisplay(projection, secW, secH, secondaryVideoInputSurface)
+                        }
                     }
                     isDualLiveActive.set(true)
                 }
@@ -1001,16 +987,7 @@ class StreamingForegroundService : Service() {
         }
     }
 
-    private fun hasActiveInternetConnection(): Boolean {
-        return try {
-            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
-            val network = cm.activeNetwork ?: return false
-            val caps = cm.getNetworkCapabilities(network) ?: return false
-            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-        } catch (_: Exception) {
-            true
-        }
-    }
+    private fun hasActiveInternetConnection(): Boolean = streamingEngine.checkActiveInternet(this)
 
     private fun resolveDimensions(rawW: Int, rawH: Int, orientation: StreamOrientation): Pair<Int, Int> {
         val portrait = when (orientation) {
@@ -1021,115 +998,41 @@ class StreamingForegroundService : Service() {
         return resolveAlignedDimensions(rawW, rawH, portrait)
     }
 
-    private fun selectHardwareAvcEncoderName(): String? {
-        return try {
-            val list = MediaCodecList(MediaCodecList.REGULAR_CODECS)
-            list.codecInfos.firstOrNull { info ->
-                info.isEncoder &&
-                    info.supportedTypes.any { it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, ignoreCase = true) } &&
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        info.isHardwareAccelerated
-                    } else {
-                        !info.name.contains("google", ignoreCase = true) && !info.name.startsWith("c2.android.", ignoreCase = true)
-                    }
-            }?.name
-        } catch (_: Exception) {
-            null
-        }
-    }
-
     private fun setupVideoEncoder(width: Int, height: Int, fps: Int, bitrateKbps: Int): String {
-        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, bitrateKbps * 1000)
-            setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
-            setInteger(MediaFormat.KEY_PRIORITY, 0) // Real-time priority
-            // CRITICAL for YouTube Live: emit frames continuously even when phone screen is static!
-            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-            }
-        }
-
-        val hwName = selectHardwareAvcEncoderName()
-        var codec = try {
-            if (hwName != null) MediaCodec.createByCodecName(hwName)
-            else MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        } catch (e: Exception) {
-            Log.w(TAG, "Hardware encoder $hwName failed to open, using default AVC encoder: ${e.message}")
-            MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        }
-
-        val configured = try {
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            true
-        } catch (e: Exception) {
-            Log.w(TAG, "CBR configure rejected, retrying VBR: ${e.message}")
-            try {
-                format.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
-                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                true
-            } catch (vbrErr: Exception) {
-                Log.w(TAG, "Hardware VBR configure failed, falling back to software AVC encoder: ${vbrErr.message}")
-                runCatching { codec.release() }
-                codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-                val fallbackFmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                    setInteger(MediaFormat.KEY_BIT_RATE, bitrateKbps * 1000)
-                    setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-                    setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
-                }
-                codec.configure(fallbackFmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                true
-            }
-        }
-        if (!configured) throw IllegalStateException("Could not configure H.264 video encoder on this device.")
-
-        videoInputSurface = codec.createInputSurface()
-        codec.start()
-        videoEncoder = codec
-        return codec.name
+        val handle = streamingEngine.createVideoEncoder(
+            width = width,
+            height = height,
+            fps = fps,
+            bitrateKbps = bitrateKbps,
+            preferHardware = true
+        )
+        videoInputSurface = handle.inputSurface
+        videoEncoder = handle.codec
+        return handle.encoderName
     }
 
     private fun setupSecondaryVideoEncoder(width: Int, height: Int, fps: Int, bitrateKbps: Int): String {
-        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, bitrateKbps * 1000)
-            setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
-            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-            }
-        }
-        val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        try {
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        } catch (_: Exception) {
-            format.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        }
-        secondaryVideoInputSurface = codec.createInputSurface()
-        codec.start()
-        secondaryVideoEncoder = codec
-        return codec.name
+        val handle = streamingEngine.createVideoEncoder(
+            width = width,
+            height = height,
+            fps = fps,
+            bitrateKbps = bitrateKbps,
+            preferHardware = false
+        )
+        secondaryVideoInputSurface = handle.inputSurface
+        secondaryVideoEncoder = handle.codec
+        return handle.encoderName
     }
 
     private fun createSecondaryVirtualDisplay(projection: MediaProjection, width: Int, height: Int, surface: Surface?) {
-        runCatching { secondaryVirtualDisplay?.release() }
-        secondaryVirtualDisplay = projection.createVirtualDisplay(
-            "ZroLiveDualShortsCapture",
-            width,
-            height,
-            resolveDensityDpi(),
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            surface,
-            null,
-            null
+        secondaryVirtualDisplay = streamingEngine.createOrUpdateVirtualDisplay(
+            projection = projection,
+            name = "ZroLiveDualShortsCapture",
+            width = width,
+            height = height,
+            densityDpi = resolveDensityDpi(),
+            surface = surface,
+            existing = secondaryVirtualDisplay
         )
     }
 
@@ -1210,26 +1113,14 @@ class StreamingForegroundService : Service() {
     }
 
     private fun createOrUpdateVirtualDisplay(projection: MediaProjection, width: Int, height: Int, surface: Surface?) {
-        val existing = virtualDisplay
-        if (existing != null) {
-            runCatching {
-                existing.resize(width, height, resolveDensityDpi())
-                existing.surface = surface
-                return
-            }
-            runCatching { existing.release() }
-            virtualDisplay = null
-        }
-
-        virtualDisplay = projection.createVirtualDisplay(
-            "ZroLiveCapture",
-            width,
-            height,
-            resolveDensityDpi(),
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            surface,
-            null,
-            null
+        virtualDisplay = streamingEngine.createOrUpdateVirtualDisplay(
+            projection = projection,
+            name = "ZroLiveCapture",
+            width = width,
+            height = height,
+            densityDpi = resolveDensityDpi(),
+            surface = surface,
+            existing = virtualDisplay
         )
     }
 
@@ -1246,16 +1137,10 @@ class StreamingForegroundService : Service() {
     }
 
     private fun setupAudioEncoder(stereo: Boolean) {
-        val channels = if (stereo) 2 else 1
-        val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, ZroAudioEngine.SAMPLE_RATE, channels).apply {
-            setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-            setInteger(MediaFormat.KEY_BIT_RATE, if (stereo) 128_000 else 96_000)
-            setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
-        }
-        val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        codec.start()
-        audioEncoder = codec
+        audioEncoder = streamingEngine.createAudioEncoder(
+            sampleRate = ZroAudioEngine.SAMPLE_RATE,
+            stereo = stereo
+        )
     }
 
     private fun startSilentAudioFallbackLoop(stereo: Boolean) {
@@ -1597,17 +1482,17 @@ class StreamingForegroundService : Service() {
             }
             refreshNotification()
             // Jittered exponential backoff prevents thundering-herd reconnect spikes across concurrent users
-            val baseMs = (1500L shl (attempt - 1)).coerceAtMost(10_000L)
-            val jitterMs = Random.nextLong(250L, 1200L)
-            delay(baseMs + jitterMs)
+            delay(ZroStreamingEngine.computeReconnectBackoffMs(attempt))
             if (!hasActiveInternetConnection()) continue
 
-            val res = publisher.connectWithFailover(
-                primaryUrl = primaryUrl,
-                backupUrl = backupUrl,
-                streamKey = settings.streamKey,
-                preferBackup = settings.useBackupServer || (attempt % 2 == 0 && backupUrl.isNotBlank())
-            )
+            val res = runCatching {
+                publisher.connectWithFailover(
+                    primaryUrl = primaryUrl,
+                    backupUrl = backupUrl,
+                    streamKey = settings.streamKey,
+                    preferBackup = settings.useBackupServer || (attempt % 2 == 0 && backupUrl.isNotBlank())
+                )
+            }.getOrElse { Result.failure(it) }
             if (res.isSuccess) {
                 val info = res.getOrThrow()
                 publisher.sendMetaData(
@@ -1876,25 +1761,42 @@ class StreamingForegroundService : Service() {
             )
         }
 
-        if (isVoiceForeground.get()) {
-            promoteForeground(includeMediaProjection = false)
+        val finishServiceLifecycle: () -> Unit = {
+            if (isVoiceForeground.get()) {
+                promoteForeground(includeMediaProjection = false)
+            } else {
+                runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+                runCatching { stopSelf() }
+            }
+        }
+        if (::streamingEngine.isInitialized) {
+            streamingEngine.postOnMainThread(finishServiceLifecycle)
         } else {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            finishServiceLifecycle()
         }
     }
 
     private fun refreshNotification() {
-        notifManager.updateNotification(
-            telemetry = ZroStreamCoordinator.telemetry.value,
-            micMuted = !ZroStreamCoordinator.currentAudioSettings.micEnabled,
-            voiceRoomName = ZroStreamCoordinator.activeVoiceRoomName.value
-        )
+        val update = {
+            notifManager.updateNotification(
+                telemetry = ZroStreamCoordinator.telemetry.value,
+                micMuted = !ZroStreamCoordinator.currentAudioSettings.micEnabled,
+                voiceRoomName = ZroStreamCoordinator.activeVoiceRoomName.value
+            )
+        }
+        if (::streamingEngine.isInitialized) {
+            streamingEngine.postOnMainThread(update)
+        } else {
+            update()
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         stopAllCaptureAndBroadcast(error = null)
+        if (::streamingEngine.isInitialized) {
+            streamingEngine.shutdown()
+        }
         serviceScope.cancel()
     }
 }
