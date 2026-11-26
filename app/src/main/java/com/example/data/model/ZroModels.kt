@@ -195,11 +195,30 @@ enum class LiveBroadcastMode(
     val label: String,
     val shortLabel: String,
     val aspectLabel: String,
-    val isVertical: Boolean
+    val isVertical: Boolean,
+    val description: String
 ) {
-    LANDSCAPE_16_9("16:9 Live", "16:9 Live", "16:9", false),
-    SHORTS_9_16("Shorts Live", "Shorts 9:16", "9:16", true),
-    DUAL_LIVE("Dual Live", "Dual 16:9+9:16", "16:9 + 9:16", false);
+    LANDSCAPE_16_9(
+        label = "16:9 Live",
+        shortLabel = "16:9 Live",
+        aspectLabel = "16:9",
+        isVertical = false,
+        description = "Standard YouTube landscape broadcast (1280×720 / 1920×1080) with saved 16:9 layout."
+    ),
+    SHORTS_9_16(
+        label = "Shorts Live",
+        shortLabel = "Shorts 9:16",
+        aspectLabel = "9:16",
+        isVertical = true,
+        description = "Vertical 9:16 Shorts Live broadcast (720×1280 / 1080×1920) with independent vertical layout."
+    ),
+    DUAL_LIVE(
+        label = "Dual Live",
+        shortLabel = "Dual 16:9+9:16",
+        aspectLabel = "16:9 + 9:16",
+        isVertical = false,
+        description = "Simultaneous 16:9 + 9:16 Dual Live using two H.264 encoders and separate RTMP destinations."
+    );
 
     companion object {
         fun fromName(raw: String?): LiveBroadcastMode =

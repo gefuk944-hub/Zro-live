@@ -439,7 +439,6 @@ class StreamingLayerChromaVerificationTest {
                     onOpenSceneStudio = {},
                     onStartLive = {},
                     onStopLive = {},
-                    youTubeAccount = YouTubeAccountState(signedIn = false),
                     rtmpTestResult = RtmpTestResult(
                         inProgress = false,
                         success = true,
@@ -452,9 +451,11 @@ class StreamingLayerChromaVerificationTest {
         }
         composeRule.waitForIdle()
 
+        // YouTube/Google login card must be removed; Live Modes and manual RTMP controls must be visible
+        composeRule.onNodeWithTag("youtube_connect_btn").assertDoesNotExist()
         composeRule.onNodeWithTag("live_setup_list")
-            .performScrollToNode(hasTestTag("youtube_connect_btn"))
-        composeRule.onNodeWithTag("youtube_connect_btn").assertIsDisplayed()
+            .performScrollToNode(hasTestTag("live_mode_landscape_16_9"))
+        composeRule.onNodeWithTag("live_mode_landscape_16_9").assertIsDisplayed()
         composeRule.onNodeWithTag("live_setup_list")
             .performScrollToNode(hasTestTag("live_setup_primary_url_input"))
         composeRule.onNodeWithTag("live_setup_primary_url_input").assertIsDisplayed()

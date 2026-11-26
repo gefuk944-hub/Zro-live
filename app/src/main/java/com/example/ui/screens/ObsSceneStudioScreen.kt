@@ -229,6 +229,7 @@ fun ObsSceneStudioScreen(
     var showMergeDialog by remember { mutableStateOf(false) }
     var showResetLayoutConfirm by remember { mutableStateOf(false) }
     var showAddSourceDialog by remember { mutableStateOf(false) }
+    val layerRowHeightPx = with(LocalDensity.current) { 78.dp.toPx() }
 
     // Automatically hide selection border & blue handles when leaving Studio editor
     DisposableEffect(Unit) {
@@ -1053,7 +1054,6 @@ fun ObsSceneStudioScreen(
                     }
 
                     val ordered = activeScene.layers.sortedByDescending { it.zIndex }
-                    val rowHeightPx = with(LocalDensity.current) { 78.dp.toPx() }
                     items(ordered.size, key = { idx -> ordered[idx].id }) { topIdx ->
                         val layer = ordered[topIdx]
                         val isSel = workspace.selectedLayerId == layer.id
@@ -1098,10 +1098,10 @@ fun ObsSceneStudioScreen(
                                                 ) { change, dragAmount ->
                                                     change.consume()
                                                     dragAccumY += dragAmount
-                                                    if (dragAccumY > rowHeightPx * 0.6f && topIdx < ordered.lastIndex) {
+                                                    if (dragAccumY > layerRowHeightPx * 0.6f && topIdx < ordered.lastIndex) {
                                                         onReorderLayerTopToBottom(topIdx, topIdx + 1)
                                                         dragAccumY = 0f
-                                                    } else if (dragAccumY < -rowHeightPx * 0.6f && topIdx > 0) {
+                                                    } else if (dragAccumY < -layerRowHeightPx * 0.6f && topIdx > 0) {
                                                         onReorderLayerTopToBottom(topIdx, topIdx - 1)
                                                         dragAccumY = 0f
                                                     }

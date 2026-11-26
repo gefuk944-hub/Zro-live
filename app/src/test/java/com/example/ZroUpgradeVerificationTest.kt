@@ -21,7 +21,6 @@ import com.example.data.model.StreamRuntimeTelemetry
 import com.example.data.model.StreamSessionDoc
 import com.example.data.model.StreamSettings
 import com.example.data.model.VideoResolution
-import com.example.data.model.YouTubeAccountState
 import com.example.streaming.RtmpPublisher
 import com.example.studio.CameraSourceMode
 import com.example.studio.DetectedUsbVideoDevice
@@ -125,7 +124,6 @@ class ZroUpgradeVerificationTest {
                     onOpenSceneStudio = {},
                     onStartLive = { startClicked = true },
                     onStopLive = {},
-                    youTubeAccount = YouTubeAccountState(signedIn = false),
                     onTestConnection = { testClicked = true }
                 )
             }

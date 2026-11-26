@@ -186,10 +186,10 @@ class CropMergeRemotePreviewTest {
         composeRule.onNodeWithTag("remote_live_studio_preview").assertIsDisplayed()
         composeRule.onNodeWithTag("studio_canvas_surface").assertIsDisplayed()
 
-        // Tap Scene 2 (Vertical / Shorts) and verify full live preview updates immediately
+        // Tap Scene 2 (Starting Soon 16:9) and verify full live preview updates immediately
         composeRule.onNodeWithTag("remote_preview_scene_shorts_vertical").performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("Live Studio Preview — Vertical / Shorts", substring = true).assertIsDisplayed()
+        composeRule.onNodeWithText("Live Studio Preview — Starting Soon", substring = true).assertIsDisplayed()
 
         // Tap Scene 1 (Gameplay) and verify preview switches back immediately
         composeRule.onNodeWithTag("remote_preview_scene_gameplay_live").performClick()

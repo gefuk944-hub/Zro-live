@@ -270,7 +270,7 @@ fun ChatControlScreen(
                                 is YouTubeChatState.Error -> chatState.message
                                 is YouTubeChatState.Connecting -> "Connecting to YouTube Live Chat…"
                                 is YouTubeChatState.Connected -> "Connected. Waiting for viewer messages…"
-                                YouTubeChatState.Disconnected -> "Connect your YouTube Live Video ID & API/OAuth token in Live Controls to stream real live chat messages."
+                                YouTubeChatState.Disconnected -> "Connect your YouTube Live Video ID & API Key in Live Controls to stream real live chat messages."
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant

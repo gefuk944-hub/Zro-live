@@ -1412,7 +1412,7 @@ private fun YouTubeChatTabContent(
                 OutlinedTextField(
                     value = streamSettings.youtubeApiKeyOrToken,
                     onValueChange = { onUpdateStreamSettings(streamSettings.copy(youtubeApiKeyOrToken = it)) },
-                    label = { Text("YouTube API Key (Read) or OAuth Token (Read + Send)") },
+                    label = { Text("YouTube Data API Key (Live Chat Read)") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth()
@@ -1450,7 +1450,7 @@ private fun YouTubeChatTabContent(
                         Text("Live Chat Disconnected", style = MaterialTheme.typography.titleMedium, color = Color.White)
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            "Enter your active YouTube Live Video ID and API Key / OAuth token above to stream real viewer messages here, or tap 'Open YouTube' to launch YouTube Live Chat directly. Zro live never displays fake messages.",
+                            "Enter your active YouTube Live Video ID and API Key above to stream real viewer messages here, or tap 'Open YouTube' to launch YouTube Live Chat directly. Zro live never displays fake messages.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
