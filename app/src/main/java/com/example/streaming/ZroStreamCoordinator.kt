@@ -2,6 +2,7 @@ package com.example.streaming
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.view.Surface
 import com.example.data.model.AudioSettings
 import com.example.data.model.CaptureMode
@@ -12,6 +13,9 @@ import com.example.data.model.StreamHealth
 import com.example.data.model.StreamLifecycleState
 import com.example.data.model.StreamRuntimeTelemetry
 import com.example.data.model.StreamSettings
+import com.example.data.model.YouTubeChatMessage
+import com.example.studio.SceneSlot
+import com.example.studio.StudioWorkspaceState
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -24,8 +28,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Single source of truth coordinating StreamingForegroundService, FloatingOverlayService,
- * ZroAudioEngine, Capture Preview Surface, and Compose UI. Prevents duplicate capture/streaming sessions.
+ * Single source of truth coordinating StreamingForegroundService, StudioLiveCompositor,
+ * FloatingOverlayService, ZroAudioEngine, Capture Preview Surface, and Compose UI.
+ * Syncs live OBS canvas edits and Screen 1–4 switches instantaneously to the active RTMP stream.
  */
 object ZroStreamCoordinator {
 
@@ -40,11 +45,33 @@ object ZroStreamCoordinator {
     private val _activeVoiceRoomName = MutableStateFlow<String?>(null)
     val activeVoiceRoomName: StateFlow<String?> = _activeVoiceRoomName.asStateFlow()
 
+    /** Latest live captured frame from THIS phone's MediaProjection for OBS Preview & StudioLiveCompositor. */
+    private val _localCapturedFrame = MutableStateFlow<Bitmap?>(null)
+    val localCapturedFrame: StateFlow<Bitmap?> = _localCapturedFrame.asStateFlow()
+
+    /** Latest live OBS studio workspace (scenes, layers, crops, opacity, text, BRB) rendered straight into the live stream. */
+    private val _activeStudioWorkspace = MutableStateFlow(StudioWorkspaceState())
+    val activeStudioWorkspace: StateFlow<StudioWorkspaceState> = _activeStudioWorkspace.asStateFlow()
+
+    /** Latest YouTube live chat messages rendered inside CHAT_OVERLAY layers on the live broadcast canvas. */
+    private val _liveChatMessages = MutableStateFlow<List<YouTubeChatMessage>>(emptyList())
+    val liveChatMessages: StateFlow<List<YouTubeChatMessage>> = _liveChatMessages.asStateFlow()
+
+    /** Latest real phone temperature label (e.g. "36.4°C" or "Unmeasured") shared with Notification & Floating Overlay. */
+    private val _deviceTemperatureLabel = MutableStateFlow("Unmeasured")
+    val deviceTemperatureLabel: StateFlow<String> = _deviceTemperatureLabel.asStateFlow()
+
     private val _navEvents = MutableSharedFlow<DeepLinkTarget>(extraBufferCapacity = 4)
     val navEvents: SharedFlow<DeepLinkTarget> = _navEvents.asSharedFlow()
 
     private val _audioQuickToggleEvents = MutableSharedFlow<AudioQuickAction>(extraBufferCapacity = 8)
     val audioQuickToggleEvents: SharedFlow<AudioQuickAction> = _audioQuickToggleEvents.asSharedFlow()
+
+    private val _sceneSwitchEvents = MutableSharedFlow<SceneSlot>(extraBufferCapacity = 8)
+    val sceneSwitchEvents: SharedFlow<SceneSlot> = _sceneSwitchEvents.asSharedFlow()
+
+    private val _startLiveFromOverlayEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    val startLiveFromOverlayEvents: SharedFlow<Unit> = _startLiveFromOverlayEvents.asSharedFlow()
 
     private val _streamStopCallback = MutableSharedFlow<StreamFinalStats>(extraBufferCapacity = 4)
     val streamStopCallback: SharedFlow<StreamFinalStats> = _streamStopCallback.asSharedFlow()
@@ -63,7 +90,7 @@ object ZroStreamCoordinator {
         val peakBitrateKbps: Int,
         val platformLabel: String = "RTMP Live",
         val rtmpUrl: String = "",
-        val sceneSlotName: String = "SCENE_1",
+        val sceneSlotName: String = "GAMEPLAY_LIVE",
         val wasCleanStop: Boolean = true,
         val errorMessage: String? = null
     )
@@ -73,7 +100,7 @@ object ZroStreamCoordinator {
     @Volatile var currentAudioSettings: AudioSettings = AudioSettings()
     @Volatile var currentOverlaySettings: OverlaySettings = OverlaySettings()
     @Volatile var currentPerfSettings: PerformanceSettings = PerformanceSettings()
-    @Volatile var activeSceneSlotName: String = "SCENE_1"
+    @Volatile var activeSceneSlotName: String = SceneSlot.GAMEPLAY_LIVE.name
     @Volatile var pendingMediaProjectionResultCode: Int = 0
     @Volatile var pendingMediaProjectionData: Intent? = null
     @Volatile var pendingCaptureMode: CaptureMode = CaptureMode.FULL_SCREEN
@@ -95,6 +122,66 @@ object ZroStreamCoordinator {
     fun clearPendingMediaProjection() {
         pendingMediaProjectionResultCode = 0
         pendingMediaProjectionData = null
+    }
+
+    fun updateLocalCapturedFrame(bitmap: Bitmap?) {
+        _localCapturedFrame.value = bitmap
+    }
+
+    fun updateStudioWorkspace(workspace: StudioWorkspaceState) {
+        _activeStudioWorkspace.value = workspace
+        activeSceneSlotName = workspace.activeSceneSlot.name
+        _telemetry.update { prev ->
+            if (prev.activeSceneName != workspace.activeScene.name) {
+                prev.copy(activeSceneName = workspace.activeScene.name)
+            } else {
+                prev
+            }
+        }
+    }
+
+    fun updateLiveChatMessages(messages: List<YouTubeChatMessage>) {
+        _liveChatMessages.value = messages
+    }
+
+    fun updateDeviceTemperature(tempC: Float?, label: String) {
+        _deviceTemperatureLabel.value = label
+        _telemetry.update { prev ->
+            if (prev.deviceTempCelsius != tempC || prev.thermalLabel != label) {
+                prev.copy(deviceTempCelsius = tempC, thermalLabel = label)
+            } else {
+                prev
+            }
+        }
+    }
+
+    /**
+     * Switches Screen 1 / Screen 2 / Screen 3 / Screen 4 immediately — works from
+     * the notification shade, floating overlay, or studio UI without opening MainActivity!
+     */
+    fun requestSwitchScene(context: Context?, slot: SceneSlot) {
+        activeSceneSlotName = slot.name
+        val current = _activeStudioWorkspace.value
+        val updated = current.copy(
+            activeSceneSlot = slot,
+            brbActive = slot == SceneSlot.BRB_BREAK,
+            selectedLayerId = null
+        )
+        _activeStudioWorkspace.value = updated
+        _telemetry.update { it.copy(activeSceneName = updated.activeScene.name) }
+        _sceneSwitchEvents.tryEmit(slot)
+
+        if (context != null && (isSessionActive() || isCaptureActive())) {
+            val intent = Intent(context, StreamingForegroundService::class.java).apply {
+                action = StreamingForegroundService.ACTION_SWITCH_SCENE
+                putExtra(StreamingForegroundService.EXTRA_SCENE_SLOT, slot.name)
+            }
+            runCatching { context.startService(intent) }
+        }
+    }
+
+    fun requestStartLiveFromOverlay() {
+        _startLiveFromOverlayEvents.tryEmit(Unit)
     }
 
     fun attachPreviewSurface(context: Context, surface: Surface?) {
@@ -187,6 +274,10 @@ object ZroStreamCoordinator {
         releaseSessionLock()
         releaseCaptureLock()
         clearPendingMediaProjection()
+        _localCapturedFrame.value = null
+        val prevTemp = _telemetry.value.deviceTempCelsius
+        val prevThermal = _telemetry.value.thermalLabel
+        val prevScene = _activeStudioWorkspace.value.activeScene.name
         _telemetry.value = StreamRuntimeTelemetry(
             state = if (error != null) StreamLifecycleState.ERROR else StreamLifecycleState.IDLE,
             streamHealth = StreamHealth.OFFLINE,
@@ -200,7 +291,10 @@ object ZroStreamCoordinator {
             captureSourceLabel = "This Phone Full Screen",
             capturedContentVisible = true,
             privacyShieldActive = false,
-            errorMessage = error
+            errorMessage = error,
+            deviceTempCelsius = prevTemp,
+            thermalLabel = prevThermal,
+            activeSceneName = prevScene
         )
     }
 }

@@ -22,11 +22,12 @@ enum class DualPhoneRole(val label: String, val subtitle: String) {
 enum class DualConnectionMethod(val label: String) {
     QR_PAIRING("QR Code"),
     MANUAL_IP("Manual Address"),
+    INTERNET_RELAY("Mobile Data / Relay"),
     LOCAL_WIFI("Local Wi-Fi"),
     HOTSPOT("Mobile Hotspot");
 
     companion object {
-        val VISIBLE_OPTIONS: List<DualConnectionMethod> = listOf(QR_PAIRING, MANUAL_IP)
+        val VISIBLE_OPTIONS: List<DualConnectionMethod> = listOf(QR_PAIRING, MANUAL_IP, INTERNET_RELAY)
     }
 }
 
@@ -49,6 +50,8 @@ data class DualPhoneTelemetry(
     val pairingToken: String = "",
     val connectedDeviceName: String = "",
     val peerIp: String = "",
+    val relayServerUrl: String = "",
+    val transportModeLabel: String = "Direct LAN",
     val signalQualityLabel: String = "Offline",
     val latencyMs: Int = 0,
     val mirroredFps: Int = 0,

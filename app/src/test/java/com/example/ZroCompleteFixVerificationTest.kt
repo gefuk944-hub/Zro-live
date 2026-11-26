@@ -187,9 +187,13 @@ class ZroCompleteFixVerificationTest {
     }
 
     @Test
-    fun `dual connection visible options expose only QR Code and Manual Address`() {
+    fun `dual connection visible options expose QR Code, Manual Address, and Cross-Network Internet Relay`() {
         assertEquals(
-            listOf(DualConnectionMethod.QR_PAIRING, DualConnectionMethod.MANUAL_IP),
+            listOf(
+                DualConnectionMethod.QR_PAIRING,
+                DualConnectionMethod.MANUAL_IP,
+                DualConnectionMethod.INTERNET_RELAY
+            ),
             DualConnectionMethod.VISIBLE_OPTIONS
         )
         assertFalse(DualConnectionMethod.VISIBLE_OPTIONS.contains(DualConnectionMethod.LOCAL_WIFI))

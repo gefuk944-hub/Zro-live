@@ -103,6 +103,7 @@ import com.example.data.model.YouTubeChatMessage
 import com.example.dualphone.DualPhoneProtocol
 import com.example.dualphone.DualRemoteCommand
 import com.example.dualphone.WifiDirectState
+import com.example.streaming.ZroStreamCoordinator
 import com.example.studio.CropEdge
 import com.example.studio.DualConnectionMethod
 import com.example.studio.DualLinkState
@@ -200,7 +201,11 @@ fun DualPhoneStudioScreen(
     onStartWifiDirectHost: () -> Unit = {},
     onStopWifiDirectHost: () -> Unit = {},
     onProbeStunServer: () -> Unit = {},
-    onSharePhone1Screen: () -> Unit = {}
+    onSharePhone1Screen: () -> Unit = {},
+    localCapturedFrame: Bitmap? = null,
+    onSetRelayServerUrl: (String) -> Unit = {},
+    onStartPhone2RelayHost: (String) -> Unit = {},
+    onConnectPhone1ViaRelay: (String, String) -> Unit = { _, _ -> }
 ) {
     var activeSection by remember(initialSection) { mutableStateOf(initialSection) }
     var showStopConfirm by remember { mutableStateOf(false) }
@@ -214,6 +219,8 @@ fun DualPhoneStudioScreen(
     var manualIp by remember { mutableStateOf(dualTelemetry.peerIp.ifBlank { "192.168.1." }) }
     var manualPort by remember { mutableStateOf(DualPhoneProtocol.DEFAULT_CONTROL_PORT.toString()) }
     var manualToken by remember { mutableStateOf("") }
+    var relayUrlInput by remember(dualTelemetry.relayServerUrl) { mutableStateOf(dualTelemetry.relayServerUrl) }
+    var relayTokenInput by remember { mutableStateOf("") }
 
     val isLive = streamTelemetry.state == StreamLifecycleState.LIVE
     val isPaused = streamTelemetry.state == StreamLifecycleState.PAUSED
@@ -592,6 +599,7 @@ fun DualPhoneStudioScreen(
                             StudioCanvasPreview(
                                 workspace = workspace,
                                 mirroredFrame = mirroredFrame,
+                                localCapturedFrame = localCapturedFrame,
                                 audioMeters = audioMeters,
                                 chatMessages = chatMessages,
                                 reducedMotion = reducedMotion,
@@ -802,6 +810,7 @@ fun DualPhoneStudioScreen(
                                         isLive = isLive,
                                         isPaused = isPaused,
                                         isActiveStream = isActiveStream,
+                                        liveDurationSec = streamTelemetry.durationSec,
                                         workspace = workspace,
                                         audioSettings = audioSettings,
                                         editMode = editDeckMode,
@@ -1115,11 +1124,27 @@ fun DualPhoneStudioScreen(
                         }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Feed: ${dualTelemetry.mirroredResolution} @ ${dualTelemetry.mirroredFps} FPS • Local IP: ${dualTelemetry.localIp.ifBlank { "Unavailable" }}",
+                            text = "Transport: ${dualTelemetry.transportModeLabel} • Feed: ${dualTelemetry.mirroredResolution} @ ${dualTelemetry.mirroredFps} FPS • IP: ${dualTelemetry.localIp.ifBlank { "Mobile Data" }}",
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = JetBrainsMonoFontFamily,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = ZroCobalt.copy(alpha = 0.12f),
+                            border = BorderStroke(1.dp, ZroCobalt.copy(alpha = 0.4f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("auto_solo_mode_info_card")
+                        ) {
+                            Text(
+                                text = "Auto Solo Mode ON: If the gameplay phone disconnects or goes out of range, the live stream automatically switches to this phone's screen and restores the gameplay phone when it reconnects.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp)
+                            )
+                        }
                         if (!dualTelemetry.lastError.isNullOrBlank()) {
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
@@ -1236,14 +1261,45 @@ fun DualPhoneStudioScreen(
                                     )
                                 }
                             }
-                            Spacer(modifier = Modifier.height(8.dp))
-                            BrandGradientButton(
-                                text = if (dualTelemetry.linkState == DualLinkState.HOSTING) "REFRESH HOST QR" else "START PHONE 2 HOST",
-                                onClick = onStartPhone2Host,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("start_phone2_host_button")
-                            )
+                            if (dualTelemetry.connectionMethod == DualConnectionMethod.INTERNET_RELAY) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                OutlinedTextField(
+                                    value = relayUrlInput,
+                                    onValueChange = {
+                                        relayUrlInput = it
+                                        onSetRelayServerUrl(it)
+                                    },
+                                    label = { Text("Secure Relay Server URL (wss://)") },
+                                    placeholder = { Text("wss://relay.yourdomain.com/ws", fontSize = 11.sp) },
+                                    supportingText = {
+                                        Text(
+                                            text = "Works across mobile data & different Wi-Fi networks via your reachable WebSocket relay.",
+                                            fontSize = 10.sp
+                                        )
+                                    },
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("phone2_relay_url_input")
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                BrandGradientButton(
+                                    text = if (dualTelemetry.linkState == DualLinkState.HOSTING) "REFRESH MOBILE DATA RELAY HOST" else "START MOBILE DATA RELAY HOST",
+                                    onClick = { onStartPhone2RelayHost(relayUrlInput) },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("start_phone2_relay_host_btn")
+                                )
+                            } else {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                BrandGradientButton(
+                                    text = if (dualTelemetry.linkState == DualLinkState.HOSTING) "REFRESH HOST QR" else "START PHONE 2 HOST",
+                                    onClick = onStartPhone2Host,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("start_phone2_host_button")
+                                )
+                            }
                             if (wifiDirectState.supported) {
                                 Spacer(modifier = Modifier.height(6.dp))
                                 OutlinedButton(
@@ -1334,7 +1390,47 @@ fun DualPhoneStudioScreen(
                                     .fillMaxWidth()
                                     .testTag("connect_manual_ip_button")
                             ) {
-                                Text("Connect via Manual Address")
+                                Text("Connect via Manual Address (Same Wi-Fi)")
+                            }
+
+                            Spacer(modifier = Modifier.height(12.dp))
+                            SectionHeader(
+                                title = "Mobile Data / Different Wi-Fi (Relay)",
+                                subtitle = "Enter the same wss:// relay URL & Phone 2's Room Token"
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            OutlinedTextField(
+                                value = relayUrlInput,
+                                onValueChange = {
+                                    relayUrlInput = it
+                                    onSetRelayServerUrl(it)
+                                },
+                                label = { Text("Secure Relay Server URL (wss://)") },
+                                placeholder = { Text("wss://relay.yourdomain.com/ws", fontSize = 11.sp) },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("phone1_relay_url_input")
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            OutlinedTextField(
+                                value = relayTokenInput,
+                                onValueChange = { relayTokenInput = it.uppercase() },
+                                label = { Text("Room Token (from Phone 2)") },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("phone1_relay_token_input")
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            OutlinedButton(
+                                onClick = { onConnectPhone1ViaRelay(relayUrlInput, relayTokenInput) },
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("connect_phone1_relay_btn")
+                            ) {
+                                Text("Connect via Mobile Data Relay")
                             }
                         }
                     }
@@ -1372,6 +1468,7 @@ private fun RemoteDeckButton(
     isLive: Boolean,
     isPaused: Boolean,
     isActiveStream: Boolean,
+    liveDurationSec: Long = 0L,
     workspace: StudioWorkspaceState,
     audioSettings: AudioSettings,
     editMode: Boolean,
@@ -1443,8 +1540,10 @@ private fun RemoteDeckButton(
         RemoteControlTileId.OPEN_STUDIO -> Icons.Rounded.Tune
     }
 
+    val timerText = ZroStreamCoordinator.formatDuration(liveDurationSec)
     val displayLabel = when (tileId) {
-        RemoteControlTileId.START_LIVE -> if (isLive) "LIVE" else "START LIVE"
+        RemoteControlTileId.START_LIVE -> if (isLive) "LIVE $timerText" else "START LIVE"
+        RemoteControlTileId.STOP_LIVE -> if (isActiveStream) "STOP $timerText" else "STOP LIVE"
         RemoteControlTileId.PAUSE_RESUME -> if (isPaused) "RESUME" else "PAUSE"
         RemoteControlTileId.MUTE_MIC -> if (audioSettings.micEnabled) "MIC ON" else "MIC MUTED"
         RemoteControlTileId.TEAM_VOICE_LIVE -> if (audioSettings.teamVoiceToLive) "TEAM LIVE" else "TEAM MUTE"

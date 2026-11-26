@@ -9,7 +9,8 @@ data class DualPairingPayload(
     val controlPort: Int = DualPhoneProtocol.DEFAULT_CONTROL_PORT,
     val videoPort: Int = DualPhoneProtocol.DEFAULT_VIDEO_PORT,
     val token: String,
-    val hostName: String = "Zro Studio"
+    val hostName: String = "Zro Studio",
+    val relayUrl: String = ""
 )
 
 data class DualRemoteCommand(
@@ -65,12 +66,17 @@ object DualPhoneProtocol {
 
     fun buildPairingUri(payload: DualPairingPayload): String {
         val encodedName = Uri.encode(payload.hostName.take(32))
-        return "$SCHEME://$HOST?ip=${Uri.encode(payload.ip)}&port=${payload.controlPort}&vport=${payload.videoPort}&token=${Uri.encode(payload.token)}&name=$encodedName"
+        val base = "$SCHEME://$HOST?ip=${Uri.encode(payload.ip)}&port=${payload.controlPort}&vport=${payload.videoPort}&token=${Uri.encode(payload.token)}&name=$encodedName"
+        return if (payload.relayUrl.isNotBlank()) {
+            "$base&relay=${Uri.encode(payload.relayUrl.trim())}"
+        } else {
+            base
+        }
     }
 
     /**
-     * Parses a QR URI (`zrolive://pair?ip=...&port=...&vport=...&token=...&name=...`)
-     * or returns null if malformed / missing IP or token.
+     * Parses a QR URI (`zrolive://pair?ip=...&port=...&vport=...&token=...&name=...&relay=...`)
+     * or returns null if malformed / missing both IP and relay URL or token.
      */
     fun parsePairingUri(raw: String): DualPairingPayload? {
         val trimmed = raw.trim()
@@ -81,8 +87,9 @@ object DualPhoneProtocol {
                 return null
             }
             val ip = uri.getQueryParameter("ip")?.trim().orEmpty()
+            val relay = uri.getQueryParameter("relay")?.trim().orEmpty()
             val token = uri.getQueryParameter("token")?.trim().orEmpty()
-            if (ip.isBlank() || token.length < 4) return null
+            if ((ip.isBlank() && !isValidRelayUrl(relay)) || token.length < 4) return null
             val port = uri.getQueryParameter("port")?.toIntOrNull()?.coerceIn(1024, 65535) ?: DEFAULT_CONTROL_PORT
             val vport = uri.getQueryParameter("vport")?.toIntOrNull()?.coerceIn(1024, 65535) ?: DEFAULT_VIDEO_PORT
             val name = uri.getQueryParameter("name")?.takeIf { it.isNotBlank() } ?: "Zro Studio"
@@ -91,9 +98,26 @@ object DualPhoneProtocol {
                 controlPort = port,
                 videoPort = vport,
                 token = token,
-                hostName = name
+                hostName = name,
+                relayUrl = relay
             )
         }.getOrNull()
+    }
+
+    fun isValidRelayUrl(raw: String): Boolean {
+        val s = raw.trim()
+        if (s.length < 8 || s.length > 256) return false
+        val lower = s.lowercase()
+        if (!lower.startsWith("wss://") && !lower.startsWith("ws://")) return false
+        val uri = runCatching { Uri.parse(s) }.getOrNull() ?: return false
+        val host = uri.host?.trim().orEmpty()
+        return host.isNotBlank() && !host.contains(" ")
+    }
+
+    fun buildRelayRoomEndpoint(relayUrl: String, roomToken: String, role: String): String {
+        val base = relayUrl.trim().trimEnd('/')
+        val sep = if (base.contains("?")) "&" else "?"
+        return "${base}${sep}room=${Uri.encode(roomToken.trim().uppercase())}&role=${Uri.encode(role)}"
     }
 
     fun isValidIpv4OrHost(raw: String): Boolean {

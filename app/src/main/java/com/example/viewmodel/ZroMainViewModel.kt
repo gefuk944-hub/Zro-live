@@ -233,6 +233,7 @@ class ZroMainViewModel(
     val smartRecommendation: StateFlow<SmartRecommendation> = _smartRecommendation.asStateFlow()
 
     val streamTelemetry: StateFlow<StreamRuntimeTelemetry> = ZroStreamCoordinator.telemetry
+    val localCapturedFrame: StateFlow<Bitmap?> = ZroStreamCoordinator.localCapturedFrame
     val audioMeters: StateFlow<AudioMeterState> = ZroAudioEngine.meterState
     val overlayVisible: StateFlow<Boolean> = ZroStreamCoordinator.overlayVisible
 
@@ -345,10 +346,34 @@ class ZroMainViewModel(
             val initialMode = settingsStore.settingsFlow.first().stream.broadcastMode
             val loaded = settingsStore.loadStudioWorkspaceForMode(initialMode)
             _studioState.value = loaded
-            ZroStreamCoordinator.activeSceneSlotName = loaded.activeSceneSlot.name
+            ZroStreamCoordinator.updateStudioWorkspace(loaded)
         }
 
-        // Auto-switch live video source between Phone 1 full screen and connected 2nd Phone screen
+        // Sync scene switches triggered from Persistent Notification or Floating Overlay (Screen 1-4)
+        viewModelScope.launch {
+            ZroStreamCoordinator.sceneSwitchEvents.collect { slot ->
+                val next = StudioWorkspaceReducer.switchScene(_studioState.value, slot)
+                _studioState.value = next
+                ZroStreamCoordinator.updateStudioWorkspace(next)
+                val mode = activeBroadcastMode()
+                settingsStore.saveStudioWorkspace(next, mode)
+                if (dualTelemetry.value.role == DualPhoneRole.PHONE2_STUDIO &&
+                    dualTelemetry.value.linkState == DualLinkState.CONNECTED
+                ) {
+                    dualEngine.sendRemoteCommand(DualRemoteCommand(DualPhoneProtocol.CMD_SWITCH_SCENE, stringArg = slot.name))
+                }
+            }
+        }
+
+        // Sync live chat messages to compositor so CHAT_OVERLAY layers appear in actual RTMP output
+        viewModelScope.launch {
+            _chatState.collect { st ->
+                val msgs = (st as? YouTubeChatState.Connected)?.messages.orEmpty()
+                ZroStreamCoordinator.updateLiveChatMessages(msgs)
+            }
+        }
+
+        // Auto-switch live video source between Phone 1 full screen and connected 2nd Phone screen (Auto Solo Mode)
         // AND auto-restore saved layout when the authorized gameplay phone connects
         viewModelScope.launch {
             dualEngine.telemetry.collect { dt ->
@@ -357,11 +382,11 @@ class ZroMainViewModel(
                 ) {
                     if (!wasSecondPhoneConnected) {
                         wasSecondPhoneConnected = true
-                        // Stop Phone 1 full-screen capture & switch live video source to 2nd Phone!
+                        // Automatically restore 2nd Phone gameplay capture!
                         ZroStreamCoordinator.requestSwitchVideoSource(appContext, LiveVideoSource.REMOTE_SECOND_PHONE)
                         _autoSwitchToRemoteEvent.tryEmit(true)
                         val peerLabel = dt.connectedDeviceName.ifBlank { "2nd Phone" }
-                        showMessage("Connected $peerLabel — live source switched to 2nd phone. This phone is now Remote Control.")
+                        showMessage("Connected $peerLabel (${dt.transportModeLabel}) — live source restored to gameplay phone.")
                     }
                     if (dt.connectedDeviceName.isNotBlank()) {
                         val key = "${dt.connectedDeviceName}@${dt.peerIp}"
@@ -376,7 +401,7 @@ class ZroMainViewModel(
                                         lastAuthorizedDeviceIp = dt.peerIp
                                     )
                                     _studioState.value = updated
-                                    ZroStreamCoordinator.activeSceneSlotName = updated.activeSceneSlot.name
+                                    ZroStreamCoordinator.updateStudioWorkspace(updated)
                                 } else {
                                     commitStudioState(
                                         cur.copy(
@@ -395,9 +420,9 @@ class ZroMainViewModel(
                         wasSecondPhoneConnected = false
                         ZroStreamCoordinator.requestSwitchVideoSource(appContext, LiveVideoSource.LOCAL_FULL_SCREEN)
                         if (ZroStreamCoordinator.isSessionActive()) {
-                            showMessage("2nd phone disconnected — returned stream source to this phone's screen.")
+                            showMessage("Auto Solo Mode: Gameplay phone disconnected — live stream switched to this phone's screen.")
                         } else {
-                            showMessage("2nd phone disconnected — ready for auto-reconnect or local capture.")
+                            showMessage("Auto Solo Mode: Gameplay phone disconnected — using this phone until it reconnects.")
                         }
                     }
                 }
@@ -530,6 +555,10 @@ class ZroMainViewModel(
                             runCatching { telemetryMonitor.snapshot() }.getOrDefault(_deviceTelemetry.value)
                         }
                         _deviceTelemetry.value = snap
+                        ZroStreamCoordinator.updateDeviceTemperature(
+                            tempC = snap.batteryTempCelsius,
+                            label = DeviceTelemetryMonitor.formatTemperature(snap)
+                        )
                         _smartRecommendation.value = telemetryMonitor.computeSmartRecommendation(
                             t = snap,
                             profile = perf.profile,
@@ -586,7 +615,7 @@ class ZroMainViewModel(
             _canUndo.value = false
             _canRedo.value = false
             _studioState.value = nextStudio
-            ZroStreamCoordinator.activeSceneSlotName = nextStudio.activeSceneSlot.name
+            ZroStreamCoordinator.updateStudioWorkspace(nextStudio)
             showMessage("Switched to ${targetMode.label} (${nextCfg.effectiveResolutionDisplay()})")
         }
     }
@@ -745,8 +774,8 @@ class ZroMainViewModel(
                 streamTitle = snap.title.ifBlank { cur.streamTitle },
                 rtmpUrl = snap.rtmpUrl.ifBlank { cur.rtmpUrl },
                 resolution = restoredRes,
-                fps = snap.fps.coerceIn(24, 60),
-                bitrateKbps = snap.bitrateKbps.coerceIn(1000, 15000)
+                fps = snap.fps.coerceIn(24, 90),
+                bitrateKbps = snap.bitrateKbps.coerceIn(1000, 40000)
             )
             updateStreamSettings(restored)
             val restoredSlot = SceneSlot.fromName(snap.activeSceneSlotName)
@@ -795,8 +824,8 @@ class ZroMainViewModel(
             streamTitle = session.title.ifBlank { cur.streamTitle },
             rtmpUrl = session.rtmpUrl.ifBlank { cur.rtmpUrl },
             resolution = matchedRes,
-            fps = session.fps.toInt().coerceIn(24, 60),
-            bitrateKbps = session.bitrateKbps.toInt().coerceIn(1000, 15000)
+            fps = session.fps.toInt().coerceIn(24, 90),
+            bitrateKbps = session.bitrateKbps.toInt().coerceIn(1000, 40000)
         )
         updateStreamSettings(restored)
         val slot = SceneSlot.fromName(session.sceneSlotName)
@@ -854,8 +883,8 @@ class ZroMainViewModel(
             streamTitle = profile.title.ifBlank { cur.streamTitle },
             rtmpUrl = profile.rtmpUrl,
             resolution = VideoResolution.fromName(profile.resolutionName),
-            fps = profile.fps.coerceIn(24, 60),
-            bitrateKbps = profile.bitrateKbps.coerceIn(1000, 15000)
+            fps = profile.fps.coerceIn(24, 90),
+            bitrateKbps = profile.bitrateKbps.coerceIn(1000, 40000)
         )
         updateStreamSettings(updated)
         val slot = SceneSlot.fromName(profile.sceneSlotName)
@@ -913,14 +942,21 @@ class ZroMainViewModel(
     fun applyPreset(preset: StreamPreset) {
         val current = settings.value.stream
         val dev = _deviceTelemetry.value
-        if (preset == StreamPreset.FULL_HD_SMOOTH && !dev.supports1080p60) {
-            showMessage("1080p 60 FPS is not reported as hardware-supported on this device. Applied 1080p 30 FPS instead.")
+        val maxBitrate = DeviceTelemetryMonitor.maxAllowedBitrateKbps(
+            telemetry = dev,
+            profile = settings.value.performance.profile,
+            lowRamMode = settings.value.performance.lowRamMode,
+            lowDataMode = current.lowDataMode
+        )
+        if (!DeviceTelemetryMonitor.supportsResolutionAndFps(dev, preset.resolution, preset.fps)) {
+            val rec = _smartRecommendation.value
+            showMessage("${preset.resolution.shortLabel} ${preset.fps} FPS is not hardware-supported on this device. Applied ${rec.resolution.shortLabel} ${rec.fps} FPS instead.")
             updateStreamSettings(
                 current.copy(
-                    preset = StreamPreset.FULL_HD,
-                    resolution = StreamPreset.FULL_HD.resolution,
-                    fps = 30,
-                    bitrateKbps = StreamPreset.FULL_HD.recommendedBitrateKbps
+                    preset = rec.preset,
+                    resolution = rec.resolution,
+                    fps = rec.fps,
+                    bitrateKbps = rec.bitrateKbps.coerceAtMost(maxBitrate)
                 )
             )
             return
@@ -930,7 +966,7 @@ class ZroMainViewModel(
                 preset = preset,
                 resolution = preset.resolution,
                 fps = preset.fps,
-                bitrateKbps = preset.recommendedBitrateKbps
+                bitrateKbps = preset.recommendedBitrateKbps.coerceAtMost(maxBitrate)
             )
         )
     }
@@ -1502,7 +1538,7 @@ class ZroMainViewModel(
             pushUndoSnapshot(prev)
         }
         _studioState.value = newState
-        ZroStreamCoordinator.activeSceneSlotName = newState.activeSceneSlot.name
+        ZroStreamCoordinator.updateStudioWorkspace(newState)
         if (persist) {
             val mode = activeBroadcastMode()
             viewModelScope.launch { settingsStore.saveStudioWorkspace(newState, mode) }
@@ -1515,6 +1551,7 @@ class ZroMainViewModel(
         _canUndo.value = undoStack.isNotEmpty()
         _canRedo.value = redoStack.isNotEmpty()
         _studioState.value = prev
+        ZroStreamCoordinator.updateStudioWorkspace(prev)
         val mode = activeBroadcastMode()
         viewModelScope.launch { settingsStore.saveStudioWorkspace(prev, mode) }
         showMessage("Undid last Studio change")
@@ -1526,6 +1563,7 @@ class ZroMainViewModel(
         _canUndo.value = undoStack.isNotEmpty()
         _canRedo.value = redoStack.isNotEmpty()
         _studioState.value = next
+        ZroStreamCoordinator.updateStudioWorkspace(next)
         val mode = activeBroadcastMode()
         viewModelScope.launch { settingsStore.saveStudioWorkspace(next, mode) }
         showMessage("Redid Studio change")
@@ -1540,6 +1578,7 @@ class ZroMainViewModel(
             lastAuthorizedDeviceIp = dt.peerIp.ifBlank { _studioState.value.lastAuthorizedDeviceIp }
         )
         _studioState.value = stamped
+        ZroStreamCoordinator.updateStudioWorkspace(stamped)
         viewModelScope.launch {
             settingsStore.saveAuthorizedDeviceLayout(stamped, mode)
             settingsStore.savePreviousStudioBackup(stamped, mode)
@@ -1702,6 +1741,7 @@ class ZroMainViewModel(
             val restored = settingsStore.restorePreviousStudioBackup(mode)
             if (restored != null) {
                 _studioState.value = restored
+                ZroStreamCoordinator.updateStudioWorkspace(restored)
                 showMessage("Restored previous saved ${mode.label} scene settings.")
             } else {
                 showMessage("No previous backup saved yet. Tap 'Save Snapshot' first.")
@@ -2399,11 +2439,52 @@ class ZroMainViewModel(
         }
     }
 
+    fun setDualRelayServerUrl(url: String) {
+        dualEngine.setRelayServerUrl(url)
+    }
+
+    fun startPhone2RelayHost(relayUrl: String) {
+        dualEngine.setRelayServerUrl(relayUrl)
+        dualEngine.startPhone2RelayHost(
+            relayUrl = relayUrl,
+            hostDeviceName = "Zro Studio (${Build.MODEL})"
+        )
+        if (DualPhoneProtocol.isValidRelayUrl(relayUrl)) {
+            showMessage("Mobile Data Relay Host connecting — share the Room Token or QR code with Phone 1.")
+        } else {
+            showMessage("Enter a valid secure wss:// WebSocket relay URL.")
+        }
+    }
+
+    fun connectPhone1ViaRelay(relayUrl: String, token: String) {
+        dualEngine.setRelayServerUrl(relayUrl)
+        dualEngine.connectPhone1ViaRelay(
+            relayUrl = relayUrl,
+            token = token,
+            deviceName = "Phone 1 (${Build.MODEL})"
+        )
+        if (DualPhoneProtocol.isValidRelayUrl(relayUrl) && token.trim().length >= 4) {
+            showMessage("Connecting Phone 1 over Mobile Data / Internet Relay…")
+        }
+    }
+
     fun connectPhone1ByQrUri(rawUri: String): Boolean {
         val payload = DualPhoneProtocol.parsePairingUri(rawUri)
         if (payload == null) {
             showMessage("Invalid Zro Live QR code. Scan the QR code displayed on Phone 2.")
             return false
+        }
+        if (payload.relayUrl.isNotBlank()) {
+            dualEngine.setRelayServerUrl(payload.relayUrl)
+        }
+        if (payload.ip.isBlank() && DualPhoneProtocol.isValidRelayUrl(payload.relayUrl)) {
+            dualEngine.connectPhone1ViaRelay(
+                relayUrl = payload.relayUrl,
+                token = payload.token,
+                deviceName = "Phone 1 (${Build.MODEL})"
+            )
+            showMessage("Connecting Phone 1 to ${payload.hostName} via Secure Relay…")
+            return true
         }
         dualEngine.connectPhone1ToStudio(
             ip = payload.ip,
@@ -2413,7 +2494,10 @@ class ZroMainViewModel(
             deviceName = "Phone 1 (${Build.MODEL})",
             method = DualConnectionMethod.QR_PAIRING
         )
-        showMessage("Connecting Phone 1 to ${payload.hostName} (${payload.ip})…")
+        showMessage(
+            if (payload.relayUrl.isNotBlank()) "Connecting Phone 1 to ${payload.hostName} (LAN with automatic Relay fallback)…"
+            else "Connecting Phone 1 to ${payload.hostName} (${payload.ip})…"
+        )
         return true
     }
 

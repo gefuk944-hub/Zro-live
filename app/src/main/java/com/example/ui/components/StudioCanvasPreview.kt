@@ -95,10 +95,15 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.res.painterResource
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.R
 import com.example.data.model.AudioMeterState
+import com.example.data.model.LiveVideoSource
 import com.example.data.model.YouTubeChatMessage
+import com.example.streaming.ZroStreamCoordinator
 import com.example.studio.CameraSourceMode
 import com.example.studio.CanvasGridMode
 import com.example.studio.ChromaKeyProcessor
@@ -155,8 +160,12 @@ fun StudioCanvasPreview(
     onReconnectPeer: (() -> Unit)? = null,
     beforePreviewLayerId: String? = null,
     webInteractLayerId: String? = null,
+    localCapturedFrame: Bitmap? = null,
     modifier: Modifier = Modifier
 ) {
+    val liveLocalFrame by ZroStreamCoordinator.localCapturedFrame.collectAsStateWithLifecycle()
+    val liveStreamTelemetry by ZroStreamCoordinator.telemetry.collectAsStateWithLifecycle()
+    val resolvedLocalFrame = localCapturedFrame ?: liveLocalFrame
     val activeScene = workspace.activeScene
     val aspect = if (activeScene.isVertical) 9f / 16f else 16f / 9f
     val borderColor = when {
@@ -243,6 +252,8 @@ fun StudioCanvasPreview(
                             canvasWidthPx = canvasWidthPx,
                             canvasHeightPx = canvasHeightPx,
                             mirroredFrame = mirroredFrame,
+                            localCapturedFrame = resolvedLocalFrame,
+                            isAutoSoloFallback = liveStreamTelemetry.activeVideoSource == LiveVideoSource.LOCAL_FULL_SCREEN && liveStreamTelemetry.state.isActive,
                             dualTelemetry = dualTelemetry,
                             cameraSourceMode = workspace.cameraSourceMode,
                             useFrontCamera = workspace.useFrontCamera,
@@ -407,6 +418,8 @@ private fun StudioLayerNode(
     canvasWidthPx: Float,
     canvasHeightPx: Float,
     mirroredFrame: Bitmap?,
+    localCapturedFrame: Bitmap? = null,
+    isAutoSoloFallback: Boolean = false,
     dualTelemetry: DualPhoneTelemetry,
     cameraSourceMode: CameraSourceMode,
     useFrontCamera: Boolean,
@@ -583,6 +596,8 @@ private fun StudioLayerNode(
                 LayerContentVisual(
                     layer = layer,
                     mirroredFrame = mirroredFrame,
+                    localCapturedFrame = localCapturedFrame,
+                    isAutoSoloFallback = isAutoSoloFallback,
                     dualTelemetry = dualTelemetry,
                     cameraSourceMode = cameraSourceMode,
                     useFrontCamera = useFrontCamera,
@@ -940,6 +955,8 @@ private fun EdgeCropHandle(
 private fun LayerContentVisual(
     layer: SceneLayer,
     mirroredFrame: Bitmap?,
+    localCapturedFrame: Bitmap? = null,
+    isAutoSoloFallback: Boolean = false,
     dualTelemetry: DualPhoneTelemetry,
     cameraSourceMode: CameraSourceMode,
     useFrontCamera: Boolean,
@@ -985,21 +1002,47 @@ private fun LayerContentVisual(
             ) {
                 val isPhone2 = dualTelemetry.role == DualPhoneRole.PHONE2_STUDIO
                 val isConnected = dualTelemetry.linkState == DualLinkState.CONNECTED
+                // Real gameplay frame priority:
+                // 1) Connected 2nd Phone mirrored feed
+                // 2) Streaming phone's real MediaProjection screen capture (Solo mode OR Auto Solo fallback)
+                val activeGameplayBitmap: Bitmap? = when {
+                    isPhone2 && isConnected -> mirroredFrame
+                    isPhone2 && !isConnected -> if (isAutoSoloFallback) localCapturedFrame else null
+                    else -> mirroredFrame ?: localCapturedFrame
+                }
 
-                if (mirroredFrame != null && (!isPhone2 || isConnected)) {
-                    val displayFrame = remember(mirroredFrame, chromaActive, layer.graphicAdjustment.chromaKey) {
+                if (activeGameplayBitmap != null && !activeGameplayBitmap.isRecycled) {
+                    val displayFrame = remember(activeGameplayBitmap, chromaActive, layer.graphicAdjustment.chromaKey) {
                         if (chromaActive) {
-                            ChromaKeyProcessor.applyChromaKey(mirroredFrame, layer.graphicAdjustment.chromaKey)
+                            ChromaKeyProcessor.applyChromaKey(activeGameplayBitmap, layer.graphicAdjustment.chromaKey)
                         } else {
-                            mirroredFrame
+                            activeGameplayBitmap
                         }
                     }
                     Image(
                         bitmap = displayFrame.asImageBitmap(),
-                        contentDescription = "Authorized Phone 1 Gameplay Feed",
+                        contentDescription = if (isPhone2 && isConnected) "Authorized Phone 1 Gameplay Feed" else "Live Phone Screen Capture",
                         contentScale = mediaContentScale,
                         modifier = Modifier.fillMaxSize()
                     )
+                    if (isPhone2 && !isConnected && isAutoSoloFallback) {
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = ZroAmber.copy(alpha = 0.88f),
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(6.dp)
+                        ) {
+                            Text(
+                                text = "AUTO SOLO • LOCAL SCREEN",
+                                fontSize = 8.sp,
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.Black,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
                 } else if (isPhone2 && !isConnected) {
                     // STRICT PRIVACY GUARD: Never show Phone 2's own screen!
                     Column(
@@ -1143,6 +1186,8 @@ private fun LayerContentVisual(
                             LayerContentVisual(
                                 layer = child,
                                 mirroredFrame = mirroredFrame,
+                                localCapturedFrame = localCapturedFrame,
+                                isAutoSoloFallback = isAutoSoloFallback,
                                 dualTelemetry = dualTelemetry,
                                 cameraSourceMode = cameraSourceMode,
                                 useFrontCamera = useFrontCamera,
@@ -1431,6 +1476,12 @@ private fun LayerContentVisual(
 
         LayerSourceType.BRB_BANNER, LayerSourceType.ENDING_BANNER, LayerSourceType.STARTING_SOON -> {
             val accentColor = Color(layer.borderColorHex)
+            val bundledBackdropRes = when (layer.type) {
+                LayerSourceType.STARTING_SOON -> R.drawable.img_scene_starting_soon
+                LayerSourceType.BRB_BANNER -> R.drawable.img_scene_brb
+                LayerSourceType.ENDING_BANNER -> R.drawable.img_scene_ending
+                else -> R.drawable.img_scene_starting_soon
+            }
             Box(modifier = Modifier.fillMaxSize()) {
                 if (!layer.mediaUri.isNullOrBlank()) {
                     StudioImageLayerView(
@@ -1442,16 +1493,28 @@ private fun LayerContentVisual(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(Color(0x99090B10))
-                    )
-                } else if (layer.motionBackgroundEnabled) {
-                    BroadcastMotionBackdrop(
-                        baseColor = Color(0xFF0E121A),
-                        accentColor = accentColor,
-                        progress = if (reducedMotion) 0.35f else animProgress
+                            .background(Color(0x88090B10))
                     )
                 } else if (!layer.transparentBackground) {
-                    Box(modifier = Modifier.fillMaxSize().background(bgColor))
+                    Image(
+                        painter = painterResource(id = bundledBackdropRes),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(
+                                        Color(0x66060910),
+                                        Color(0x99060910),
+                                        Color(0xBB060910)
+                                    )
+                                )
+                            )
+                    )
                 }
 
                 Column(
@@ -1659,6 +1722,7 @@ fun CameraXFacecamPreview(
 fun FullScreen16x9PreviewDialog(
     workspace: StudioWorkspaceState,
     mirroredFrame: Bitmap?,
+    localCapturedFrame: Bitmap? = null,
     audioMeters: AudioMeterState,
     chatMessages: List<YouTubeChatMessage>,
     dualTelemetry: DualPhoneTelemetry,
@@ -1752,6 +1816,7 @@ fun FullScreen16x9PreviewDialog(
                 StudioCanvasPreview(
                     workspace = cleanPreviewWorkspace,
                     mirroredFrame = mirroredFrame,
+                    localCapturedFrame = localCapturedFrame,
                     audioMeters = audioMeters,
                     chatMessages = chatMessages,
                     reducedMotion = false,

@@ -215,7 +215,8 @@ fun ObsSceneStudioScreen(
     broadcastMode: LiveBroadcastMode = LiveBroadcastMode.LANDSCAPE_16_9,
     onSwitchBroadcastMode: (LiveBroadcastMode) -> Unit = {},
     onReorderLayerTopToBottom: (Int, Int) -> Unit = { _, _ -> },
-    onReplaceLayerSource: (SceneLayer) -> Unit = {}
+    onReplaceLayerSource: (SceneLayer) -> Unit = {},
+    localCapturedFrame: Bitmap? = null
 ) {
     val activeScene = workspace.activeScene
     val selectedLayer = activeScene.layers.firstOrNull { it.id == workspace.selectedLayerId }
@@ -591,6 +592,7 @@ fun ObsSceneStudioScreen(
             StudioCanvasPreview(
                 workspace = workspace,
                 mirroredFrame = mirroredFrame,
+                localCapturedFrame = localCapturedFrame,
                 audioMeters = audioMeters,
                 chatMessages = chatMessages,
                 reducedMotion = reducedMotion,

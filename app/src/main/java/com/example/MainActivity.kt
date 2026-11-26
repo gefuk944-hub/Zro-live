@@ -251,6 +251,7 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
     val canRedo by viewModel.canRedo.collectAsStateWithLifecycle()
     val dualTelemetry by viewModel.dualTelemetry.collectAsStateWithLifecycle()
     val mirroredFrame by viewModel.mirroredFrame.collectAsStateWithLifecycle()
+    val localCapturedFrame by viewModel.localCapturedFrame.collectAsStateWithLifecycle()
     val screenshotCount by viewModel.localScreenshotCount.collectAsStateWithLifecycle()
     val rtmpTestResult by viewModel.rtmpTestResult.collectAsStateWithLifecycle()
     val isTestingRtmp by viewModel.isTestingRtmp.collectAsStateWithLifecycle()
@@ -626,6 +627,14 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
         }
     }
 
+    LaunchedEffect(Unit) {
+        ZroStreamCoordinator.startLiveFromOverlayEvents.collect {
+            if (!ZroStreamCoordinator.isSessionActive()) {
+                requestStartBroadcast()
+            }
+        }
+    }
+
     val handleReconnectPreviousLive: () -> Unit = {
         if (viewModel.prepareReconnectPreviousLive()) {
             requestStartBroadcast()
@@ -740,6 +749,7 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
         FullScreen16x9PreviewDialog(
             workspace = studioWorkspace,
             mirroredFrame = mirroredFrame,
+            localCapturedFrame = localCapturedFrame,
             audioMeters = audioMeters,
             chatMessages = connectedChatMessages,
             dualTelemetry = dualTelemetry,
@@ -882,12 +892,16 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                             onProbeStunServer = { viewModel.probeStunAndRefreshConnectivity() },
                             onSwitchBroadcastMode = { viewModel.switchBroadcastMode(it) },
                             hasRecoverableSession = recoverableSession != null,
-                            onReconnectLive = handleReconnectPreviousLive
+                            onReconnectLive = handleReconnectPreviousLive,
+                            deviceTelemetry = deviceTelemetry,
+                            smartRecommendation = smartRec,
+                            onApplySmartRecommendation = { viewModel.applySmartRecommendation() }
                         )
 
                         AppSubpage.LAYERS_PANEL -> ObsSceneStudioScreen(
                             workspace = studioWorkspace,
                             mirroredFrame = mirroredFrame,
+                            localCapturedFrame = localCapturedFrame,
                             audioMeters = audioMeters,
                             chatMessages = connectedChatMessages,
                             dualTelemetry = dualTelemetry,
@@ -1120,7 +1134,11 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                             onStartWifiDirectHost = { ensureWifiDirectPermissionAndRun { viewModel.startWifiDirectHost() } },
                             onStopWifiDirectHost = { viewModel.stopWifiDirectHost() },
                             onProbeStunServer = { viewModel.probeStunAndRefreshConnectivity() },
-                            onSharePhone1Screen = requestSelectGameCapture
+                            onSharePhone1Screen = requestSelectGameCapture,
+                            localCapturedFrame = localCapturedFrame,
+                            onSetRelayServerUrl = { viewModel.setDualRelayServerUrl(it) },
+                            onStartPhone2RelayHost = { viewModel.startPhone2RelayHost(it) },
+                            onConnectPhone1ViaRelay = { url, tok -> viewModel.connectPhone1ViaRelay(url, tok) }
                         )
 
                         AppSubpage.VOICE_ROOM -> VoiceRoomScreen(
@@ -1177,6 +1195,7 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                                 onOpenVoiceRoom = { pushSubpage(AppSubpage.VOICE_ROOM) },
                                 recoverableSession = recoverableSession,
                                 mirroredFrame = mirroredFrame,
+                                localCapturedFrame = localCapturedFrame,
                                 audioMeters = audioMeters,
                                 cameraPermissionGranted = cameraPermGranted,
                                 onReconnectPreviousLive = handleReconnectPreviousLive,
@@ -1186,6 +1205,7 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                                     selectTopTab(ZroNavTab.LIVE)
                                 },
                                 onOpenFullScreenPreview = { showFullScreenPreview = true },
+                                onSwitchScene = { viewModel.switchScene(it) },
                                 connectivitySnapshot = connectivitySnapshot,
                                 onProbeStunServer = { viewModel.probeStunAndRefreshConnectivity() }
                             )
@@ -1246,7 +1266,11 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                                 onStartWifiDirectHost = { ensureWifiDirectPermissionAndRun { viewModel.startWifiDirectHost() } },
                                 onStopWifiDirectHost = { viewModel.stopWifiDirectHost() },
                                 onProbeStunServer = { viewModel.probeStunAndRefreshConnectivity() },
-                                onSharePhone1Screen = requestSelectGameCapture
+                                onSharePhone1Screen = requestSelectGameCapture,
+                                localCapturedFrame = localCapturedFrame,
+                                onSetRelayServerUrl = { viewModel.setDualRelayServerUrl(it) },
+                                onStartPhone2RelayHost = { viewModel.startPhone2RelayHost(it) },
+                                onConnectPhone1ViaRelay = { url, tok -> viewModel.connectPhone1ViaRelay(url, tok) }
                             )
 
                             ZroNavTab.LIVE -> LiveStudioScreen(

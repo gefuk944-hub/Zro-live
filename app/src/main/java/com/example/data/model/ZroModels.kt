@@ -22,10 +22,10 @@ enum class PerformanceProfile(
     PERFORMANCE(
         label = "Performance",
         shortLabel = "Perf",
-        description = "Minimal UI overhead, throttled background polling, hardware-first encoding for max game FPS.",
+        description = "Minimal UI overhead, throttled background polling, hardware-first encoding up to 40 Mbps where supported.",
         telemetryIntervalMs = 15_000L,
         meterIntervalMs = 180L,
-        maxBitrateCapKbps = 15_000,
+        maxBitrateCapKbps = 40_000,
         lightweightDsp = true,
         reduceUiAnimations = true
     ),
@@ -35,7 +35,7 @@ enum class PerformanceProfile(
         description = "Recommended stable streaming quality, full voice DSP, and smart thermal protection.",
         telemetryIntervalMs = 8_000L,
         meterIntervalMs = 85L,
-        maxBitrateCapKbps = 10_000,
+        maxBitrateCapKbps = 20_000,
         lightweightDsp = false,
         reduceUiAnimations = false
     ),
@@ -91,7 +91,8 @@ enum class VideoResolution(
     P480("480p", "480p", 854, 480, 2800),
     P720("720p HD", "720p", 1280, 720, 4500),
     P1080("1080p Full HD", "1080p", 1920, 1080, 7500),
-    P1440("1440p QHD", "1440p", 2560, 1440, 13000);
+    P1440("1440p QHD", "1440p", 2560, 1440, 14000),
+    P2160("4K UHD", "4K", 3840, 2160, 24000);
 
     companion object {
         fun fromName(raw: String?): VideoResolution =
@@ -115,7 +116,10 @@ enum class StreamPreset(
     HD_SMOOTH("HD_SMOOTH", "HD Smooth", "720p • 60 FPS", VideoResolution.P720, 60, 6000),
     FULL_HD("FULL_HD", "Full HD", "1080p • 30 FPS", VideoResolution.P1080, 30, 7500),
     FULL_HD_SMOOTH("FULL_HD_SMOOTH", "Full HD Smooth", "1080p • 60 FPS", VideoResolution.P1080, 60, 10000, requiresHighCapability = true),
-    QHD("QHD", "1440p QHD", "1440p • 30 FPS", VideoResolution.P1440, 30, 13000, requiresHighCapability = true),
+    QHD("QHD", "1440p QHD", "1440p • 30 FPS", VideoResolution.P1440, 30, 14000, requiresHighCapability = true),
+    QHD_SMOOTH("QHD_SMOOTH", "1440p Smooth", "1440p • 60 FPS", VideoResolution.P1440, 60, 18000, requiresHighCapability = true),
+    UHD_4K("UHD_4K", "4K UHD", "4K • 30 FPS", VideoResolution.P2160, 30, 24000, requiresHighCapability = true),
+    UHD_4K_SMOOTH("UHD_4K_SMOOTH", "4K 60 FPS", "4K • 60 FPS", VideoResolution.P2160, 60, 35000, requiresHighCapability = true),
     CUSTOM("CUSTOM", "Custom", "Manual config", VideoResolution.P720, 30, 4500);
 
     companion object {
@@ -516,7 +520,10 @@ data class StreamRuntimeTelemetry(
     val usingBackupServer: Boolean = false,
     val videoEncoderReady: Boolean = false,
     val audioEncoderReady: Boolean = false,
-    val bytesSentTotal: Long = 0L
+    val bytesSentTotal: Long = 0L,
+    val deviceTempCelsius: Float? = null,
+    val thermalLabel: String = "Unmeasured",
+    val activeSceneName: String = "Gameplay"
 )
 
 data class AudioMeterState(
@@ -552,6 +559,14 @@ data class DeviceTelemetry(
     val networkConnected: Boolean = false,
     val upstreamBandwidthKbps: Int = 0,
     val supports1080p60: Boolean = false,
+    val supports720p90: Boolean = false,
+    val supports1080p90: Boolean = false,
+    val supports1440p30: Boolean = false,
+    val supports1440p60: Boolean = false,
+    val supports4k30: Boolean = false,
+    val supports4k60: Boolean = false,
+    val supports90Fps: Boolean = false,
+    val maxEncoderBitrateKbps: Int = 15_000,
     val hardwareAvcEncoderName: String = "Auto",
     val supportsAppOnlyCapture: Boolean = false
 )

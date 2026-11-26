@@ -767,8 +767,9 @@ private fun BroadcastTabContent(
                         Text(if (isPaused) "Resume" else "Pause", color = Color.White)
                     }
 
+                    val liveTimer = ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec)
                     BrandGradientButton(
-                        text = "End Stream",
+                        text = if (isLive || isPaused) "End • $liveTimer" else "End Stream",
                         icon = Icons.Rounded.Stop,
                         destructive = true,
                         onClick = onRequestEndStreaming,
@@ -865,12 +866,20 @@ private fun BroadcastTabContent(
             }
         }
 
-        // Video Quality & Manual Controls
+        // Video Quality & Manual Controls (720p / 1080p / 1440p / 4K • 30 / 60 / 90 FPS • up to 40 Mbps where supported)
         item {
+            val maxBitrateKbps = remember(deviceTelemetry, performanceSettings.profile, performanceSettings.lowRamMode, streamSettings.lowDataMode) {
+                DeviceTelemetryMonitor.maxAllowedBitrateKbps(
+                    telemetry = deviceTelemetry,
+                    profile = performanceSettings.profile,
+                    lowRamMode = performanceSettings.lowRamMode || deviceTelemetry.isLowRamDevice,
+                    lowDataMode = streamSettings.lowDataMode
+                ).coerceIn(2500, 40_000)
+            }
             GlassCard(modifier = Modifier.fillMaxWidth()) {
                 SectionHeader(
                     title = "Video Quality & Encoder",
-                    subtitle = "Hardware: ${deviceTelemetry.hardwareAvcEncoderName}"
+                    subtitle = "Hardware: ${deviceTelemetry.hardwareAvcEncoderName} • Max ${String.format(Locale.US, "%.1f", maxBitrateKbps / 1000f)} Mbps"
                 )
                 Spacer(modifier = Modifier.height(12.dp))
 
@@ -881,18 +890,25 @@ private fun BroadcastTabContent(
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     VideoResolution.entries.forEach { res ->
+                        val resSupported = DeviceTelemetryMonitor.supportsResolutionAndFps(deviceTelemetry, res, 30)
                         FilterChip(
                             selected = streamSettings.resolution == res,
-                            enabled = !isRunning,
+                            enabled = !isRunning && resSupported,
                             onClick = {
+                                val nextFps = if (DeviceTelemetryMonitor.supportsResolutionAndFps(deviceTelemetry, res, streamSettings.fps)) {
+                                    streamSettings.fps
+                                } else {
+                                    30
+                                }
                                 onUpdateStreamSettings(
                                     streamSettings.copy(
                                         preset = StreamPreset.CUSTOM,
-                                        resolution = res
+                                        resolution = res,
+                                        fps = nextFps
                                     )
                                 )
                             },
-                            label = { Text(res.label) }
+                            label = { Text(if (resSupported) res.label else "${res.shortLabel} (N/A)") }
                         )
                     }
                 }
@@ -901,8 +917,12 @@ private fun BroadcastTabContent(
                 Text("Frame Rate (FPS)", style = MaterialTheme.typography.titleSmall, color = Color.White)
                 Spacer(modifier = Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(30, 60).forEach { fpsOpt ->
-                        val supported = fpsOpt == 30 || streamSettings.resolution != VideoResolution.P1080 || deviceTelemetry.supports1080p60
+                    listOf(30, 60, 90).forEach { fpsOpt ->
+                        val supported = DeviceTelemetryMonitor.supportsResolutionAndFps(
+                            deviceTelemetry,
+                            streamSettings.resolution,
+                            fpsOpt
+                        )
                         FilterChip(
                             selected = streamSettings.fps == fpsOpt,
                             enabled = !isRunning && supported,
@@ -930,17 +950,17 @@ private fun BroadcastTabContent(
                     )
                 }
                 Slider(
-                    value = streamSettings.bitrateKbps.toFloat(),
+                    value = streamSettings.bitrateKbps.coerceIn(1000, maxBitrateKbps).toFloat(),
                     onValueChange = {
-                        val rounded = (it / 250f).toInt() * 250
+                        val rounded = (it / 500f).toInt() * 500
                         onUpdateStreamSettings(
                             streamSettings.copy(
                                 preset = StreamPreset.CUSTOM,
-                                bitrateKbps = rounded.coerceIn(1000, 15000)
+                                bitrateKbps = rounded.coerceIn(1000, maxBitrateKbps)
                             )
                         )
                     },
-                    valueRange = 1000f..15000f,
+                    valueRange = 1000f..maxBitrateKbps.toFloat(),
                     enabled = !isRunning,
                     colors = SliderDefaults.colors(thumbColor = ZroCobalt, activeTrackColor = ZroCobalt)
                 )

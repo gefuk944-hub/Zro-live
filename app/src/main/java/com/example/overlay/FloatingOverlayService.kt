@@ -23,20 +23,21 @@ import com.example.data.model.OverlayCorner
 import com.example.data.model.StreamLifecycleState
 import com.example.streaming.StreamNotificationManager
 import com.example.streaming.ZroStreamCoordinator
+import com.example.studio.SceneSlot
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import java.util.Locale
 import kotlin.math.abs
 
 /**
- * Lightweight, memory-efficient floating gaming overlay (zero heavy Compose overhead in overlay window)
- * rendered over games via SYSTEM_ALERT_WINDOW after explicit user consent.
- * - Movable floating badge showing Zro live mark, live pulse dot, duration, and FPS/network telemetry.
- * - Compact expandable control drawer: Stream status, Start/Stop, Mic Mute, Game Audio, Team Voice,
- *   Chat shortcut, Voice Room shortcut, Hide Overlay, Close Overlay.
+ * Lightweight, memory-efficient floating live-control button rendered over games via SYSTEM_ALERT_WINDOW.
+ * - Floating pill: live pulse dot, ZRO mark, live timer (HH:MM:SS), and real phone temperature.
+ * - Expandable drawer: Start / Stop Live, Pause / Resume, Screen 1 / Screen 2 / Screen 3 / Screen 4 switcher,
+ *   Mic / Game / Team quick toggles, Open Chat, Hide, and Close.
  */
 class FloatingOverlayService : Service() {
 
@@ -53,13 +54,16 @@ class FloatingOverlayService : Service() {
 
     private var badgeDotView: View? = null
     private var badgeTimerText: TextView? = null
-    private var badgeFpsText: TextView? = null
+    private var badgeTempText: TextView? = null
     private var drawerPanel: LinearLayout? = null
     private var drawerStatusText: TextView? = null
+    private var drawerMetaText: TextView? = null
     private var drawerStreamBtn: TextView? = null
+    private var drawerPauseBtn: TextView? = null
     private var drawerMicBtn: TextView? = null
     private var drawerGameBtn: TextView? = null
     private var drawerTeamBtn: TextView? = null
+    private val sceneButtons = mutableMapOf<SceneSlot, TextView>()
 
     private var isExpanded = false
 
@@ -97,7 +101,7 @@ class FloatingOverlayService : Service() {
         val overlaySettings = ZroStreamCoordinator.currentOverlaySettings
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            alpha = overlaySettings.opacity.coerceIn(0.4f, 1.0f)
+            alpha = overlaySettings.opacity.coerceIn(0.45f, 1.0f)
         }
 
         // Compact floating pill badge
@@ -106,9 +110,9 @@ class FloatingOverlayService : Service() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(10), dp(7), dp(12), dp(7))
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#E610141F"))
+                setColor(Color.parseColor("#EC0D1119"))
                 cornerRadius = dp(999).toFloat()
-                setStroke(dp(1), Color.parseColor("#803B82F6"))
+                setStroke(dp(1), Color.parseColor("#882563EB"))
             }
         }
 
@@ -131,7 +135,7 @@ class FloatingOverlayService : Service() {
 
         val timerTv = TextView(this).apply {
             text = ""
-            setTextColor(Color.parseColor("#CBD5E1"))
+            setTextColor(Color.parseColor("#E2E8F0"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.MONOSPACE
             setPadding(dp(6), 0, 0, 0)
@@ -139,30 +143,30 @@ class FloatingOverlayService : Service() {
         badgeTimerText = timerTv
         badge.addView(timerTv)
 
-        val fpsTv = TextView(this).apply {
+        val tempTv = TextView(this).apply {
             text = ""
-            setTextColor(Color.parseColor("#60A5FA"))
+            setTextColor(Color.parseColor("#93C5FD"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
             typeface = Typeface.MONOSPACE
             setPadding(dp(6), 0, 0, 0)
         }
-        badgeFpsText = fpsTv
-        badge.addView(fpsTv)
+        badgeTempText = tempTv
+        badge.addView(tempTv)
 
         root.addView(badge)
 
-        // Expandable compact control panel
+        // Expandable compact studio control drawer
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
-            setPadding(dp(12), dp(10), dp(12), dp(10))
+            setPadding(dp(10), dp(10), dp(10), dp(10))
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#F20B0F19"))
-                cornerRadius = dp(16).toFloat()
-                setStroke(dp(1), Color.parseColor("#663B82F6"))
+                setColor(Color.parseColor("#F50B0F17"))
+                cornerRadius = dp(14).toFloat()
+                setStroke(dp(1), Color.parseColor("#662563EB"))
             }
         }
-        val panelParams = LinearLayout.LayoutParams(dp(210), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+        val panelParams = LinearLayout.LayoutParams(dp(236), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             topMargin = dp(6)
         }
 
@@ -171,73 +175,158 @@ class FloatingOverlayService : Service() {
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, 0, 0, dp(8))
         }
         drawerStatusText = statusTv
         panel.addView(statusTv)
 
-        val streamBtn = createDrawerActionButton("Start / Open Stream", "#2563EB") {
+        val metaTv = TextView(this).apply {
+            text = "Temp: -- • Screen 1"
+            setTextColor(Color.parseColor("#94A3B8"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            typeface = Typeface.MONOSPACE
+            setPadding(0, dp(2), 0, dp(8))
+        }
+        drawerMetaText = metaTv
+        panel.addView(metaTv)
+
+        // Primary Row: Start/Stop + Pause/Resume
+        val primaryRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(6) }
+        }
+        val streamBtn = createCompactTile("Start Live", "#2563EB") {
             val state = ZroStreamCoordinator.telemetry.value.state
-            if (state == StreamLifecycleState.LIVE || state == StreamLifecycleState.PAUSED) {
+            if (state.isActive) {
                 ZroStreamCoordinator.requestStopStream(this)
             } else {
+                ZroStreamCoordinator.requestStartLiveFromOverlay()
                 openAppDestination(ZroStreamCoordinator.DeepLinkTarget.LIVE_CONTROLS)
             }
             toggleDrawer(false)
-        }
-        drawerStreamBtn = streamBtn
-        panel.addView(streamBtn)
-
-        val micBtn = createDrawerActionButton("Mic: ON", "#1E293B") {
-            ZroStreamCoordinator.emitAudioQuickAction(ZroStreamCoordinator.AudioQuickAction.TOGGLE_MIC)
-            refreshControlsText()
-        }
-        drawerMicBtn = micBtn
-        panel.addView(micBtn)
-
-        val gameBtn = createDrawerActionButton("Game Audio: ON", "#1E293B") {
-            ZroStreamCoordinator.emitAudioQuickAction(ZroStreamCoordinator.AudioQuickAction.TOGGLE_GAME)
-            refreshControlsText()
-        }
-        drawerGameBtn = gameBtn
-        panel.addView(gameBtn)
-
-        val teamBtn = createDrawerActionButton("Team Voice: ON", "#1E293B") {
-            ZroStreamCoordinator.emitAudioQuickAction(ZroStreamCoordinator.AudioQuickAction.TOGGLE_TEAM)
-            refreshControlsText()
-        }
-        drawerTeamBtn = teamBtn
-        panel.addView(teamBtn)
-
-        panel.addView(createDrawerActionButton("Open Live Chat", "#312E81") {
-            openAppDestination(ZroStreamCoordinator.DeepLinkTarget.LIVE_CHAT)
-            toggleDrawer(false)
-        })
-
-        panel.addView(createDrawerActionButton("Voice Room", "#312E81") {
-            openAppDestination(ZroStreamCoordinator.DeepLinkTarget.VOICE_ROOM)
-            toggleDrawer(false)
-        })
-
-        val bottomRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(4), 0, 0)
-        }
-        val hideBtn = createDrawerActionButton("Hide", "#1E293B") {
-            toggleDrawer(false)
         }.apply {
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.2f).apply {
                 marginEnd = dp(4)
             }
         }
-        val closeBtn = createDrawerActionButton("Close", "#7F1D1D") {
-            removeOverlay()
-            stopSelf()
+        drawerStreamBtn = streamBtn
+
+        val pauseBtn = createCompactTile("Pause", "#B45309") {
+            if (ZroStreamCoordinator.telemetry.value.state.isActive) {
+                ZroStreamCoordinator.requestPauseResumeStream(this)
+                refreshControlsText()
+            }
         }.apply {
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginStart = dp(4)
             }
         }
+        drawerPauseBtn = pauseBtn
+        primaryRow.addView(streamBtn)
+        primaryRow.addView(pauseBtn)
+        panel.addView(primaryRow)
+
+        // Screen 1 / Screen 2 / Screen 3 / Screen 4 Switcher Label
+        val sceneHeader = TextView(this).apply {
+            text = "SWITCH SCREEN"
+            setTextColor(Color.parseColor("#64748B"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+            typeface = Typeface.MONOSPACE
+            setPadding(0, dp(2), 0, dp(4))
+        }
+        panel.addView(sceneHeader)
+
+        sceneButtons.clear()
+        val sceneRow1 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(4) }
+        }
+        val s1Btn = createSceneTile(SceneSlot.GAMEPLAY_LIVE, "Screen 1 • Live", marginEndDp = 4)
+        val s2Btn = createSceneTile(SceneSlot.SHORTS_VERTICAL, "Screen 2 • Start", marginStartDp = 4)
+        sceneRow1.addView(s1Btn)
+        sceneRow1.addView(s2Btn)
+        panel.addView(sceneRow1)
+
+        val sceneRow2 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(6) }
+        }
+        val s3Btn = createSceneTile(SceneSlot.BRB_BREAK, "Screen 3 • BRB", marginEndDp = 4)
+        val s4Btn = createSceneTile(SceneSlot.ENDING_THANKS, "Screen 4 • End", marginStartDp = 4)
+        sceneRow2.addView(s3Btn)
+        sceneRow2.addView(s4Btn)
+        panel.addView(sceneRow2)
+
+        // Compact Audio Quick Row
+        val audioRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(6) }
+        }
+        val micBtn = createCompactTile("Mic", "#1E293B") {
+            ZroStreamCoordinator.emitAudioQuickAction(ZroStreamCoordinator.AudioQuickAction.TOGGLE_MIC)
+            refreshControlsText()
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(3) }
+        }
+        val gameBtn = createCompactTile("Game", "#1E293B") {
+            ZroStreamCoordinator.emitAudioQuickAction(ZroStreamCoordinator.AudioQuickAction.TOGGLE_GAME)
+            refreshControlsText()
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(2)
+                marginEnd = dp(2)
+            }
+        }
+        val teamBtn = createCompactTile("Team", "#1E293B") {
+            ZroStreamCoordinator.emitAudioQuickAction(ZroStreamCoordinator.AudioQuickAction.TOGGLE_TEAM)
+            refreshControlsText()
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(3) }
+        }
+        drawerMicBtn = micBtn
+        drawerGameBtn = gameBtn
+        drawerTeamBtn = teamBtn
+        audioRow.addView(micBtn)
+        audioRow.addView(gameBtn)
+        audioRow.addView(teamBtn)
+        panel.addView(audioRow)
+
+        // Footer Row: Studio / Hide / Close
+        val bottomRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val studioBtn = createCompactTile("Studio", "#312E81") {
+            openAppDestination(ZroStreamCoordinator.DeepLinkTarget.LIVE_CONTROLS)
+            toggleDrawer(false)
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(3) }
+        }
+        val hideBtn = createCompactTile("Hide", "#1E293B") {
+            toggleDrawer(false)
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(2)
+                marginEnd = dp(2)
+            }
+        }
+        val closeBtn = createCompactTile("Close", "#7F1D1D") {
+            removeOverlay()
+            stopSelf()
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(3) }
+        }
+        bottomRow.addView(studioBtn)
         bottomRow.addView(hideBtn)
         bottomRow.addView(closeBtn)
         panel.addView(bottomRow)
@@ -285,6 +374,35 @@ class FloatingOverlayService : Service() {
                 refreshControlsText()
             }
         }
+        scope.launch {
+            ZroStreamCoordinator.activeStudioWorkspace.collectLatest {
+                refreshControlsText()
+            }
+        }
+        scope.launch {
+            ZroStreamCoordinator.deviceTemperatureLabel.collectLatest {
+                refreshControlsText()
+            }
+        }
+    }
+
+    private fun createSceneTile(
+        slot: SceneSlot,
+        label: String,
+        marginStartDp: Int = 0,
+        marginEndDp: Int = 0
+    ): TextView {
+        val tv = createCompactTile(label, "#1E293B") {
+            ZroStreamCoordinator.requestSwitchScene(this, slot)
+            refreshControlsText()
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(marginStartDp)
+                marginEnd = dp(marginEndDp)
+            }
+        }
+        sceneButtons[slot] = tv
+        return tv
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -343,71 +461,90 @@ class FloatingOverlayService : Service() {
 
     private fun applyAppearancePreferences() {
         val cfg = ZroStreamCoordinator.currentOverlaySettings
-        rootContainer?.alpha = cfg.opacity.coerceIn(0.4f, 1.0f)
+        rootContainer?.alpha = cfg.opacity.coerceIn(0.45f, 1.0f)
     }
 
     private fun refreshControlsText() {
         val tel = ZroStreamCoordinator.telemetry.value
         val audio = ZroStreamCoordinator.currentAudioSettings
+        val workspace = ZroStreamCoordinator.activeStudioWorkspace.value
         val isLive = tel.state == StreamLifecycleState.LIVE
         val isPaused = tel.state == StreamLifecycleState.PAUSED
+        val isActive = tel.state.isActive
+        val timerStr = ZroStreamCoordinator.formatDuration(tel.durationSec)
+        val tempLabel = tel.deviceTempCelsius?.let { "${String.format(Locale.US, "%.1f", it)}°C" }
+            ?: ZroStreamCoordinator.deviceTemperatureLabel.value
 
         val dotDrawable = badgeDotView?.background as? GradientDrawable
         dotDrawable?.setColor(
             when {
                 tel.privacyShieldActive -> Color.parseColor("#10B981")
-                tel.state == StreamLifecycleState.LIVE -> Color.parseColor("#EF4444")
-                tel.state == StreamLifecycleState.PAUSED || tel.state == StreamLifecycleState.RECONNECTING -> Color.parseColor("#F59E0B")
+                isLive -> Color.parseColor("#EF4444")
+                isPaused || tel.state == StreamLifecycleState.RECONNECTING -> Color.parseColor("#F59E0B")
                 else -> Color.parseColor("#3B82F6")
             }
         )
 
-        badgeTimerText?.text = if (isLive || isPaused) ZroStreamCoordinator.formatDuration(tel.durationSec) else ""
-        badgeFpsText?.text = when {
-            tel.privacyShieldActive -> "SHIELD"
-            isLive -> "${tel.actualFps.coerceAtLeast(tel.targetFps)}fps"
-            else -> ""
-        }
+        badgeTimerText?.text = if (isLive || isPaused) timerStr else ""
+        badgeTempText?.text = if (tempLabel.isNotBlank() && tempLabel != "Unmeasured") tempLabel else ""
+        badgeTempText?.setTextColor(
+            if ((tel.deviceTempCelsius ?: 0f) >= 42f) Color.parseColor("#FCA5A5") else Color.parseColor("#93C5FD")
+        )
 
         drawerStatusText?.text = when {
-            tel.privacyShieldActive && isLive -> "PRIVACY SHIELD • Game Hidden"
-            tel.state == StreamLifecycleState.LIVE -> "LIVE (${tel.captureMode.shortLabel}) • ${ZroStreamCoordinator.formatDuration(tel.durationSec)}"
+            tel.privacyShieldActive && isLive -> "PRIVACY SHIELD • $timerStr"
+            isLive -> "LIVE • $timerStr"
             tel.state == StreamLifecycleState.SENDING_VIDEO -> "SENDING VIDEO…"
             tel.state == StreamLifecycleState.CONNECTED -> "CONNECTED TO SERVER…"
             tel.state == StreamLifecycleState.CONNECTING -> "CONNECTING…"
-            tel.state == StreamLifecycleState.PAUSED -> "PAUSED • ${ZroStreamCoordinator.formatDuration(tel.durationSec)}"
+            isPaused -> "PAUSED • $timerStr"
             tel.state == StreamLifecycleState.RECONNECTING -> "RECONNECTING…"
             tel.state == StreamLifecycleState.ERROR -> "ERROR • Check Live Setup"
-            tel.capturePreviewActive -> "PREVIEW • ${tel.captureMode.shortLabel}"
+            tel.capturePreviewActive -> "PREVIEW • Ready"
             else -> "${tel.state.displayLabel} • ${tel.resolutionLabel} ${tel.targetFps}fps"
         }
 
-        drawerStreamBtn?.text = if (isLive || isPaused) "End Stream" else "Open Live Studio"
+        drawerMetaText?.text = "Temp: $tempLabel • ${workspace.activeScene.name}"
+
+        drawerStreamBtn?.text = if (isActive) "Stop ($timerStr)" else "Start Live"
         (drawerStreamBtn?.background as? GradientDrawable)?.setColor(
-            Color.parseColor(if (isLive || isPaused) "#DC2626" else "#2563EB")
+            Color.parseColor(if (isActive) "#DC2626" else "#2563EB")
         )
 
-        drawerMicBtn?.text = if (audio.micEnabled) "Mic: ON" else "Mic: MUTED"
-        drawerGameBtn?.text = if (audio.gameAudioEnabled) "Game Audio: ON" else "Game Audio: OFF"
-        drawerTeamBtn?.text = if (audio.teamVoiceEnabled) "Team Voice: ON" else "Team Voice: OFF"
+        drawerPauseBtn?.visibility = if (isActive) View.VISIBLE else View.GONE
+        drawerPauseBtn?.text = if (isPaused) "Resume" else "Pause"
+        (drawerPauseBtn?.background as? GradientDrawable)?.setColor(
+            Color.parseColor(if (isPaused) "#059669" else "#B45309")
+        )
+
+        // Highlight currently active Screen 1–4
+        sceneButtons.forEach { (slot, btn) ->
+            val selected = workspace.activeSceneSlot == slot
+            (btn.background as? GradientDrawable)?.setColor(
+                Color.parseColor(if (selected) "#2563EB" else "#1E293B")
+            )
+        }
+
+        drawerMicBtn?.text = if (audio.micEnabled) "Mic ON" else "Mic OFF"
+        (drawerMicBtn?.background as? GradientDrawable)?.setColor(
+            Color.parseColor(if (audio.micEnabled) "#1E293B" else "#7F1D1D")
+        )
+        drawerGameBtn?.text = if (audio.gameAudioEnabled) "Game ON" else "Game OFF"
+        drawerTeamBtn?.text = if (audio.teamVoiceEnabled) "Team ON" else "Team OFF"
     }
 
-    private fun createDrawerActionButton(label: String, bgHex: String, onClick: () -> Unit): TextView {
+    private fun createCompactTile(label: String, bgHex: String, onClick: () -> Unit): TextView {
         return TextView(this).apply {
             text = label
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            setPadding(dp(10), dp(9), dp(10), dp(9))
+            setPadding(dp(6), dp(8), dp(6), dp(8))
             background = GradientDrawable().apply {
                 setColor(Color.parseColor(bgHex))
-                cornerRadius = dp(10).toFloat()
+                cornerRadius = dp(8).toFloat()
             }
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = dp(6) }
             setOnClickListener { onClick() }
         }
     }

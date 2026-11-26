@@ -36,7 +36,15 @@ import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import kotlinx.coroutines.channels.Channel
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import okio.ByteString
+import okio.ByteString.Companion.toByteString
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -119,12 +127,25 @@ class DualPhoneEngine {
     private var videoSenderJob: Job? = null
     private val latestMirrorFrameChannel = Channel<ByteArray>(capacity = Channel.CONFLATED)
 
+    // Secure Internet Relay (wss:// WebSocket via OkHttp) for mobile data & different Wi-Fi networks
+    private val relayHttpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .pingInterval(15, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
+    @Volatile private var activeRelaySocket: WebSocket? = null
+    private var relayFrameSenderJob: Job? = null
+
     private var lastConnectIp: String = ""
     private var lastConnectControlPort: Int = DualPhoneProtocol.DEFAULT_CONTROL_PORT
     private var lastConnectVideoPort: Int = DualPhoneProtocol.DEFAULT_VIDEO_PORT
     private var lastConnectToken: String = ""
     private var lastConnectDeviceName: String = "Phone 1 Gameplay"
     private var lastConnectMethod: DualConnectionMethod = DualConnectionMethod.QR_PAIRING
+    private var lastRelayServerUrl: String = ""
 
     fun setRole(role: DualPhoneRole) {
         if (_telemetry.value.role != role) {
@@ -153,6 +174,12 @@ class DualPhoneEngine {
         return ip
     }
 
+    fun setRelayServerUrl(url: String) {
+        val clean = url.trim()
+        lastRelayServerUrl = clean
+        _telemetry.update { it.copy(relayServerUrl = clean) }
+    }
+
     fun currentPairingUri(hostName: String = "Zro Studio"): String {
         val t = _telemetry.value
         val ip = t.localIp.ifBlank { discoverLocalIpv4Address() }
@@ -163,7 +190,8 @@ class DualPhoneEngine {
                 controlPort = t.hostPort,
                 videoPort = t.videoPort,
                 token = token,
-                hostName = hostName
+                hostName = hostName,
+                relayUrl = t.relayServerUrl
             )
         )
     }
@@ -187,6 +215,29 @@ class DualPhoneEngine {
         val ip = preferredIpOverride?.trim()?.takeIf { DualPhoneProtocol.isValidIpv4OrHost(it) }
             ?: discoverLocalIpv4Address()
 
+        val relayUrl = _telemetry.value.relayServerUrl.trim()
+        if (method == DualConnectionMethod.INTERNET_RELAY && !DualPhoneProtocol.isValidRelayUrl(relayUrl)) {
+            _telemetry.update {
+                it.copy(
+                    role = DualPhoneRole.PHONE2_STUDIO,
+                    connectionMethod = method,
+                    linkState = DualLinkState.ERROR,
+                    signalQualityLabel = "Relay URL Required",
+                    lastError = "Enter a valid secure WebSocket relay URL (wss://...) to connect phones over mobile data or different Wi-Fi networks."
+                )
+            }
+            return
+        }
+
+        if (method == DualConnectionMethod.INTERNET_RELAY) {
+            startPhone2RelayHost(
+                relayUrl = relayUrl,
+                hostDeviceName = hostDeviceName,
+                presetToken = token
+            )
+            return
+        }
+
         controlLoopJob = scope.launch {
             try {
                 val cServer = openServerSocket(controlPort)
@@ -208,9 +259,20 @@ class DualPhoneEngine {
                         pairingToken = token,
                         connectedDeviceName = "",
                         peerIp = "",
+                        transportModeLabel = "Direct LAN",
                         signalQualityLabel = "Waiting for Phone 1",
                         latencyMs = 0,
                         lastError = null
+                    )
+                }
+
+                // If user also configured a relay URL, keep relay standby connected simultaneously so Phone 1 can join via mobile data!
+                if (DualPhoneProtocol.isValidRelayUrl(relayUrl)) {
+                    openRelaySocket(
+                        relayUrl = relayUrl,
+                        roomToken = token,
+                        isStudioHost = true,
+                        localDeviceName = hostDeviceName
                     )
                 }
 
@@ -451,7 +513,346 @@ class DualPhoneEngine {
     }
 
     /**
-     * Phone 1 (Gameplay Client): connects to Phone 2 Studio Host via QR payload or Manual IP + Token.
+     * Phone 2 (Streaming Studio Host) over Mobile Data / Different Wi-Fi via secure wss:// WebSocket Relay.
+     */
+    fun startPhone2RelayHost(
+        relayUrl: String,
+        hostDeviceName: String = "Zro Studio (Phone 2)",
+        presetToken: String? = null
+    ) {
+        val cleanRelay = relayUrl.trim()
+        if (!DualPhoneProtocol.isValidRelayUrl(cleanRelay)) {
+            _telemetry.update {
+                it.copy(
+                    linkState = DualLinkState.ERROR,
+                    signalQualityLabel = "Relay URL Invalid",
+                    lastError = "Enter a valid wss:// relay server URL for cross-network Dual-Phone pairing."
+                )
+            }
+            return
+        }
+        disconnect(clearRole = false)
+        intentionalStop.set(false)
+        lastRelayServerUrl = cleanRelay
+        val token = presetToken?.takeIf { it.length >= 4 } ?: DualPhoneProtocol.generateSecureToken()
+        _telemetry.update {
+            it.copy(
+                role = DualPhoneRole.PHONE2_STUDIO,
+                connectionMethod = DualConnectionMethod.INTERNET_RELAY,
+                linkState = DualLinkState.HOSTING,
+                relayServerUrl = cleanRelay,
+                pairingToken = token,
+                connectedDeviceName = "",
+                peerIp = "Internet Relay",
+                transportModeLabel = "Secure WebSocket Relay",
+                signalQualityLabel = "Connecting Relay…",
+                latencyMs = 0,
+                lastError = null
+            )
+        }
+        openRelaySocket(
+            relayUrl = cleanRelay,
+            roomToken = token,
+            isStudioHost = true,
+            localDeviceName = hostDeviceName
+        )
+    }
+
+    /**
+     * Phone 1 (Gameplay Client) over Mobile Data / Different Wi-Fi via secure wss:// WebSocket Relay.
+     */
+    fun connectPhone1ViaRelay(
+        relayUrl: String,
+        token: String,
+        deviceName: String = "Phone 1 Gameplay"
+    ) {
+        val cleanRelay = relayUrl.trim()
+        val cleanToken = token.trim().uppercase()
+        if (!DualPhoneProtocol.isValidRelayUrl(cleanRelay)) {
+            _telemetry.update {
+                it.copy(
+                    linkState = DualLinkState.ERROR,
+                    lastError = "Enter a valid wss:// WebSocket relay URL."
+                )
+            }
+            return
+        }
+        if (cleanToken.length < 4) {
+            _telemetry.update {
+                it.copy(
+                    linkState = DualLinkState.ERROR,
+                    lastError = "Enter the 8-character Room Token shown on Phone 2."
+                )
+            }
+            return
+        }
+        disconnect(clearRole = false)
+        intentionalStop.set(false)
+        lastRelayServerUrl = cleanRelay
+        lastConnectToken = cleanToken
+        lastConnectDeviceName = deviceName
+        lastConnectMethod = DualConnectionMethod.INTERNET_RELAY
+
+        _telemetry.update {
+            it.copy(
+                role = DualPhoneRole.PHONE1_GAMEPLAY,
+                connectionMethod = DualConnectionMethod.INTERNET_RELAY,
+                linkState = DualLinkState.CONNECTING,
+                relayServerUrl = cleanRelay,
+                peerIp = "Internet Relay",
+                pairingToken = cleanToken,
+                transportModeLabel = "Secure WebSocket Relay",
+                signalQualityLabel = "Connecting Relay…",
+                lastError = null
+            )
+        }
+        openRelaySocket(
+            relayUrl = cleanRelay,
+            roomToken = cleanToken,
+            isStudioHost = false,
+            localDeviceName = deviceName
+        )
+    }
+
+    private fun openRelaySocket(
+        relayUrl: String,
+        roomToken: String,
+        isStudioHost: Boolean,
+        localDeviceName: String
+    ) {
+        closeRelaySocket()
+        val roleParam = if (isStudioHost) "studio" else "gameplay"
+        val endpoint = DualPhoneProtocol.buildRelayRoomEndpoint(relayUrl, roomToken, roleParam)
+        val req = Request.Builder().url(endpoint).build()
+        var lastStatMs = System.currentTimeMillis()
+        var framesInSec = 0
+        var bytesInSec = 0L
+
+        val listener = object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                activeRelaySocket = webSocket
+                if (isStudioHost) {
+                    _telemetry.update {
+                        it.copy(
+                            linkState = if (it.linkState == DualLinkState.CONNECTED) DualLinkState.CONNECTED else DualLinkState.HOSTING,
+                            transportModeLabel = if (activeControlSocket != null) "Direct LAN + Relay" else "Secure WebSocket Relay",
+                            signalQualityLabel = if (it.linkState == DualLinkState.CONNECTED) it.signalQualityLabel else "Relay Ready — Waiting for Phone 1",
+                            lastError = null
+                        )
+                    }
+                } else {
+                    webSocket.send(DualPhoneProtocol.encodeAuth(roomToken, localDeviceName))
+                    startRelayFrameSenderLoop(webSocket)
+                    _telemetry.update {
+                        it.copy(
+                            linkState = DualLinkState.CONNECTING,
+                            transportModeLabel = "Secure WebSocket Relay",
+                            signalQualityLabel = "Authenticating via Relay…"
+                        )
+                    }
+                }
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                val obj = runCatching { JSONObject(text) }.getOrNull() ?: return
+                when (obj.optString("type")) {
+                    DualPhoneProtocol.MSG_AUTH -> {
+                        if (isStudioHost) {
+                            val providedToken = obj.optString("token", "")
+                            val valid = MessageDigest.isEqual(
+                                providedToken.trim().uppercase().toByteArray(Charsets.UTF_8),
+                                roomToken.trim().uppercase().toByteArray(Charsets.UTF_8)
+                            )
+                            if (!valid) {
+                                webSocket.send(DualPhoneProtocol.encodeAuthFail("Invalid pairing token."))
+                                return
+                            }
+                            val peerName = obj.optString("deviceName", "Phone 1 Gameplay")
+                            webSocket.send(DualPhoneProtocol.encodeAuthOk(localDeviceName, 0))
+                            _telemetry.update {
+                                it.copy(
+                                    linkState = DualLinkState.CONNECTED,
+                                    connectedDeviceName = peerName,
+                                    peerIp = "Internet Relay",
+                                    transportModeLabel = "Secure WebSocket Relay",
+                                    signalQualityLabel = "Relay Connected",
+                                    lastError = null
+                                )
+                            }
+                            startRelayPingLoop(webSocket)
+                        }
+                    }
+                    DualPhoneProtocol.MSG_AUTH_OK -> {
+                        if (!isStudioHost) {
+                            val studioName = obj.optString("deviceName", "Zro Studio (Phone 2)")
+                            _telemetry.update {
+                                it.copy(
+                                    linkState = DualLinkState.CONNECTED,
+                                    connectedDeviceName = studioName,
+                                    transportModeLabel = "Secure WebSocket Relay",
+                                    signalQualityLabel = "Relay Connected",
+                                    lastError = null
+                                )
+                            }
+                            startRelayPingLoop(webSocket)
+                        }
+                    }
+                    DualPhoneProtocol.MSG_AUTH_FAIL -> {
+                        val reason = obj.optString("reason", "Relay authentication failed.")
+                        intentionalStop.set(true)
+                        _telemetry.update {
+                            it.copy(
+                                linkState = DualLinkState.ERROR,
+                                signalQualityLabel = "Auth Failed",
+                                lastError = reason
+                            )
+                        }
+                        closeRelaySocket()
+                    }
+                    DualPhoneProtocol.MSG_PING -> {
+                        webSocket.send(DualPhoneProtocol.encodePong(obj.optLong("ts", System.currentTimeMillis())))
+                    }
+                    DualPhoneProtocol.MSG_PONG -> {
+                        val sentTs = obj.optLong("ts", 0L)
+                        if (sentTs > 0L) {
+                            val rtt = (System.currentTimeMillis() - sentTs).toInt().coerceAtLeast(1)
+                            val q = when {
+                                rtt <= 45 -> "Relay Excellent (${rtt}ms)"
+                                rtt <= 110 -> "Relay Good (${rtt}ms)"
+                                rtt <= 220 -> "Relay Fair (${rtt}ms)"
+                                else -> "Relay High Latency (${rtt}ms)"
+                            }
+                            _telemetry.update { it.copy(latencyMs = rtt, signalQualityLabel = q) }
+                        }
+                    }
+                    DualPhoneProtocol.MSG_TELEMETRY -> {
+                        _telemetry.update {
+                            it.copy(
+                                mirroredResolution = obj.optString("res", it.mirroredResolution),
+                                mirroredFps = obj.optInt("fps", it.mirroredFps),
+                                uploadKbps = obj.optInt("kbps", it.uploadKbps),
+                                packetLossPercent = obj.optDouble("loss", it.packetLossPercent.toDouble()).toFloat()
+                            )
+                        }
+                    }
+                    DualPhoneProtocol.MSG_COMMAND -> {
+                        _incomingCommands.tryEmit(DualPhoneProtocol.decodeCommand(obj))
+                    }
+                }
+            }
+
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                if (!isStudioHost) return
+                val arr = bytes.toByteArray()
+                if (arr.isEmpty() || arr.size > MAX_MIRROR_FRAME_BYTES) return
+                val bmp = runCatching { BitmapFactory.decodeByteArray(arr, 0, arr.size) }.getOrNull() ?: return
+                _mirroredFrame.value = bmp
+                framesInSec++
+                bytesInSec += arr.size
+                val now = System.currentTimeMillis()
+                if (now - lastStatMs >= 1000L) {
+                    val kbps = ((bytesInSec * 8L) / 1000L).toInt()
+                    _telemetry.update {
+                        it.copy(
+                            mirroredFps = framesInSec,
+                            mirroredResolution = "${bmp.width}x${bmp.height}",
+                            uploadKbps = kbps,
+                            lastFrameEpochMs = now
+                        )
+                    }
+                    framesInSec = 0
+                    bytesInSec = 0L
+                    lastStatMs = now
+                }
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (activeRelaySocket == webSocket) activeRelaySocket = null
+                relayFrameSenderJob?.cancel()
+                if (!intentionalStop.get() && activeControlSocket == null) {
+                    _mirroredFrame.value = null
+                    _telemetry.update {
+                        it.copy(
+                            linkState = if (it.autoReconnect) DualLinkState.RECONNECTING else DualLinkState.ERROR,
+                            signalQualityLabel = "Relay Disconnected",
+                            lastError = t.localizedMessage ?: "Unable to reach relay server ($relayUrl)."
+                        )
+                    }
+                    if (_telemetry.value.autoReconnect) {
+                        scheduleRelayReconnect(relayUrl, roomToken, isStudioHost, localDeviceName)
+                    }
+                }
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (activeRelaySocket == webSocket) activeRelaySocket = null
+                relayFrameSenderJob?.cancel()
+                if (!intentionalStop.get() && activeControlSocket == null) {
+                    _mirroredFrame.value = null
+                    if (_telemetry.value.autoReconnect) {
+                        scheduleRelayReconnect(relayUrl, roomToken, isStudioHost, localDeviceName)
+                    }
+                }
+            }
+        }
+        activeRelaySocket = relayHttpClient.newWebSocket(req, listener)
+    }
+
+    private fun startRelayPingLoop(ws: WebSocket) {
+        pingJob?.cancel()
+        pingJob = scope.launch {
+            while (isActive && activeRelaySocket == ws && !intentionalStop.get()) {
+                val ok = ws.send(DualPhoneProtocol.encodePing(System.currentTimeMillis()))
+                if (!ok) break
+                delay(2000L)
+            }
+        }
+    }
+
+    private fun startRelayFrameSenderLoop(ws: WebSocket) {
+        relayFrameSenderJob?.cancel()
+        relayFrameSenderJob = scope.launch {
+            for (jpegBytes in latestMirrorFrameChannel) {
+                if (intentionalStop.get() || activeRelaySocket != ws) break
+                // Backpressure guard: drop stale frame if relay outbound buffer exceeds 512 KB to keep latency low!
+                if (ws.queueSize() > 512 * 1024L) {
+                    droppedMirrorFrames.incrementAndGet()
+                    continue
+                }
+                val sent = runCatching { ws.send(jpegBytes.toByteString(0, jpegBytes.size)) }.getOrDefault(false)
+                if (sent) {
+                    framesCounter.incrementAndGet()
+                    bytesCounter.addAndGet(jpegBytes.size.toLong())
+                } else {
+                    droppedMirrorFrames.incrementAndGet()
+                }
+            }
+        }
+    }
+
+    private fun scheduleRelayReconnect(
+        relayUrl: String,
+        roomToken: String,
+        isStudioHost: Boolean,
+        localDeviceName: String
+    ) {
+        reconnectJob?.cancel()
+        reconnectJob = scope.launch {
+            delay(2500L + Random.nextLong(200L, 800L))
+            if (!intentionalStop.get() && activeControlSocket == null) {
+                openRelaySocket(relayUrl, roomToken, isStudioHost, localDeviceName)
+            }
+        }
+    }
+
+    private fun closeRelaySocket() {
+        relayFrameSenderJob?.cancel(); relayFrameSenderJob = null
+        runCatching { activeRelaySocket?.close(1000, "Disconnected") }
+        activeRelaySocket = null
+    }
+
+    /**
+     * Phone 1 (Gameplay Client): connects to Phone 2 Studio Host via QR payload, Manual IP, or Mobile Data Relay.
      */
     fun connectPhone1ToStudio(
         ip: String,
@@ -459,15 +860,23 @@ class DualPhoneEngine {
         videoPort: Int = DualPhoneProtocol.DEFAULT_VIDEO_PORT,
         token: String,
         deviceName: String = "Phone 1 Gameplay",
-        method: DualConnectionMethod = _telemetry.value.connectionMethod
+        method: DualConnectionMethod = _telemetry.value.connectionMethod,
+        relayUrl: String = _telemetry.value.relayServerUrl
     ) {
         val cleanIp = ip.trim()
         val cleanToken = token.trim().uppercase()
+        val cleanRelay = relayUrl.trim()
+
+        if (method == DualConnectionMethod.INTERNET_RELAY || (cleanIp.isBlank() && DualPhoneProtocol.isValidRelayUrl(cleanRelay))) {
+            connectPhone1ViaRelay(cleanRelay, cleanToken, deviceName)
+            return
+        }
+
         if (!DualPhoneProtocol.isValidIpv4OrHost(cleanIp)) {
             _telemetry.update {
                 it.copy(
                     linkState = DualLinkState.ERROR,
-                    lastError = "Enter a valid IPv4 address (e.g. 192.168.1.24)."
+                    lastError = "Enter a valid IPv4 address (e.g. 192.168.1.24) or switch to Mobile Data / Relay."
                 )
             }
             return
@@ -490,6 +899,7 @@ class DualPhoneEngine {
         lastConnectToken = cleanToken
         lastConnectDeviceName = deviceName
         lastConnectMethod = method
+        lastRelayServerUrl = cleanRelay
 
         startPhone1ConnectionAttempt(attempt = 1)
     }
@@ -582,6 +992,17 @@ class DualPhoneEngine {
                 }
             } catch (e: Exception) {
                 if (!intentionalStop.get()) {
+                    // Automatic Mobile-Data / Different-Wi-Fi fallback: if direct LAN timed out and a relay URL is configured, switch to Relay!
+                    if (DualPhoneProtocol.isValidRelayUrl(lastRelayServerUrl)) {
+                        Log.i(TAG, "Direct LAN unavailable (${e.message}); falling back to secure WebSocket relay")
+                        openRelaySocket(
+                            relayUrl = lastRelayServerUrl,
+                            roomToken = lastConnectToken,
+                            isStudioHost = false,
+                            localDeviceName = lastConnectDeviceName
+                        )
+                        return@launch
+                    }
                     Log.w(TAG, "Phone 1 connection interrupted: ${e.message}")
                     _telemetry.update {
                         it.copy(
@@ -599,7 +1020,7 @@ class DualPhoneEngine {
                 runCatching { socket?.close() }
                 closeVideoChannel()
 
-                if (!intentionalStop.get() && _telemetry.value.autoReconnect && attempt < 20) {
+                if (!intentionalStop.get() && activeRelaySocket == null && _telemetry.value.autoReconnect && attempt < 20) {
                     scheduleAutoReconnect(attempt + 1)
                 }
             }
@@ -676,7 +1097,7 @@ class DualPhoneEngine {
      */
     fun pushMirroredFrameJpeg(jpegBytes: ByteArray, width: Int, height: Int, minIntervalMs: Long = 33L) {
         if (_telemetry.value.linkState != DualLinkState.CONNECTED) return
-        if (videoDataOut == null) return
+        if (videoDataOut == null && activeRelaySocket == null) return
         val now = System.currentTimeMillis()
         if (now - lastFrameSentMs.get() < minIntervalMs) return
         lastFrameSentMs.set(now)
@@ -685,37 +1106,52 @@ class DualPhoneEngine {
     }
 
     fun sendRemoteCommand(cmd: DualRemoteCommand): Boolean {
-        val writer = controlWriter ?: return false
-        scope.launch {
-            writeLineSafe(writer, DualPhoneProtocol.encodeCommand(cmd))
+        val encoded = DualPhoneProtocol.encodeCommand(cmd)
+        val writer = controlWriter
+        if (writer != null) {
+            scope.launch { writeLineSafe(writer, encoded) }
+            return true
         }
-        return true
+        val relay = activeRelaySocket ?: return false
+        return runCatching { relay.send(encoded) }.getOrDefault(false)
     }
 
     fun sendTelemetrySnapshot(resolution: String, fps: Int, uploadKbps: Int, packetLossPercent: Float) {
-        val writer = controlWriter ?: return
-        scope.launch {
-            writeLineSafe(writer, DualPhoneProtocol.encodeTelemetry(resolution, fps, uploadKbps, packetLossPercent))
+        val encoded = DualPhoneProtocol.encodeTelemetry(resolution, fps, uploadKbps, packetLossPercent)
+        val writer = controlWriter
+        if (writer != null) {
+            scope.launch { writeLineSafe(writer, encoded) }
+            return
         }
+        activeRelaySocket?.let { ws -> runCatching { ws.send(encoded) } }
     }
 
     fun reconnect() {
         val t = _telemetry.value
         when (t.role) {
-            DualPhoneRole.PHONE2_STUDIO -> startPhone2Host(
-                controlPort = t.hostPort,
-                videoPort = t.videoPort,
-                method = t.connectionMethod
-            )
+            DualPhoneRole.PHONE2_STUDIO -> {
+                if (t.connectionMethod == DualConnectionMethod.INTERNET_RELAY && DualPhoneProtocol.isValidRelayUrl(t.relayServerUrl)) {
+                    startPhone2RelayHost(t.relayServerUrl, presetToken = t.pairingToken.takeIf { it.length >= 4 })
+                } else {
+                    startPhone2Host(
+                        controlPort = t.hostPort,
+                        videoPort = t.videoPort,
+                        method = t.connectionMethod
+                    )
+                }
+            }
             DualPhoneRole.PHONE1_GAMEPLAY -> {
-                if (lastConnectIp.isNotBlank() && lastConnectToken.isNotBlank()) {
+                if (lastConnectMethod == DualConnectionMethod.INTERNET_RELAY && DualPhoneProtocol.isValidRelayUrl(lastRelayServerUrl) && lastConnectToken.isNotBlank()) {
+                    connectPhone1ViaRelay(lastRelayServerUrl, lastConnectToken, lastConnectDeviceName)
+                } else if (lastConnectIp.isNotBlank() && lastConnectToken.isNotBlank()) {
                     connectPhone1ToStudio(
                         ip = lastConnectIp,
                         controlPort = lastConnectControlPort,
                         videoPort = lastConnectVideoPort,
                         token = lastConnectToken,
                         deviceName = lastConnectDeviceName,
-                        method = lastConnectMethod
+                        method = lastConnectMethod,
+                        relayUrl = lastRelayServerUrl
                     )
                 }
             }
@@ -729,6 +1165,7 @@ class DualPhoneEngine {
         pingJob?.cancel(); pingJob = null
         controlLoopJob?.cancel(); controlLoopJob = null
         videoLoopJob?.cancel(); videoLoopJob = null
+        closeRelaySocket()
 
         runCatching { activeControlSocket?.close() }; activeControlSocket = null
         controlWriter = null

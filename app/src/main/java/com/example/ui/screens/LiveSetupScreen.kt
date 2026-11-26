@@ -71,8 +71,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.data.model.AudioSettings
+import com.example.data.model.DeviceTelemetry
 import com.example.data.model.LiveBroadcastMode
+import com.example.data.model.PerformanceProfile
 import com.example.data.model.RtmpTestResult
+import com.example.data.model.SmartRecommendation
 import com.example.data.model.StreamLifecycleState
 import com.example.data.model.VideoResolution
 import com.example.data.model.StreamRuntimeTelemetry
@@ -86,8 +89,10 @@ import com.example.studio.DualPhoneTelemetry
 import com.example.studio.SceneSlot
 import com.example.studio.StudioWorkspaceState
 import com.example.telemetry.AppConnectivitySnapshot
+import com.example.telemetry.DeviceTelemetryMonitor
 import com.example.ui.components.BrandGradientButton
 import com.example.ui.components.ConnectivityStatusBar
+import com.example.ui.components.DeviceTempChip
 import com.example.ui.components.GlassCard
 import com.example.ui.components.LiveStatusBadge
 import com.example.ui.components.ProSubpageTopBar
@@ -131,7 +136,10 @@ fun LiveSetupScreen(
         onUpdateStreamSettings(streamSettings.switchBroadcastMode(mode))
     },
     hasRecoverableSession: Boolean = false,
-    onReconnectLive: () -> Unit = onStartLive
+    onReconnectLive: () -> Unit = onStartLive,
+    deviceTelemetry: DeviceTelemetry = DeviceTelemetry(),
+    smartRecommendation: SmartRecommendation? = null,
+    onApplySmartRecommendation: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val isLive = streamTelemetry.state == StreamLifecycleState.LIVE ||
@@ -170,14 +178,23 @@ fun LiveSetupScreen(
             onBack = onBack,
             backTestTag = "live_setup_back_button",
             trailing = {
-                LiveStatusBadge(
-                    isLive = streamTelemetry.state == StreamLifecycleState.LIVE,
-                    isPaused = streamTelemetry.state == StreamLifecycleState.PAUSED,
-                    isReconnecting = streamTelemetry.state == StreamLifecycleState.RECONNECTING,
-                    brbActive = workspace.brbActive,
-                    lifecycleState = effectiveBadgeState,
-                    durationText = if (showTimer) ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec) else ""
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    DeviceTempChip(
+                        tempText = DeviceTelemetryMonitor.formatTemperature(deviceTelemetry),
+                        isOverheating = deviceTelemetry.isOverheating || streamTelemetry.thermalThrottled
+                    )
+                    LiveStatusBadge(
+                        isLive = streamTelemetry.state == StreamLifecycleState.LIVE,
+                        isPaused = streamTelemetry.state == StreamLifecycleState.PAUSED,
+                        isReconnecting = streamTelemetry.state == StreamLifecycleState.RECONNECTING,
+                        brbActive = workspace.brbActive,
+                        lifecycleState = effectiveBadgeState,
+                        durationText = if (showTimer) ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec) else ""
+                    )
+                }
             }
         )
 
@@ -762,33 +779,102 @@ fun LiveSetupScreen(
                 }
             }
 
-            // 3. Video Quality (Resolution / FPS / Bitrate — saved independently per mode)
+            // 3. Video Quality (720p / 1080p / 1440p / 4K • 30 / 60 / 90 FPS • up to 40 Mbps where hardware supports)
             item {
+                val maxSupportedBitrate = remember(deviceTelemetry, streamSettings.lowDataMode) {
+                    DeviceTelemetryMonitor.maxAllowedBitrateKbps(
+                        telemetry = deviceTelemetry,
+                        profile = PerformanceProfile.PERFORMANCE,
+                        lowRamMode = deviceTelemetry.isLowRamDevice,
+                        lowDataMode = streamSettings.lowDataMode
+                    ).coerceIn(2500, 40_000)
+                }
                 GlassCard {
                     SectionHeader(
                         title = "Video Encoder (${streamSettings.broadcastMode.shortLabel})",
                         subtitle = "${streamSettings.effectiveResolutionDisplay()} • ${streamSettings.fps} FPS • ${"%.1f".format(streamSettings.bitrateKbps / 1000f)} Mbps"
                     )
+                    if (smartRecommendation != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = ZroEmerald.copy(alpha = 0.12f),
+                            border = BorderStroke(1.dp, ZroEmerald.copy(alpha = 0.45f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("live_setup_smart_recommend_card")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "AUTO-RECOMMENDED: ${smartRecommendation.resolution.shortLabel} • ${smartRecommendation.fps} FPS • ${"%.1f".format(smartRecommendation.bitrateKbps / 1000f)} Mbps",
+                                        fontSize = 10.sp,
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ZroEmerald
+                                    )
+                                    Text(
+                                        text = smartRecommendation.rationale,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                OutlinedButton(
+                                    onClick = onApplySmartRecommendation,
+                                    shape = RoundedCornerShape(6.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.testTag("live_setup_apply_smart_btn")
+                                ) {
+                                    Text("Apply", fontSize = 11.sp, color = Color.White)
+                                }
+                            }
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(8.dp))
                     val mainResolutions = listOf(
-                        VideoResolution.P480,
                         VideoResolution.P720,
-                        VideoResolution.P1080
+                        VideoResolution.P1080,
+                        VideoResolution.P1440,
+                        VideoResolution.P2160
                     )
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         mainResolutions.forEach { res ->
+                            val hwOk = DeviceTelemetryMonitor.supportsResolutionAndFps(deviceTelemetry, res, 30)
                             FilterChip(
                                 selected = streamSettings.resolution == res,
-                                onClick = { onUpdateStreamSettings(streamSettings.copy(resolution = res)) },
-                                label = { Text(res.shortLabel, style = MaterialTheme.typography.labelSmall) },
+                                enabled = hwOk && !isLive,
+                                onClick = {
+                                    val safeFps = if (DeviceTelemetryMonitor.supportsResolutionAndFps(deviceTelemetry, res, streamSettings.fps)) {
+                                        streamSettings.fps
+                                    } else {
+                                        30
+                                    }
+                                    onUpdateStreamSettings(streamSettings.copy(resolution = res, fps = safeFps))
+                                },
+                                label = {
+                                    Text(
+                                        text = if (hwOk) res.shortLabel else "${res.shortLabel} N/A",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1
+                                    )
+                                },
                                 colors = FilterChipDefaults.filterChipColors(
                                     selectedContainerColor = ZroCobalt.copy(alpha = 0.22f),
                                     selectedLabelColor = Color.White
                                 ),
-                                modifier = Modifier.weight(1f)
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("live_setup_res_${res.name.lowercase()}")
                             )
                         }
                     }
@@ -797,16 +883,30 @@ fun LiveSetupScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        listOf(30, 60).forEach { fps ->
+                        listOf(30, 60, 90).forEach { fps ->
+                            val fpsSupported = DeviceTelemetryMonitor.supportsResolutionAndFps(
+                                deviceTelemetry,
+                                streamSettings.resolution,
+                                fps
+                            )
                             FilterChip(
                                 selected = streamSettings.fps == fps,
+                                enabled = fpsSupported && !isLive,
                                 onClick = { onUpdateStreamSettings(streamSettings.copy(fps = fps)) },
-                                label = { Text("$fps FPS", style = MaterialTheme.typography.labelSmall) },
+                                label = {
+                                    Text(
+                                        text = if (fpsSupported) "$fps FPS" else "$fps (N/A)",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1
+                                    )
+                                },
                                 colors = FilterChipDefaults.filterChipColors(
                                     selectedContainerColor = ZroCobalt.copy(alpha = 0.22f),
                                     selectedLabelColor = Color.White
                                 ),
-                                modifier = Modifier.weight(1f)
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("live_setup_fps_$fps")
                             )
                         }
                     }
@@ -815,7 +915,11 @@ fun LiveSetupScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text("Video Bitrate", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            text = "Video Bitrate (Max ${"%.1f".format(maxSupportedBitrate / 1000f)} Mbps)",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                         Text(
                             text = "${"%.1f".format(streamSettings.bitrateKbps / 1000f)} Mbps",
                             style = MaterialTheme.typography.labelMedium,
@@ -824,12 +928,21 @@ fun LiveSetupScreen(
                         )
                     }
                     Slider(
-                        value = streamSettings.bitrateKbps.toFloat(),
+                        value = streamSettings.bitrateKbps.coerceIn(1000, maxSupportedBitrate).toFloat(),
                         onValueChange = { kbps ->
-                            onUpdateStreamSettings(streamSettings.copy(bitrateKbps = (kbps / 250f).toInt() * 250))
+                            onUpdateStreamSettings(
+                                streamSettings.copy(bitrateKbps = ((kbps / 500f).toInt() * 500).coerceIn(1000, maxSupportedBitrate))
+                            )
                         },
-                        valueRange = 1000f..12000f,
+                        valueRange = 1000f..maxSupportedBitrate.toFloat(),
+                        enabled = !isLive,
                         colors = SliderDefaults.colors(thumbColor = ZroCobalt, activeTrackColor = ZroCobalt)
+                    )
+                    Text(
+                        text = "Hardware: ${deviceTelemetry.hardwareAvcEncoderName} • Temp: ${DeviceTelemetryMonitor.formatTemperature(deviceTelemetry)} • Auto thermal step-down active",
+                        fontSize = 10.sp,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        color = if (deviceTelemetry.isOverheating) ZroAmber else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -915,8 +1028,14 @@ fun LiveSetupScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                val liveTimer = ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec)
                 BrandGradientButton(
-                    text = if (isLive) "STOP LIVE STREAM" else "START LIVE",
+                    text = when {
+                        streamTelemetry.state == StreamLifecycleState.LIVE -> "STOP LIVE • $liveTimer"
+                        streamTelemetry.state == StreamLifecycleState.PAUSED -> "STOP LIVE (PAUSED • $liveTimer)"
+                        isLive -> "CONNECTING… • STOP"
+                        else -> "START LIVE"
+                    },
                     icon = if (isLive) Icons.Rounded.Stop else Icons.Rounded.PlayArrow,
                     destructive = isLive,
                     onClick = if (isLive) onStopLive else onStartLive,

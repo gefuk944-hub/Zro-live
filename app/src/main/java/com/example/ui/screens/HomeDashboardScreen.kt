@@ -60,17 +60,22 @@ import com.example.data.model.StreamRuntimeTelemetry
 import com.example.data.model.StreamSessionDoc
 import com.example.data.model.VoiceRoomDoc
 import com.example.data.model.ZroAppSettings
+import com.example.streaming.ZroStreamCoordinator
 import com.example.studio.DualLinkState
 import com.example.studio.DualPhoneTelemetry
+import com.example.studio.SceneSlot
 import com.example.studio.StudioWorkspaceState
 import com.example.telemetry.ActiveLiveSessionSnapshot
 import com.example.telemetry.AppConnectivitySnapshot
+import com.example.telemetry.DeviceTelemetryMonitor
 import com.example.ui.components.BrandGradientButton
 import com.example.ui.components.ConnectivityStatusBar
+import com.example.ui.components.DeviceTempChip
 import com.example.ui.components.GlassCard
 import com.example.ui.components.LiveStatusBadge
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StudioCanvasPreview
+import com.example.ui.components.ZroBrandLogoMark
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.ZroAmber
 import com.example.ui.theme.ZroCobalt
@@ -108,12 +113,14 @@ fun HomeDashboardScreen(
     onOpenVoiceRoom: () -> Unit,
     recoverableSession: ActiveLiveSessionSnapshot? = null,
     mirroredFrame: Bitmap? = null,
+    localCapturedFrame: Bitmap? = null,
     audioMeters: AudioMeterState = AudioMeterState(),
     cameraPermissionGranted: Boolean = false,
     onReconnectPreviousLive: () -> Unit = {},
     onDismissRecovery: () -> Unit = {},
     onOpenLiveManager: () -> Unit = {},
     onOpenFullScreenPreview: () -> Unit = {},
+    onSwitchScene: (SceneSlot) -> Unit = {},
     connectivitySnapshot: AppConnectivitySnapshot = AppConnectivitySnapshot(),
     onProbeStunServer: () -> Unit = {}
 ) {
@@ -136,38 +143,57 @@ fun HomeDashboardScreen(
         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // 1. Minimal Broadcast Header
+        // 1. Minimal Broadcast Header with Custom Zro Brand Logo & Real Phone Temperature
         item {
+            val tempLabel = DeviceTelemetryMonitor.formatTemperature(deviceTelemetry)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Zro live",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    ZroBrandLogoMark(size = 36.dp)
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Zro live",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            maxLines = 1
+                        )
+                        Text(
+                            text = "${settings.stream.broadcastMode.shortLabel} • ${settings.stream.resolution.shortLabel} • ${settings.stream.fps} FPS • ${"%.1f".format(settings.stream.bitrateKbps / 1000f)}M",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    DeviceTempChip(
+                        tempText = tempLabel,
+                        isOverheating = deviceTelemetry.isOverheating || streamTelemetry.thermalThrottled
                     )
-                    val tempStr = deviceTelemetry.batteryTempCelsius?.let { " • ${it.toInt()}°C" } ?: ""
-                    Text(
-                        text = "${settings.stream.resolution.shortLabel} • ${settings.stream.fps} FPS • ${"%.1f".format(settings.stream.bitrateKbps / 1000f)} Mbps$tempStr",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = JetBrainsMonoFontFamily,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    LiveStatusBadge(
+                        isLive = isLive,
+                        isPaused = isPaused,
+                        isReconnecting = isReconnecting,
+                        privacyShield = streamTelemetry.privacyShieldActive,
+                        brbActive = workspace.brbActive,
+                        reducedMotion = reducedMotion,
+                        lifecycleState = streamTelemetry.state,
+                        durationText = if (isLive || isPaused) ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec) else ""
                     )
                 }
-                LiveStatusBadge(
-                    isLive = isLive,
-                    isPaused = isPaused,
-                    isReconnecting = isReconnecting,
-                    privacyShield = streamTelemetry.privacyShieldActive,
-                    brbActive = workspace.brbActive,
-                    reducedMotion = reducedMotion,
-                    lifecycleState = streamTelemetry.state,
-                    durationText = if (isLive || isPaused) formatHomeDuration(streamTelemetry.durationSec) else ""
-                )
             }
         }
 
@@ -286,6 +312,7 @@ fun HomeDashboardScreen(
                 StudioCanvasPreview(
                     workspace = previewWorkspace,
                     mirroredFrame = mirroredFrame,
+                    localCapturedFrame = localCapturedFrame,
                     audioMeters = audioMeters,
                     chatMessages = emptyList(),
                     reducedMotion = reducedMotion,
@@ -295,9 +322,41 @@ fun HomeDashboardScreen(
                     interactive = false,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .aspectRatio(16f / 9f)
+                        .aspectRatio(if (workspace.activeScene.isVertical) 9f / 16f else 16f / 9f)
                         .testTag("home_16x9_preview_canvas")
                 )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    SceneSlot.entries.forEach { slot ->
+                        val selected = workspace.activeSceneSlot == slot
+                        Surface(
+                            onClick = { onSwitchScene(slot) },
+                            shape = RoundedCornerShape(6.dp),
+                            color = if (selected) ZroCobalt.copy(alpha = 0.24f) else MaterialTheme.colorScheme.surfaceContainerLow,
+                            border = BorderStroke(
+                                1.dp,
+                                if (selected) ZroCobalt else MaterialTheme.colorScheme.outline.copy(alpha = 0.55f)
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("home_quick_scene_${slot.name.lowercase()}")
+                        ) {
+                            Text(
+                                text = slot.shortLabel,
+                                fontSize = 10.sp,
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                color = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+                }
             }
         }
 
@@ -365,13 +424,17 @@ fun HomeDashboardScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
+                        val liveTimerText = ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec)
                         Text(
                             text = when {
-                                isPaused -> "END LIVE (PAUSED)"
-                                isActiveSession -> "STOP LIVE STREAM"
+                                isPaused -> "STOP LIVE (PAUSED • $liveTimerText)"
+                                isLive -> "STOP LIVE • $liveTimerText"
+                                isReconnecting -> "RECONNECTING • $liveTimerText"
+                                isActiveSession -> "CONNECTING… • STOP"
                                 else -> "START LIVE"
                             },
                             style = MaterialTheme.typography.labelLarge,
+                            fontFamily = if (isActiveSession) JetBrainsMonoFontFamily else MaterialTheme.typography.labelLarge.fontFamily,
                             fontWeight = FontWeight.SemiBold,
                             color = Color.White
                         )

@@ -35,21 +35,91 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.Image
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.R
 import com.example.data.model.StreamLifecycleState
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.ZroAmber
 import com.example.ui.theme.ZroCobalt
 import com.example.ui.theme.ZroEmerald
 import com.example.ui.theme.ZroLiveRed
+
+/**
+ * Minimalist custom Zro Live brand emblem rendered from bundled artwork.
+ */
+@Composable
+fun ZroBrandLogoMark(
+    size: Dp = 32.dp,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = Color(0xFF0B0E14),
+        border = BorderStroke(1.dp, ZroCobalt.copy(alpha = 0.65f)),
+        modifier = modifier.size(size)
+    ) {
+        Image(
+            painter = painterResource(id = R.drawable.img_zro_logo_fg),
+            contentDescription = "Zro Live logo",
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.size(size)
+        )
+    }
+}
+
+/**
+ * Compact phone temperature chip displaying real sensor °C or honest thermal status.
+ */
+@Composable
+fun DeviceTempChip(
+    tempText: String,
+    isOverheating: Boolean = false,
+    modifier: Modifier = Modifier
+) {
+    val accent = when {
+        isOverheating -> ZroLiveRed
+        tempText.contains("Warm", ignoreCase = true) -> ZroAmber
+        else -> ZroEmerald
+    }
+    Surface(
+        shape = RoundedCornerShape(6.dp),
+        color = accent.copy(alpha = 0.14f),
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.55f)),
+        modifier = modifier.testTag("device_temperature_chip")
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(accent)
+            )
+            Text(
+                text = tempText,
+                fontSize = 10.sp,
+                fontFamily = JetBrainsMonoFontFamily,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White,
+                maxLines = 1
+            )
+        }
+    }
+}
 
 /**
  * Consistent pro-broadcast subpage navigation header:
