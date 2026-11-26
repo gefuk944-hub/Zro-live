@@ -21,6 +21,7 @@ import com.example.data.model.ModeStreamPreset
 import com.example.data.model.NoiseCancellationLevel
 import com.example.data.model.NotificationSettings
 import com.example.data.model.OverlayCorner
+import com.example.data.model.OverlayIconShape
 import com.example.data.model.OverlayIconSize
 import com.example.data.model.OverlaySettings
 import com.example.data.model.PerformanceProfile
@@ -103,6 +104,11 @@ class SettingsStore(private val context: Context) {
         val OVERLAY_ENABLED = booleanPreferencesKey("overlay_enabled")
         val OVERLAY_OPACITY = floatPreferencesKey("overlay_opacity")
         val OVERLAY_SIZE = stringPreferencesKey("overlay_size")
+        val OVERLAY_SHAPE = stringPreferencesKey("overlay_shape")
+        val OVERLAY_CUSTOM_SIZE_DP = intPreferencesKey("overlay_custom_size_dp")
+        val OVERLAY_CUSTOM_WIDTH_DP = intPreferencesKey("overlay_custom_width_dp")
+        val OVERLAY_CUSTOM_HEIGHT_DP = intPreferencesKey("overlay_custom_height_dp")
+        val OVERLAY_CUSTOM_LOGO_URI = stringPreferencesKey("overlay_custom_logo_uri")
         val OVERLAY_POS = stringPreferencesKey("overlay_pos")
         val OVERLAY_CHAT_BUBBLE = booleanPreferencesKey("overlay_chat_bubble")
         val OVERLAY_QUICK_CONTROLS = booleanPreferencesKey("overlay_quick_controls")
@@ -118,6 +124,8 @@ class SettingsStore(private val context: Context) {
         val PERF_BATTERY = booleanPreferencesKey("perf_battery")
         val PERF_TEMP = booleanPreferencesKey("perf_temp")
         val PERF_THERMAL_STEP = booleanPreferencesKey("perf_thermal_step")
+        val PERF_THERMAL_FPS_STEP = booleanPreferencesKey("perf_thermal_fps_step")
+        val PERF_THERMAL_THRESHOLD = floatPreferencesKey("perf_thermal_threshold")
 
         val LANGUAGE = stringPreferencesKey("language")
         val THEME_STYLE = stringPreferencesKey("theme_style")
@@ -251,7 +259,12 @@ class SettingsStore(private val context: Context) {
                 overlay = OverlaySettings(
                     enabled = p[Keys.OVERLAY_ENABLED] ?: false,
                     opacity = p[Keys.OVERLAY_OPACITY] ?: 0.90f,
-                    iconSize = OverlayIconSize.entries.firstOrNull { it.name == p[Keys.OVERLAY_SIZE] } ?: OverlayIconSize.MEDIUM,
+                    iconSize = OverlayIconSize.fromName(p[Keys.OVERLAY_SIZE]),
+                    shape = OverlayIconShape.fromName(p[Keys.OVERLAY_SHAPE]),
+                    customSizeDp = (p[Keys.OVERLAY_CUSTOM_SIZE_DP] ?: 52).coerceIn(36, 88),
+                    customWidthDp = (p[Keys.OVERLAY_CUSTOM_WIDTH_DP] ?: 68).coerceIn(48, 120),
+                    customHeightDp = (p[Keys.OVERLAY_CUSTOM_HEIGHT_DP] ?: 44).coerceIn(34, 80),
+                    customLogoUri = p[Keys.OVERLAY_CUSTOM_LOGO_URI]?.takeIf { it.isNotBlank() },
                     position = OverlayCorner.entries.firstOrNull { it.name == p[Keys.OVERLAY_POS] } ?: OverlayCorner.TOP_RIGHT,
                     showChatBubble = p[Keys.OVERLAY_CHAT_BUBBLE] ?: true,
                     showQuickControls = p[Keys.OVERLAY_QUICK_CONTROLS] ?: true
@@ -268,7 +281,9 @@ class SettingsStore(private val context: Context) {
                     reduceAnimationsDuringGameplay = p[Keys.PERF_REDUCE_ANIM] ?: true,
                     batteryOptimizationHint = p[Keys.PERF_BATTERY] ?: true,
                     temperatureMonitoring = p[Keys.PERF_TEMP] ?: true,
-                    autoThermalQualityStepDown = p[Keys.PERF_THERMAL_STEP] ?: true
+                    autoThermalQualityStepDown = p[Keys.PERF_THERMAL_STEP] ?: true,
+                    autoThermalFpsStepDown = p[Keys.PERF_THERMAL_FPS_STEP] ?: true,
+                    thermalThresholdCelsius = (p[Keys.PERF_THERMAL_THRESHOLD] ?: 42.0f).coerceIn(38f, 48f)
                 ),
                 general = GeneralSettings(
                     language = p[Keys.LANGUAGE] ?: "English",
@@ -525,6 +540,11 @@ class SettingsStore(private val context: Context) {
             p[Keys.OVERLAY_ENABLED] = o.enabled
             p[Keys.OVERLAY_OPACITY] = o.opacity
             p[Keys.OVERLAY_SIZE] = o.iconSize.name
+            p[Keys.OVERLAY_SHAPE] = o.shape.name
+            p[Keys.OVERLAY_CUSTOM_SIZE_DP] = o.customSizeDp.coerceIn(36, 88)
+            p[Keys.OVERLAY_CUSTOM_WIDTH_DP] = o.customWidthDp.coerceIn(48, 120)
+            p[Keys.OVERLAY_CUSTOM_HEIGHT_DP] = o.customHeightDp.coerceIn(34, 80)
+            p[Keys.OVERLAY_CUSTOM_LOGO_URI] = o.customLogoUri ?: ""
             p[Keys.OVERLAY_POS] = o.position.name
             p[Keys.OVERLAY_CHAT_BUBBLE] = o.showChatBubble
             p[Keys.OVERLAY_QUICK_CONTROLS] = o.showQuickControls
@@ -548,6 +568,8 @@ class SettingsStore(private val context: Context) {
             p[Keys.PERF_BATTERY] = perf.batteryOptimizationHint
             p[Keys.PERF_TEMP] = perf.temperatureMonitoring
             p[Keys.PERF_THERMAL_STEP] = perf.autoThermalQualityStepDown
+            p[Keys.PERF_THERMAL_FPS_STEP] = perf.autoThermalFpsStepDown
+            p[Keys.PERF_THERMAL_THRESHOLD] = perf.thermalThresholdCelsius.coerceIn(38f, 48f)
         }
     }
 

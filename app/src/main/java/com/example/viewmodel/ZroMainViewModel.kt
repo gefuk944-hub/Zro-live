@@ -236,6 +236,7 @@ class ZroMainViewModel(
     val localCapturedFrame: StateFlow<Bitmap?> = ZroStreamCoordinator.localCapturedFrame
     val audioMeters: StateFlow<AudioMeterState> = ZroAudioEngine.meterState
     val overlayVisible: StateFlow<Boolean> = ZroStreamCoordinator.overlayVisible
+    val overlayEdgeHidden: StateFlow<Boolean> = ZroStreamCoordinator.overlayEdgeHidden
 
     // --- OBS 4-SCENE STUDIO & DUAL PHONE ENGINE STATE ---
     private val dualEngine: DualPhoneEngine = DualPhoneEngine.shared
@@ -1014,7 +1015,14 @@ class ZroMainViewModel(
         ZroStreamCoordinator.currentOverlaySettings = updated
         viewModelScope.launch { settingsStore.saveOverlaySettings(updated) }
         if (updated.enabled && Settings.canDrawOverlays(appContext)) {
-            startOrRefreshOverlay()
+            if (ZroStreamCoordinator.overlayVisible.value) {
+                val refreshIntent = Intent(appContext, FloatingOverlayService::class.java).apply {
+                    action = FloatingOverlayService.ACTION_REFRESH
+                }
+                runCatching { appContext.startService(refreshIntent) }
+            } else {
+                startOrRefreshOverlay()
+            }
         } else if (!updated.enabled) {
             stopOverlay()
         }
@@ -1031,11 +1039,74 @@ class ZroMainViewModel(
         runCatching { appContext.startService(intent) }
     }
 
+    fun restoreFloatingOverlay() {
+        if (!Settings.canDrawOverlays(appContext)) {
+            showMessage("Grant 'Display over other apps' permission to restore the floating icon.")
+            return
+        }
+        val cur = settings.value.overlay
+        if (!cur.enabled) {
+            val reenabled = cur.copy(enabled = true)
+            ZroStreamCoordinator.currentOverlaySettings = reenabled
+            viewModelScope.launch { settingsStore.saveOverlaySettings(reenabled) }
+        }
+        ZroStreamCoordinator.requestRestoreOverlay(appContext)
+        showMessage("Floating Zro Live icon restored.")
+    }
+
+    fun importCustomOverlayLogo(uri: Uri) {
+        viewModelScope.launch {
+            val imported = withContext(Dispatchers.IO) {
+                StudioMediaStore.importMediaToAppStorage(appContext, uri, isVideoHint = false).getOrNull()
+            }
+            val finalUri = imported?.persistentUri ?: uri.toString()
+            val cur = settings.value.overlay
+            val oldUri = cur.customLogoUri
+            updateOverlaySettings(cur.copy(customLogoUri = finalUri))
+            if (!oldUri.isNullOrBlank() && oldUri != finalUri) {
+                withContext(Dispatchers.IO) {
+                    StudioMediaStore.deleteIfAppManaged(appContext, oldUri)
+                }
+            }
+            showMessage("Custom floating icon logo applied.")
+        }
+    }
+
+    fun clearCustomOverlayLogo() {
+        val cur = settings.value.overlay
+        val oldUri = cur.customLogoUri
+        updateOverlaySettings(cur.copy(customLogoUri = null))
+        if (!oldUri.isNullOrBlank()) {
+            viewModelScope.launch(Dispatchers.IO) {
+                StudioMediaStore.deleteIfAppManaged(appContext, oldUri)
+            }
+        }
+        showMessage("Restored default Zro Live floating logo.")
+    }
+
     fun stopOverlay() {
         val intent = Intent(appContext, FloatingOverlayService::class.java).apply {
             action = FloatingOverlayService.ACTION_HIDE
         }
         runCatching { appContext.startService(intent) }
+    }
+
+    /**
+     * Adjusts video bitrate live while streaming (or updates saved setup target when offline).
+     */
+    fun updateLiveBitrate(bitrateKbps: Int) {
+        val safeKbps = bitrateKbps.coerceIn(1000, 12000)
+        val cur = settings.value.stream
+        if (cur.bitrateKbps != safeKbps) {
+            updateStreamSettings(cur.copy(bitrateKbps = safeKbps))
+        }
+        ZroStreamCoordinator.requestUpdateLiveBitrate(appContext, safeKbps)
+    }
+
+    fun applyWeakNetworkSuggestedBitrate() {
+        val suggested = streamTelemetry.value.weakNetworkSuggestedBitrateKbps ?: return
+        updateLiveBitrate(suggested)
+        showMessage("Stepping target bitrate to ${String.format(java.util.Locale.US, "%.1f", suggested / 1000f)} Mbps for weak network stability.")
     }
 
     fun updateNotificationSettings(updated: NotificationSettings) {
@@ -2275,6 +2346,21 @@ class ZroMainViewModel(
             viewModelScope.launch { settingsStore.saveAuthorizedDeviceLayout(next) }
         }
         showMessage("Reset crop on '${target.name}'.")
+    }
+
+    fun restoreLayerOriginalSize(layerId: String) {
+        val cur = _studioState.value
+        val target = cur.activeScene.layers.firstOrNull { it.id == layerId } ?: return
+        if (cur.activeScene.sceneLocked || target.locked) {
+            showMessage("Unlock '${target.name}' before restoring original size.")
+            return
+        }
+        val next = StudioWorkspaceReducer.restoreLayerOriginalSize(cur, layerId)
+        commitStudioState(next)
+        if (next.autoRestoreLastLayout) {
+            viewModelScope.launch { settingsStore.saveAuthorizedDeviceLayout(next) }
+        }
+        showMessage("Restored original uncropped size for '${target.name}'.")
     }
 
     fun renameLayer(layerId: String, newName: String) {

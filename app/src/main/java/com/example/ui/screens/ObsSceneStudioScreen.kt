@@ -202,6 +202,7 @@ fun ObsSceneStudioScreen(
     onSetLayerCropLive: (String, Float?, Float?, Float?, Float?) -> Unit = { _, _, _, _, _ -> },
     onApplyCropAspectPreset: (String, CropAspectPreset) -> Unit = { _, _ -> },
     onResetLayerCrop: (String) -> Unit = {},
+    onRestoreLayerOriginalSize: (String) -> Unit = {},
     onRenameLayer: (String, String) -> Unit = { _, _ -> },
     onRenameScreenCapture: (String) -> Unit = {},
     onMergeLayers: (List<String>, String) -> Unit = { _, _ -> },
@@ -1536,7 +1537,7 @@ fun ObsSceneStudioScreen(
                                                     color = Color.White
                                                 )
                                                 Text(
-                                                    text = "Trim Left, Right, Top, Bottom or drag amber handles on canvas",
+                                                    text = "Selection border matches the cropped area tightly with zero empty margin.",
                                                     style = MaterialTheme.typography.bodySmall,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
@@ -1561,7 +1562,7 @@ fun ObsSceneStudioScreen(
                                                         .height(32.dp)
                                                         .testTag("layer_reset_crop_btn")
                                                 ) {
-                                                    Text("Reset", fontSize = 10.sp)
+                                                    Text("Reset Crop", fontSize = 10.sp)
                                                 }
                                             }
                                         }
@@ -1584,6 +1585,20 @@ fun ObsSceneStudioScreen(
                                                     Text(preset.label, fontSize = 10.sp, color = Color.White)
                                                 }
                                             }
+                                        }
+
+                                        OutlinedButton(
+                                            onClick = { onRestoreLayerOriginalSize(selectedLayer.id) },
+                                            shape = RoundedCornerShape(6.dp),
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(28.dp)
+                                                .testTag("layer_restore_original_size_btn")
+                                        ) {
+                                            Icon(Icons.Rounded.RestartAlt, contentDescription = null, modifier = Modifier.size(13.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("Restore Original Size", fontSize = 10.sp, color = Color.White)
                                         }
 
                                         StudioSlider(
@@ -1673,27 +1688,43 @@ fun ObsSceneStudioScreen(
                                         Spacer(modifier = Modifier.height(6.dp))
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                                         ) {
                                             OutlinedButton(
                                                 onClick = { onPickBackgroundMediaForLayer(selectedLayer.id) },
                                                 shape = RoundedCornerShape(6.dp),
+                                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                                                 modifier = Modifier.weight(1f)
                                             ) {
                                                 Icon(Icons.Rounded.Image, contentDescription = null, modifier = Modifier.size(14.dp))
                                                 Spacer(modifier = Modifier.width(4.dp))
-                                                Text("Gallery BG", fontSize = 11.sp)
+                                                Text("Gallery BG", fontSize = 10.sp)
                                             }
                                             OutlinedButton(
                                                 onClick = {
                                                     onUpdateLayerProps(selectedLayer.id) {
-                                                        it.copy(mediaUri = null, motionBackgroundEnabled = !it.motionBackgroundEnabled)
+                                                        it.copy(mediaUri = null, transparentBackground = false)
                                                     }
                                                 },
                                                 shape = RoundedCornerShape(6.dp),
+                                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("reset_scene_ai_art_btn")
+                                            ) {
+                                                Text("AI Art BG", fontSize = 10.sp)
+                                            }
+                                            OutlinedButton(
+                                                onClick = {
+                                                    onUpdateLayerProps(selectedLayer.id) {
+                                                        it.copy(motionBackgroundEnabled = !it.motionBackgroundEnabled)
+                                                    }
+                                                },
+                                                shape = RoundedCornerShape(6.dp),
+                                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                                                 modifier = Modifier.weight(1f)
                                             ) {
-                                                Text(if (selectedLayer.motionBackgroundEnabled) "Motion BG: ON" else "Motion BG: OFF", fontSize = 11.sp)
+                                                Text(if (selectedLayer.motionBackgroundEnabled) "Motion ON" else "Motion OFF", fontSize = 10.sp)
                                             }
                                         }
                                         StudioSlider("Motion Speed", "${"%.1f".format(selectedLayer.animationSpeed)}×", selectedLayer.animationSpeed, 0.4f..2.5f) { v ->

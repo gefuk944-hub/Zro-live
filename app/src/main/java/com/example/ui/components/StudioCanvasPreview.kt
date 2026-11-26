@@ -85,12 +85,14 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -566,73 +568,58 @@ private fun StudioLayerNode(
             val hasCrop = layer.cropLeft > 0.001f || layer.cropTop > 0.001f ||
                 layer.cropRight > 0.001f || layer.cropBottom > 0.001f
 
-            // Real-time RenderNode + DrawScope visual crop clipping applied to both Compose layers and AndroidViews (WebView/Camera/Video)
-            val cropShape = remember(layer.cropLeft, layer.cropTop, layer.cropRight, layer.cropBottom) {
-                CropRectShape(
-                    cropLeft = layer.cropLeft,
-                    cropTop = layer.cropTop,
-                    cropRight = layer.cropRight,
-                    cropBottom = layer.cropBottom
-                )
-            }
+            // Exact visible-box crop projection: the outer Box is strictly (x, y, width, height) = the visible
+            // cropped area with ZERO empty margins. When cropped, inner content (Image, GIF, Video, WebView, etc.)
+            // is measured at its virtual uncropped dimensions and offset cleanly inside a clipToBounds viewport.
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .then(if (hasCrop) Modifier.clip(cropShape) else Modifier)
-                    .drawWithContent {
-                        if (hasCrop) {
-                            val leftPx = (size.width * layer.cropLeft).coerceIn(0f, size.width * 0.9f)
-                            val topPx = (size.height * layer.cropTop).coerceIn(0f, size.height * 0.9f)
-                            val rightPx = (size.width * (1f - layer.cropRight)).coerceIn(leftPx + 1f, size.width)
-                            val bottomPx = (size.height * (1f - layer.cropBottom)).coerceIn(topPx + 1f, size.height)
-                            clipRect(left = leftPx, top = topPx, right = rightPx, bottom = bottomPx) {
-                                this@drawWithContent.drawContent()
-                            }
-                        } else {
-                            drawContent()
-                        }
-                    }
+                    .clipToBounds()
             ) {
-                LayerContentVisual(
-                    layer = layer,
-                    mirroredFrame = mirroredFrame,
-                    localCapturedFrame = localCapturedFrame,
-                    isAutoSoloFallback = isAutoSoloFallback,
-                    dualTelemetry = dualTelemetry,
-                    cameraSourceMode = cameraSourceMode,
-                    useFrontCamera = useFrontCamera,
-                    cameraPermissionGranted = cameraPermissionGranted,
-                    enableLiveCameraPreview = enableLiveCameraPreview,
-                    audioMeters = audioMeters,
-                    chatMessages = chatMessages,
-                    pinnedChatAuthor = pinnedChatAuthor,
-                    pinnedChatText = pinnedChatText,
-                    chatTextSizeSp = chatTextSizeSp,
-                    animProgress = animProgress,
-                    reducedMotion = reducedMotion,
-                    bypassGraphicAdjustment = bypassGraphicAdjustment,
-                    interactiveEditing = interactive,
-                    allowWebPageInteraction = allowWebPageInteraction,
-                    onReconnectPeer = onReconnectPeer
-                )
+                Box(
+                    modifier = if (hasCrop) {
+                        Modifier.croppedContentProjection(
+                            cropLeft = layer.cropLeft,
+                            cropTop = layer.cropTop,
+                            cropRight = layer.cropRight,
+                            cropBottom = layer.cropBottom
+                        )
+                    } else {
+                        Modifier.fillMaxSize()
+                    }
+                ) {
+                    LayerContentVisual(
+                        layer = layer,
+                        mirroredFrame = mirroredFrame,
+                        localCapturedFrame = localCapturedFrame,
+                        isAutoSoloFallback = isAutoSoloFallback,
+                        dualTelemetry = dualTelemetry,
+                        cameraSourceMode = cameraSourceMode,
+                        useFrontCamera = useFrontCamera,
+                        cameraPermissionGranted = cameraPermissionGranted,
+                        enableLiveCameraPreview = enableLiveCameraPreview,
+                        audioMeters = audioMeters,
+                        chatMessages = chatMessages,
+                        pinnedChatAuthor = pinnedChatAuthor,
+                        pinnedChatText = pinnedChatText,
+                        chatTextSizeSp = chatTextSizeSp,
+                        animProgress = animProgress,
+                        reducedMotion = reducedMotion,
+                        bypassGraphicAdjustment = bypassGraphicAdjustment,
+                        interactiveEditing = interactive,
+                        allowWebPageInteraction = allowWebPageInteraction,
+                        onReconnectPeer = onReconnectPeer
+                    )
+                }
             }
 
-            // Subtle amber crop frame indicator when selected with active crop or crop mode
-            if (selected && (hasCrop || cropModeActive)) {
+            // Crisp amber indicator along exact visible cropped border when in Crop Mode
+            if (selected && cropModeActive) {
                 Canvas(modifier = Modifier.fillMaxSize()) {
-                    val leftPx = size.width * layer.cropLeft
-                    val topPx = size.height * layer.cropTop
-                    val rightPx = size.width * (1f - layer.cropRight)
-                    val bottomPx = size.height * (1f - layer.cropBottom)
-                    val cropShade = Color.Black.copy(alpha = 0.45f)
-                    if (layer.cropLeft > 0f) drawRect(cropShade, Offset.Zero, Size(leftPx, size.height))
-                    if (layer.cropRight > 0f) drawRect(cropShade, Offset(rightPx, 0f), Size(size.width - rightPx, size.height))
-                    if (layer.cropTop > 0f) drawRect(cropShade, Offset(leftPx, 0f), Size((rightPx - leftPx).coerceAtLeast(0f), topPx))
-                    if (layer.cropBottom > 0f) drawRect(cropShade, Offset(leftPx, bottomPx), Size((rightPx - leftPx).coerceAtLeast(0f), size.height - bottomPx))
                     drawRect(
                         color = ZroAmber,
-                        topLeft = Offset(leftPx, topPx),
-                        size = Size((rightPx - leftPx).coerceAtLeast(1f), (bottomPx - topPx).coerceAtLeast(1f)),
+                        topLeft = Offset.Zero,
+                        size = size,
                         style = Stroke(width = 2.dp.toPx())
                     )
                 }
@@ -821,24 +808,30 @@ object CanvasGestureMath {
     }
 }
 
-private class CropRectShape(
-    private val cropLeft: Float,
-    private val cropTop: Float,
-    private val cropRight: Float,
-    private val cropBottom: Float
-) : androidx.compose.ui.graphics.Shape {
-    override fun createOutline(
-        size: Size,
-        layoutDirection: androidx.compose.ui.unit.LayoutDirection,
-        density: androidx.compose.ui.unit.Density
-    ): androidx.compose.ui.graphics.Outline {
-        val left = (size.width * cropLeft).coerceIn(0f, size.width * 0.9f)
-        val top = (size.height * cropTop).coerceIn(0f, size.height * 0.9f)
-        val right = (size.width * (1f - cropRight)).coerceIn(left + 1f, size.width)
-        val bottom = (size.height * (1f - cropBottom)).coerceIn(top + 1f, size.height)
-        return androidx.compose.ui.graphics.Outline.Rectangle(
-            androidx.compose.ui.geometry.Rect(left, top, right, bottom)
-        )
+/**
+ * Measures an uncropped child at its full virtual source size and positions it so ONLY the
+ * cropped sub-rectangle `[cropLeft..1-cropRight, cropTop..1-cropBottom]` fills the parent's
+ * exact visible bounding box (works identically for Compose Images, GIFs, Video TextureView, and WebView).
+ */
+private fun Modifier.croppedContentProjection(
+    cropLeft: Float,
+    cropTop: Float,
+    cropRight: Float,
+    cropBottom: Float
+): Modifier = this.layout { measurable, constraints ->
+    val visW = (1f - cropLeft - cropRight).coerceIn(0.15f, 1f)
+    val visH = (1f - cropTop - cropBottom).coerceIn(0.15f, 1f)
+    val boxW = constraints.maxWidth.coerceAtLeast(1)
+    val boxH = constraints.maxHeight.coerceAtLeast(1)
+    val fullW = (boxW / visW).roundToInt().coerceAtLeast(boxW)
+    val fullH = (boxH / visH).roundToInt().coerceAtLeast(boxH)
+    val placeable = measurable.measure(
+        Constraints.fixed(fullW, fullH)
+    )
+    val offsetX = -(fullW * cropLeft).roundToInt()
+    val offsetY = -(fullH * cropTop).roundToInt()
+    layout(boxW, boxH) {
+        placeable.place(offsetX, offsetY)
     }
 }
 
@@ -851,20 +844,18 @@ private fun SelectedLayerCropOverlay(
     onDragFinished: () -> Unit
 ) {
     val density = LocalDensity.current
-    val layerW = (layer.width * canvasWidthPx).coerceAtLeast(1f)
-    val layerH = (layer.height * canvasHeightPx).coerceAtLeast(1f)
-    val cropLeftPx = (layer.x * canvasWidthPx + layerW * layer.cropLeft).roundToInt()
-    val cropTopPx = (layer.y * canvasHeightPx + layerH * layer.cropTop).roundToInt()
-    val croppedWPx = (layerW * (1f - layer.cropLeft - layer.cropRight)).coerceAtLeast(20f)
-    val croppedHPx = (layerH * (1f - layer.cropTop - layer.cropBottom)).coerceAtLeast(20f)
-    val croppedWDp = with(density) { croppedWPx.toDp() }
-    val croppedHDp = with(density) { croppedHPx.toDp() }
+    val layerW = (layer.width * canvasWidthPx).coerceAtLeast(20f)
+    val layerH = (layer.height * canvasHeightPx).coerceAtLeast(20f)
+    val boxLeftPx = (layer.x * canvasWidthPx).roundToInt()
+    val boxTopPx = (layer.y * canvasHeightPx).roundToInt()
+    val croppedWDp = with(density) { layerW.toDp() }
+    val croppedHDp = with(density) { layerH.toDp() }
     val latestOnCrop by rememberUpdatedState(onCropEdge)
     val latestEnd by rememberUpdatedState(onDragFinished)
 
     Box(
         modifier = Modifier
-            .offset { IntOffset(cropLeftPx, cropTopPx) }
+            .offset { IntOffset(boxLeftPx, boxTopPx) }
             .size(width = croppedWDp, height = croppedHDp)
             .border(1.5.dp, ZroAmber)
             .testTag("selected_layer_crop_overlay")
@@ -1166,42 +1157,45 @@ private fun LayerContentVisual(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .clip(childShape)
+                                .clipToBounds()
                                 .applyLayerInnerGraphicAdjustment(
                                     adjustment = child.graphicAdjustment,
                                     shape = childShape,
                                     bypassForBeforePreview = false
                                 )
-                                .drawWithContent {
-                                    if (childHasCrop) {
-                                        val lp = (size.width * child.cropLeft).coerceIn(0f, size.width * 0.9f)
-                                        val tp = (size.height * child.cropTop).coerceIn(0f, size.height * 0.9f)
-                                        val rp = (size.width * (1f - child.cropRight)).coerceIn(lp + 1f, size.width)
-                                        val bp = (size.height * (1f - child.cropBottom)).coerceIn(tp + 1f, size.height)
-                                        clipRect(lp, tp, rp, bp) { this@drawWithContent.drawContent() }
-                                    } else {
-                                        drawContent()
-                                    }
-                                }
                         ) {
-                            LayerContentVisual(
-                                layer = child,
-                                mirroredFrame = mirroredFrame,
-                                localCapturedFrame = localCapturedFrame,
-                                isAutoSoloFallback = isAutoSoloFallback,
-                                dualTelemetry = dualTelemetry,
-                                cameraSourceMode = cameraSourceMode,
-                                useFrontCamera = useFrontCamera,
-                                cameraPermissionGranted = cameraPermissionGranted,
-                                enableLiveCameraPreview = enableLiveCameraPreview,
-                                audioMeters = audioMeters,
-                                chatMessages = chatMessages,
-                                pinnedChatAuthor = pinnedChatAuthor,
-                                pinnedChatText = pinnedChatText,
-                                chatTextSizeSp = chatTextSizeSp,
-                                animProgress = animProgress,
-                                reducedMotion = reducedMotion,
-                                onReconnectPeer = onReconnectPeer
-                            )
+                            Box(
+                                modifier = if (childHasCrop) {
+                                    Modifier.croppedContentProjection(
+                                        cropLeft = child.cropLeft,
+                                        cropTop = child.cropTop,
+                                        cropRight = child.cropRight,
+                                        cropBottom = child.cropBottom
+                                    )
+                                } else {
+                                    Modifier.fillMaxSize()
+                                }
+                            ) {
+                                LayerContentVisual(
+                                    layer = child,
+                                    mirroredFrame = mirroredFrame,
+                                    localCapturedFrame = localCapturedFrame,
+                                    isAutoSoloFallback = isAutoSoloFallback,
+                                    dualTelemetry = dualTelemetry,
+                                    cameraSourceMode = cameraSourceMode,
+                                    useFrontCamera = useFrontCamera,
+                                    cameraPermissionGranted = cameraPermissionGranted,
+                                    enableLiveCameraPreview = enableLiveCameraPreview,
+                                    audioMeters = audioMeters,
+                                    chatMessages = chatMessages,
+                                    pinnedChatAuthor = pinnedChatAuthor,
+                                    pinnedChatText = pinnedChatText,
+                                    chatTextSizeSp = chatTextSizeSp,
+                                    animProgress = animProgress,
+                                    reducedMotion = reducedMotion,
+                                    onReconnectPeer = onReconnectPeer
+                                )
+                            }
                         }
                     }
                 }
@@ -1478,27 +1472,27 @@ private fun LayerContentVisual(
             val accentColor = Color(layer.borderColorHex)
             val bundledBackdropRes = when (layer.type) {
                 LayerSourceType.STARTING_SOON -> R.drawable.img_scene_starting_soon
-                LayerSourceType.BRB_BANNER -> R.drawable.img_scene_brb
-                LayerSourceType.ENDING_BANNER -> R.drawable.img_scene_ending
+                LayerSourceType.BRB_BANNER -> R.drawable.img_scene_brb_gaming_1795732558862
+                LayerSourceType.ENDING_BANNER -> R.drawable.img_scene_ending_gaming_1795732560448
                 else -> R.drawable.img_scene_starting_soon
             }
             Box(modifier = Modifier.fillMaxSize()) {
                 if (!layer.mediaUri.isNullOrBlank()) {
                     StudioImageLayerView(
                         layer = layer,
-                        contentScale = mediaContentScale,
+                        contentScale = ContentScale.Crop,
                         bypassGraphicAdjustment = bypassGraphicAdjustment,
                         modifier = Modifier.fillMaxSize()
                     )
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(Color(0x88090B10))
+                            .background(Color(0x78080B14))
                     )
                 } else if (!layer.transparentBackground) {
                     Image(
                         painter = painterResource(id = bundledBackdropRes),
-                        contentDescription = null,
+                        contentDescription = layer.name,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
                     )
@@ -1508,9 +1502,9 @@ private fun LayerContentVisual(
                             .background(
                                 Brush.verticalGradient(
                                     colors = listOf(
-                                        Color(0x66060910),
-                                        Color(0x99060910),
-                                        Color(0xBB060910)
+                                        Color(0x55060912),
+                                        Color(0x88060912),
+                                        Color(0xA8060912)
                                     )
                                 )
                             )
@@ -1526,28 +1520,28 @@ private fun LayerContentVisual(
                 ) {
                     Box(
                         modifier = Modifier
-                            .width(36.dp)
-                            .height(2.dp)
-                            .background(accentColor)
+                            .width(42.dp)
+                            .height(2.5.dp)
+                            .background(accentColor, RoundedCornerShape(2.dp))
                     )
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(7.dp))
                     Text(
                         text = layer.textContent.ifBlank { layer.name },
                         color = textColor,
-                        fontSize = (layer.fontSizeSp * 0.72f).coerceIn(11f, 24f).sp,
+                        fontSize = (layer.fontSizeSp * 0.78f).coerceIn(11f, 26f).sp,
                         fontFamily = resolvedFontFamily,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.2.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 1.4.sp,
                         textAlign = TextAlign.Center,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
                     if (layer.subtitleText.isNotBlank()) {
-                        Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(modifier = Modifier.height(5.dp))
                         Text(
                             text = layer.subtitleText,
-                            color = Color(0xFFB4BCCB),
-                            fontSize = 9.sp,
+                            color = Color(0xFFD6DEEC),
+                            fontSize = 9.5.sp,
                             fontFamily = FontFamily.SansSerif,
                             textAlign = TextAlign.Center,
                             maxLines = 2,

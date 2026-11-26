@@ -166,7 +166,9 @@ fun LiveStudioScreen(
     onSaveCurrentProfile: (String) -> Unit = {},
     onApplyProfile: (SavedLiveConfigProfile) -> Unit = {},
     onDeleteProfile: (String) -> Unit = {},
-    onClearCrashLogs: () -> Unit = {}
+    onClearCrashLogs: () -> Unit = {},
+    onUpdateLiveBitrate: (Int) -> Unit = {},
+    onApplySuggestedWeakBitrate: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var showEndStreamDialog by remember { mutableStateOf(false) }
@@ -302,7 +304,9 @@ fun LiveStudioScreen(
                     onRequestEndStreaming = { showEndStreamDialog = true },
                     onRenameScreenCapture = onRenameScreenCapture,
                     onOpenYouTubeStudio = { YouTubeLiveChatClient.openYouTubeStudioExternally(context) },
-                    onOpenFullScreenPreview = onOpenFullScreenPreview
+                    onOpenFullScreenPreview = onOpenFullScreenPreview,
+                    onUpdateLiveBitrate = onUpdateLiveBitrate,
+                    onApplySuggestedWeakBitrate = onApplySuggestedWeakBitrate
                 )
 
                 LiveStudioTab.AUDIO_MIXER -> AudioMixerTabContent(
@@ -347,7 +351,9 @@ private fun BroadcastTabContent(
     onRequestEndStreaming: () -> Unit,
     onRenameScreenCapture: (String) -> Unit = {},
     onOpenYouTubeStudio: () -> Unit,
-    onOpenFullScreenPreview: () -> Unit = {}
+    onOpenFullScreenPreview: () -> Unit = {},
+    onUpdateLiveBitrate: (Int) -> Unit = {},
+    onApplySuggestedWeakBitrate: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var showStreamKey by remember { mutableStateOf(false) }
@@ -584,7 +590,7 @@ private fun BroadcastTabContent(
         }
 
         // Honest Overheating / Thermal Step-Down Banner
-        if (deviceTelemetry.isOverheating || streamTelemetry.thermalThrottled) {
+        if (deviceTelemetry.isOverheating || streamTelemetry.thermalThrottled || streamTelemetry.thermalFpsThrottled) {
             item {
                 Surface(
                     shape = RoundedCornerShape(14.dp),
@@ -599,13 +605,219 @@ private fun BroadcastTabContent(
                     ) {
                         Icon(Icons.Rounded.Warning, contentDescription = null, tint = ZroAmber)
                         Text(
-                            text = if (streamTelemetry.thermalThrottled) {
-                                "Thermal protection stepped down bitrate to ${streamTelemetry.targetBitrateKbps} kbps ($tempLabel)."
-                            } else {
-                                "Device overheating detected ($tempLabel). Lower resolution or enable Battery Saver."
+                            text = when {
+                                streamTelemetry.thermalFpsThrottled && streamTelemetry.thermalThrottled ->
+                                    "Thermal protection active ($tempLabel): bitrate stepped to ${streamTelemetry.targetBitrateKbps} kbps & FPS capped to ${streamTelemetry.targetFps} fps."
+                                streamTelemetry.thermalThrottled ->
+                                    "Thermal protection stepped down bitrate to ${streamTelemetry.targetBitrateKbps} kbps ($tempLabel)."
+                                streamTelemetry.thermalFpsThrottled ->
+                                    "Thermal protection reduced FPS to ${streamTelemetry.targetFps} fps ($tempLabel)."
+                                else ->
+                                    "Device overheating detected ($tempLabel). Lower bitrate/FPS or enable Battery Saver."
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFFFCD34D)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Live Bitrate Control Card (works live mid-stream without restarting broadcast!)
+        item {
+            val selectedTargetKbps = (if (isRunning && streamTelemetry.selectedBitrateKbps > 0) {
+                streamTelemetry.selectedBitrateKbps
+            } else {
+                streamSettings.bitrateKbps
+            }).coerceIn(1000, 12000)
+            val actualKbps = if (isRunning) streamTelemetry.actualBitrateKbps else 0
+            val suggestedWeak = if (isRunning) streamTelemetry.weakNetworkSuggestedBitrateKbps else null
+
+            GlassCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("live_bitrate_control_card"),
+                accentBorder = when {
+                    !streamTelemetry.liveBitrateChangeSupported -> ZroAmber
+                    suggestedWeak != null -> ZroAmber
+                    isLive -> ZroCobalt
+                    else -> null
+                }
+            ) {
+                SectionHeader(
+                    title = "Live Bitrate Control",
+                    subtitle = if (isRunning) {
+                        "Adjust video bitrate live without restarting the stream"
+                    } else {
+                        "Target bitrate (also adjustable live while broadcasting)"
+                    }
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Current Actual vs Selected Target Bitrate display
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Text(
+                                text = "CURRENT ACTUAL",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = if (isRunning) {
+                                    "${String.format(Locale.US, "%.2f", actualKbps / 1000f)} Mbps ($actualKbps kbps)"
+                                } else {
+                                    "Offline (0 kbps)"
+                                },
+                                style = MaterialTheme.typography.titleSmall,
+                                fontFamily = JetBrainsMonoFontFamily,
+                                color = if (isLive) ZroEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.testTag("live_actual_bitrate_text")
+                            )
+                        }
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        border = BorderStroke(1.dp, ZroCobalt.copy(alpha = 0.55f)),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Text(
+                                text = "SELECTED TARGET",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "${String.format(Locale.US, "%.1f", selectedTargetKbps / 1000f)} Mbps ($selectedTargetKbps kbps)",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontFamily = JetBrainsMonoFontFamily,
+                                color = Color.White,
+                                modifier = Modifier.testTag("live_target_bitrate_text")
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Manual -500 / Slider / +500 live controls
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = { onUpdateLiveBitrate((selectedTargetKbps - 500).coerceAtLeast(1000)) },
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("live_bitrate_minus_btn")
+                    ) {
+                        Text("-500", fontFamily = JetBrainsMonoFontFamily)
+                    }
+                    Slider(
+                        value = selectedTargetKbps.toFloat(),
+                        onValueChange = { v ->
+                            val snapped = ((v / 500f).toInt() * 500).coerceIn(1000, 12000)
+                            onUpdateLiveBitrate(snapped)
+                        },
+                        valueRange = 1000f..12000f,
+                        colors = SliderDefaults.colors(thumbColor = ZroCobalt, activeTrackColor = ZroCobalt),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("live_bitrate_slider")
+                    )
+                    OutlinedButton(
+                        onClick = { onUpdateLiveBitrate((selectedTargetKbps + 500).coerceAtMost(12000)) },
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("live_bitrate_plus_btn")
+                    ) {
+                        Text("+500", fontFamily = JetBrainsMonoFontFamily)
+                    }
+                }
+
+                // Quick bitrate presets
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    listOf(2000, 3500, 4500, 6000, 8000).forEach { kbps ->
+                        FilterChip(
+                            selected = selectedTargetKbps == kbps,
+                            onClick = { onUpdateLiveBitrate(kbps) },
+                            label = { Text("${String.format(Locale.US, "%.1f", kbps / 1000f)}M") },
+                            modifier = Modifier.testTag("live_bitrate_preset_$kbps")
+                        )
+                    }
+                }
+
+                // Weak Network Bitrate Suggestion Banner
+                if (suggestedWeak != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = ZroAmber.copy(alpha = 0.14f),
+                        border = BorderStroke(1.dp, ZroAmber.copy(alpha = 0.55f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("weak_network_bitrate_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Rounded.Warning, contentDescription = null, tint = ZroAmber, modifier = Modifier.size(18.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Weak network detected",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = Color(0xFFFCD34D)
+                                )
+                                Text(
+                                    text = "Suggested safer bitrate: ${String.format(Locale.US, "%.1f", suggestedWeak / 1000f)} Mbps ($suggestedWeak kbps)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            Button(
+                                onClick = onApplySuggestedWeakBitrate,
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = ZroAmber, contentColor = Color.Black),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier.testTag("apply_suggested_bitrate_btn")
+                            ) {
+                                Text("Apply", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+
+                // Honest encoder live-bitrate status / unsupported warning
+                val statusMsg = streamTelemetry.liveBitrateStatusMessage
+                if (!statusMsg.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    val supported = streamTelemetry.liveBitrateChangeSupported
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (supported) ZroEmerald.copy(alpha = 0.12f) else ZroLiveRed.copy(alpha = 0.14f),
+                        border = BorderStroke(1.dp, if (supported) ZroEmerald.copy(alpha = 0.45f) else ZroLiveRed.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = statusMsg,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (supported) ZroEmerald else Color(0xFFFCA5A5),
+                            modifier = Modifier.padding(10.dp)
                         )
                     }
                 }

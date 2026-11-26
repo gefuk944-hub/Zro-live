@@ -179,10 +179,27 @@ enum class OverlayCorner(val label: String) {
     BOTTOM_RIGHT("Bottom Right")
 }
 
+enum class OverlayIconShape(val label: String) {
+    CIRCLE("Circle"),
+    SQUARE("Square"),
+    RECTANGLE("Rectangle");
+
+    companion object {
+        fun fromName(raw: String?): OverlayIconShape =
+            entries.firstOrNull { it.name == raw } ?: CIRCLE
+    }
+}
+
 enum class OverlayIconSize(val label: String, val dpValue: Int) {
     SMALL("Compact", 44),
     MEDIUM("Standard", 52),
-    LARGE("Large", 60)
+    LARGE("Large", 60),
+    CUSTOM("Custom Size", 52);
+
+    companion object {
+        fun fromName(raw: String?): OverlayIconSize =
+            entries.firstOrNull { it.name == raw } ?: MEDIUM
+    }
 }
 
 enum class StreamPlatform(val label: String, val defaultRtmpUrl: String) {
@@ -411,10 +428,33 @@ data class OverlaySettings(
     val enabled: Boolean = false,
     val opacity: Float = 0.90f,
     val iconSize: OverlayIconSize = OverlayIconSize.MEDIUM,
+    val shape: OverlayIconShape = OverlayIconShape.CIRCLE,
+    val customSizeDp: Int = 52,
+    val customWidthDp: Int = 68,
+    val customHeightDp: Int = 44,
+    val customLogoUri: String? = null,
     val position: OverlayCorner = OverlayCorner.TOP_RIGHT,
     val showChatBubble: Boolean = true,
     val showQuickControls: Boolean = true
-)
+) {
+    /** Computes effective (widthDp, heightDp) respecting Shape + Size preset or Custom Size. */
+    fun effectiveDimensionsDp(): Pair<Int, Int> {
+        val base = when (iconSize) {
+            OverlayIconSize.CUSTOM -> customSizeDp.coerceIn(36, 88)
+            else -> iconSize.dpValue
+        }
+        return when (shape) {
+            OverlayIconShape.RECTANGLE -> {
+                if (iconSize == OverlayIconSize.CUSTOM) {
+                    customWidthDp.coerceIn(48, 120) to customHeightDp.coerceIn(34, 80)
+                } else {
+                    (base * 1.45f).toInt().coerceIn(56, 96) to (base * 0.86f).toInt().coerceIn(36, 60)
+                }
+            }
+            OverlayIconShape.SQUARE, OverlayIconShape.CIRCLE -> base to base
+        }
+    }
+}
 
 data class NotificationSettings(
     val liveNotificationEnabled: Boolean = true,
@@ -430,6 +470,7 @@ data class PerformanceSettings(
     val batteryOptimizationHint: Boolean = true,
     val temperatureMonitoring: Boolean = true,
     val autoThermalQualityStepDown: Boolean = true,
+    val autoThermalFpsStepDown: Boolean = true,
     val thermalThresholdCelsius: Float = 42.0f
 )
 
@@ -523,7 +564,13 @@ data class StreamRuntimeTelemetry(
     val bytesSentTotal: Long = 0L,
     val deviceTempCelsius: Float? = null,
     val thermalLabel: String = "Unmeasured",
-    val activeSceneName: String = "Gameplay"
+    val activeSceneName: String = "Gameplay",
+    // Live Bitrate Control & Weak-Network Suggestion
+    val selectedBitrateKbps: Int = 4500,
+    val liveBitrateChangeSupported: Boolean = true,
+    val liveBitrateStatusMessage: String? = null,
+    val weakNetworkSuggestedBitrateKbps: Int? = null,
+    val thermalFpsThrottled: Boolean = false
 )
 
 data class AudioMeterState(

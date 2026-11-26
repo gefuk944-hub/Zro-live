@@ -261,6 +261,7 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
     val externalCameraInventory by viewModel.externalCameraInventory.collectAsStateWithLifecycle()
     val connectivitySnapshot by viewModel.connectivitySnapshot.collectAsStateWithLifecycle()
     val wifiDirectState by viewModel.wifiDirectState.collectAsStateWithLifecycle()
+    val overlayEdgeHidden by viewModel.overlayEdgeHidden.collectAsStateWithLifecycle()
 
     // Real Navigation History: tab history + pushable subpage back stack
     var currentTab by remember { mutableStateOf(ZroNavTab.HOME) }
@@ -387,6 +388,17 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                 context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             viewModel.setStreamThumbnailUri(uri.toString())
+        }
+    }
+
+    val overlayLogoPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            viewModel.importCustomOverlayLogo(uri)
         }
     }
 
@@ -987,6 +999,7 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                             onSetLayerCropLive = { id, l, t, r, b -> viewModel.setLayerCropLive(id, l, t, r, b) },
                             onApplyCropAspectPreset = { id, preset -> viewModel.applyLayerCropAspectPreset(id, preset) },
                             onResetLayerCrop = { id -> viewModel.resetLayerCrop(id) },
+                            onRestoreLayerOriginalSize = { id -> viewModel.restoreLayerOriginalSize(id) },
                             onRenameLayer = { id, name -> viewModel.renameLayer(id, name) },
                             onRenameScreenCapture = { viewModel.renameScreenCapture(it) },
                             onMergeLayers = { ids, name -> viewModel.mergeLayers(ids, name) },
@@ -1074,7 +1087,9 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                             onSendChatMessage = { viewModel.sendYouTubeChatMessage(it) },
                             onRenameScreenCapture = { viewModel.renameScreenCapture(it) },
                             onBack = popBack,
-                            subpageTitle = "Audio Studio"
+                            subpageTitle = "Audio Studio",
+                            onUpdateLiveBitrate = { viewModel.updateLiveBitrate(it) },
+                            onApplySuggestedWeakBitrate = { viewModel.applyWeakNetworkSuggestedBitrate() }
                         )
 
                         AppSubpage.DUAL_PAIRING -> DualPhoneStudioScreen(
@@ -1318,7 +1333,9 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                                 onSaveCurrentProfile = { viewModel.saveCurrentConfigAsProfile(it) },
                                 onApplyProfile = { viewModel.applyLiveProfile(it) },
                                 onDeleteProfile = { viewModel.deleteLiveProfile(it) },
-                                onClearCrashLogs = { viewModel.clearCrashLogs() }
+                                onClearCrashLogs = { viewModel.clearCrashLogs() },
+                                onUpdateLiveBitrate = { viewModel.updateLiveBitrate(it) },
+                                onApplySuggestedWeakBitrate = { viewModel.applyWeakNetworkSuggestedBitrate() }
                             )
 
                             ZroNavTab.SETTINGS -> SettingsScreen(
@@ -1344,7 +1361,15 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                                 onRequestOverlayPermission = openOverlayPermissionSettings,
                                 onOpenAudioMixer = { pushSubpage(AppSubpage.AUDIO_STUDIO) },
                                 onSignInOptional = {},
-                                onSignOut = {}
+                                onSignOut = {},
+                                overlayEdgeHidden = overlayEdgeHidden,
+                                onRestoreFloatingOverlay = { viewModel.restoreFloatingOverlay() },
+                                onPickCustomOverlayLogo = {
+                                    overlayLogoPicker.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                },
+                                onResetCustomOverlayLogo = { viewModel.clearCustomOverlayLogo() }
                             )
                         }
                     }

@@ -203,6 +203,8 @@ object StudioPersistence {
         put("presetTag", l.presetTag)
         put("sourceMediaWidth", l.sourceMediaWidth)
         put("sourceMediaHeight", l.sourceMediaHeight)
+        put("origWidth", l.origWidth.toDouble())
+        put("origHeight", l.origHeight.toDouble())
         put("graphicAdjustment", GraphicAdjustmentJson.toJson(l.graphicAdjustment.copy(opacity = l.opacity)))
         if (l.mergedChildren.isNotEmpty()) {
             val childArr = JSONArray()
@@ -242,7 +244,13 @@ object StudioPersistence {
         fontSizeSp = o.optDouble("fontSizeSp", 16.0).toFloat().coerceIn(8f, 48f),
         textColorHex = o.optLong("textColorHex", 0xFFFFFFFFL),
         backgroundColorHex = o.optLong("backgroundColorHex", 0xCC11141BL),
-        transparentBackground = o.optBoolean("transparentBackground", false),
+        transparentBackground = run {
+            val rawTransparent = o.optBoolean("transparentBackground", false)
+            val id = o.optString("id")
+            val hasCustomMedia = o.optString("mediaUri", "").isNotBlank()
+            // Upgrade legacy default s3_banner / s4_thanks so AI gaming artwork displays by default
+            if (rawTransparent && !hasCustomMedia && (id == "s3_banner" || id == "s4_thanks")) false else rawTransparent
+        },
         mediaUri = o.optString("mediaUri", "").ifBlank { null },
         webUrl = o.optString("webUrl", ""),
         animationType = LayerAnimationType.fromName(o.optString("animationType")),
@@ -258,6 +266,8 @@ object StudioPersistence {
         presetTag = o.optString("presetTag", ""),
         sourceMediaWidth = o.optInt("sourceMediaWidth", 0).coerceAtLeast(0),
         sourceMediaHeight = o.optInt("sourceMediaHeight", 0).coerceAtLeast(0),
+        origWidth = o.optDouble("origWidth", 0.0).toFloat().coerceIn(0f, 1f),
+        origHeight = o.optDouble("origHeight", 0.0).toFloat().coerceIn(0f, 1f),
         graphicAdjustment = GraphicAdjustmentJson.fromJson(
             o.optJSONObject("graphicAdjustment"),
             fallbackOpacity = o.optDouble("opacity", 1.0).toFloat().coerceIn(0.05f, 1.0f)

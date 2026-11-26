@@ -80,7 +80,7 @@ class StudioLiveCompositor(private val context: Context) {
                 canvas = canvas,
                 cw = cw,
                 ch = ch,
-                drawableResId = R.drawable.img_scene_brb,
+                drawableResId = R.drawable.img_scene_brb_gaming_1795732558862,
                 title = "PRIVACY SHIELD ACTIVE",
                 subtitle = "Selected game is hidden — gameplay paused automatically",
                 accentColor = Color.rgb(16, 185, 129)
@@ -94,10 +94,10 @@ class StudioLiveCompositor(private val context: Context) {
                 canvas = canvas,
                 cw = cw,
                 ch = ch,
-                drawableResId = R.drawable.img_scene_brb,
+                drawableResId = R.drawable.img_scene_brb_gaming_1795732558862,
                 title = "BE RIGHT BACK!",
                 subtitle = "Stream paused briefly — Gameplay & camera hidden",
-                accentColor = Color.rgb(245, 158, 11)
+                accentColor = Color.rgb(6, 182, 212)
             )
             return
         }
@@ -160,18 +160,21 @@ class StudioLiveCompositor(private val context: Context) {
                 canvas.rotate(layer.rotationDeg, bounds.centerX(), bounds.centerY())
             }
 
-            // Apply normalized crop clipping if set on the layer
-            val cropL = layer.cropLeft.coerceIn(0f, 0.48f) * width
-            val cropT = layer.cropTop.coerceIn(0f, 0.48f) * height
-            val cropR = layer.cropRight.coerceIn(0f, 0.48f) * width
-            val cropB = layer.cropBottom.coerceIn(0f, 0.48f) * height
-            if (cropL > 0f || cropT > 0f || cropR > 0f || cropB > 0f) {
-                canvas.clipRect(
-                    bounds.left + cropL,
-                    bounds.top + cropT,
-                    (bounds.right - cropR).coerceAtLeast(bounds.left + cropL + 4f),
-                    (bounds.bottom - cropB).coerceAtLeast(bounds.top + cropT + 4f)
-                )
+            // Layer bounds ARE the exact visible cropped box. Clip strictly to bounds, and if cropped,
+            // project the virtual uncropped frame inside bounds so zero invisible margin appears in live output!
+            canvas.clipRect(bounds)
+            val hasCrop = layer.cropLeft > 0.001f || layer.cropTop > 0.001f ||
+                layer.cropRight > 0.001f || layer.cropBottom > 0.001f
+            val contentBounds = if (hasCrop) {
+                val visW = (1f - layer.cropLeft - layer.cropRight).coerceIn(0.15f, 1f)
+                val visH = (1f - layer.cropTop - layer.cropBottom).coerceIn(0.15f, 1f)
+                val fullW = bounds.width() / visW
+                val fullH = bounds.height() / visH
+                val fullLeft = bounds.left - fullW * layer.cropLeft
+                val fullTop = bounds.top - fullH * layer.cropTop
+                RectF(fullLeft, fullTop, fullLeft + fullW, fullTop + fullH)
+            } else {
+                bounds
             }
 
             if (alphaInt < 255) {
@@ -181,14 +184,14 @@ class StudioLiveCompositor(private val context: Context) {
             when (layer.type) {
                 LayerSourceType.GAMEPLAY_SCREEN -> drawGameplayLayer(
                     canvas = canvas,
-                    bounds = bounds,
+                    bounds = contentBounds,
                     layer = layer,
                     gameplayBitmap = gameplayBitmap,
                     preferCenterCrop = false
                 )
                 LayerSourceType.STARTING_SOON -> drawSceneCardLayer(
                     canvas = canvas,
-                    bounds = bounds,
+                    bounds = contentBounds,
                     layer = layer,
                     defaultDrawableRes = R.drawable.img_scene_starting_soon,
                     defaultTitle = "STREAMING START SOON",
@@ -197,35 +200,35 @@ class StudioLiveCompositor(private val context: Context) {
                 )
                 LayerSourceType.BRB_BANNER -> drawSceneCardLayer(
                     canvas = canvas,
-                    bounds = bounds,
+                    bounds = contentBounds,
                     layer = layer,
-                    defaultDrawableRes = R.drawable.img_scene_brb,
+                    defaultDrawableRes = R.drawable.img_scene_brb_gaming_1795732558862,
                     defaultTitle = "BE RIGHT BACK!",
                     defaultSubtitle = "Stream paused briefly — Gameplay & camera hidden",
-                    accentColor = Color.rgb(245, 158, 11)
+                    accentColor = Color.rgb(6, 182, 212)
                 )
                 LayerSourceType.ENDING_BANNER -> drawSceneCardLayer(
                     canvas = canvas,
-                    bounds = bounds,
+                    bounds = contentBounds,
                     layer = layer,
-                    defaultDrawableRes = R.drawable.img_scene_ending,
+                    defaultDrawableRes = R.drawable.img_scene_ending_gaming_1795732560448,
                     defaultTitle = "THANKS FOR WATCHING!",
                     defaultSubtitle = "Subscribe & turn on notifications for the next live stream",
-                    accentColor = Color.rgb(16, 185, 129)
+                    accentColor = Color.rgb(245, 158, 11)
                 )
-                LayerSourceType.BACKGROUND -> drawBackgroundLayer(canvas, bounds, layer)
+                LayerSourceType.BACKGROUND -> drawBackgroundLayer(canvas, contentBounds, layer)
                 LayerSourceType.IMAGE,
                 LayerSourceType.LOGO,
                 LayerSourceType.GIF,
-                LayerSourceType.VIDEO_OVERLAY -> drawMediaLayer(canvas, bounds, layer)
+                LayerSourceType.VIDEO_OVERLAY -> drawMediaLayer(canvas, contentBounds, layer)
                 LayerSourceType.TEXT,
-                LayerSourceType.ANIMATED_OVERLAY -> drawTextBannerLayer(canvas, bounds, layer)
-                LayerSourceType.SUBSCRIBER_COUNTER -> drawSubscriberCounterLayer(canvas, bounds, layer)
-                LayerSourceType.CHAT_OVERLAY -> drawChatOverlayLayer(canvas, bounds, layer, workspace, chatMessages)
-                LayerSourceType.WEBCAM -> drawWebcamLayer(canvas, bounds, layer, workspace)
-                LayerSourceType.AUDIO_VISUALIZER -> drawAudioVisualizerLayer(canvas, bounds, layer, audioMeters)
+                LayerSourceType.ANIMATED_OVERLAY -> drawTextBannerLayer(canvas, contentBounds, layer)
+                LayerSourceType.SUBSCRIBER_COUNTER -> drawSubscriberCounterLayer(canvas, contentBounds, layer)
+                LayerSourceType.CHAT_OVERLAY -> drawChatOverlayLayer(canvas, contentBounds, layer, workspace, chatMessages)
+                LayerSourceType.WEBCAM -> drawWebcamLayer(canvas, contentBounds, layer, workspace)
+                LayerSourceType.AUDIO_VISUALIZER -> drawAudioVisualizerLayer(canvas, contentBounds, layer, audioMeters)
                 LayerSourceType.DECORATIVE_FRAME -> drawDecorativeFrameLayer(canvas, bounds, layer)
-                LayerSourceType.BROWSER_WEB -> drawWebWidgetPlaceholderLayer(canvas, bounds, layer)
+                LayerSourceType.BROWSER_WEB -> drawWebWidgetPlaceholderLayer(canvas, contentBounds, layer)
                 LayerSourceType.MERGED_GROUP -> {
                     canvas.clipRect(bounds)
                     for (child in layer.mergedChildren.sortedBy { it.zIndex }) {
@@ -300,7 +303,7 @@ class StudioLiveCompositor(private val context: Context) {
         accentColor: Int
     ) {
         val customBmp = resolveLayerBitmap(layer)
-        val backdropBmp = customBmp ?: loadDrawableBitmap(defaultDrawableRes)
+        val backdropBmp = customBmp ?: if (!layer.transparentBackground) loadDrawableBitmap(defaultDrawableRes) else null
         if (backdropBmp != null && !backdropBmp.isRecycled) {
             drawBitmapMapped(
                 canvas = canvas,
@@ -312,7 +315,7 @@ class StudioLiveCompositor(private val context: Context) {
             // Subtle readability scrim so user text always pops crisply over artwork
             scrimPaint.color = Color.argb(110, 6, 10, 18)
             canvas.drawRect(bounds, scrimPaint)
-        } else {
+        } else if (!layer.transparentBackground) {
             val shader = LinearGradient(
                 bounds.left, bounds.top, bounds.right, bounds.bottom,
                 Color.rgb(10, 14, 24), Color.rgb(18, 25, 40),
@@ -323,12 +326,13 @@ class StudioLiveCompositor(private val context: Context) {
             fillPaint.shader = null
         }
 
-        // Accent top/bottom studio bars
-        val barH = (bounds.height() * 0.008f).coerceIn(3f, 8f)
+        // Responsive typography for both 16:9 landscape and 9:16 vertical Shorts canvases
+        val minDim = minOf(bounds.width(), bounds.height())
+        val barH = (minDim * 0.009f).coerceIn(3f, 8f)
         fillPaint.color = accentColor
         val barW = bounds.width() * 0.18f
         canvas.drawRoundRect(
-            RectF(bounds.centerX() - barW / 2f, bounds.centerY() - bounds.height() * 0.14f, bounds.centerX() + barW / 2f, bounds.centerY() - bounds.height() * 0.14f + barH),
+            RectF(bounds.centerX() - barW / 2f, bounds.centerY() - minDim * 0.15f, bounds.centerX() + barW / 2f, bounds.centerY() - minDim * 0.15f + barH),
             barH, barH, fillPaint
         )
 
@@ -338,16 +342,16 @@ class StudioLiveCompositor(private val context: Context) {
         textPaint.color = layer.textColorHex.toInt()
         textPaint.typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
         textPaint.textAlign = Paint.Align.CENTER
-        textPaint.textSize = (bounds.height() * 0.082f).coerceIn(22f, 72f)
+        textPaint.textSize = (minDim * 0.085f).coerceIn(20f, 70f)
         textPaint.setShadowLayer(8f, 0f, 3f, Color.argb(180, 0, 0, 0))
         canvas.drawText(title, bounds.centerX(), bounds.centerY() + textPaint.textSize * 0.15f, textPaint)
         textPaint.clearShadowLayer()
 
         if (subtitle.isNotBlank()) {
-            subTextPaint.color = Color.rgb(203, 213, 225)
+            subTextPaint.color = Color.rgb(214, 222, 236)
             subTextPaint.typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
             subTextPaint.textAlign = Paint.Align.CENTER
-            subTextPaint.textSize = (bounds.height() * 0.036f).coerceIn(13f, 30f)
+            subTextPaint.textSize = (minDim * 0.036f).coerceIn(12f, 28f)
             canvas.drawText(subtitle, bounds.centerX(), bounds.centerY() + textPaint.textSize * 0.95f, subTextPaint)
         }
     }

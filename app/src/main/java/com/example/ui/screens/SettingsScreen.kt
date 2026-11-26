@@ -62,6 +62,15 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Restore
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import coil.compose.AsyncImage
 import com.example.R
 import com.example.data.model.AudioSettings
 import com.example.data.model.CaptureMode
@@ -71,6 +80,7 @@ import com.example.data.model.GeneralSettings
 import com.example.data.model.NoiseCancellationLevel
 import com.example.data.model.NotificationSettings
 import com.example.data.model.OverlayCorner
+import com.example.data.model.OverlayIconShape
 import com.example.data.model.OverlayIconSize
 import com.example.data.model.OverlaySettings
 import com.example.data.model.PerformanceProfile
@@ -120,7 +130,11 @@ fun SettingsScreen(
     onOpenAudioMixer: () -> Unit,
     onSignInOptional: () -> Unit,
     onSignOut: () -> Unit,
-    onBack: (() -> Unit)? = null
+    onBack: (() -> Unit)? = null,
+    overlayEdgeHidden: Boolean = false,
+    onRestoreFloatingOverlay: () -> Unit = {},
+    onPickCustomOverlayLogo: () -> Unit = {},
+    onResetCustomOverlayLogo: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var activeCategory by remember { mutableStateOf(SettingsCategory.PERFORMANCE) }
@@ -273,12 +287,39 @@ fun SettingsScreen(
                                     onCheckedChange = { onUpdatePerformance(settings.performance.copy(temperatureMonitoring = it)) }
                                 )
                                 SettingsToggleRow(
-                                    title = "Auto Thermal Workload Reduction",
-                                    subtitle = "Steps down bitrate automatically when overheating is measured",
+                                    title = "Auto-Reduce Bitrate on Overheat",
+                                    subtitle = "Steps down video bitrate automatically when phone exceeds thermal limit",
                                     checked = settings.performance.autoThermalQualityStepDown,
                                     onCheckedChange = { onUpdatePerformance(settings.performance.copy(autoThermalQualityStepDown = it)) }
                                 )
-                                Spacer(modifier = Modifier.height(10.dp))
+                                SettingsToggleRow(
+                                    title = "Auto-Reduce FPS on Overheat",
+                                    subtitle = "Steps down 60/90 FPS to 30 FPS (or 24 FPS on severe heat) to cool device",
+                                    checked = settings.performance.autoThermalFpsStepDown,
+                                    onCheckedChange = { onUpdatePerformance(settings.performance.copy(autoThermalFpsStepDown = it)) }
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("Overheat Warning Threshold", style = MaterialTheme.typography.titleSmall, color = Color.White)
+                                    Text(
+                                        "${settings.performance.thermalThresholdCelsius.toInt()}°C",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        color = ZroAmber
+                                    )
+                                }
+                                Slider(
+                                    value = settings.performance.thermalThresholdCelsius.coerceIn(38f, 46f),
+                                    onValueChange = { onUpdatePerformance(settings.performance.copy(thermalThresholdCelsius = it)) },
+                                    valueRange = 38f..46f,
+                                    steps = 7,
+                                    colors = SliderDefaults.colors(thumbColor = ZroAmber, activeTrackColor = ZroAmber),
+                                    modifier = Modifier.testTag("settings_thermal_threshold_slider")
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
                                 OutlinedButton(
                                     onClick = {
                                         runCatching {
@@ -462,7 +503,7 @@ fun SettingsScreen(
 
                                 SettingsToggleRow(
                                     title = "Enable Floating Overlay Icon",
-                                    subtitle = "Turn off to disable the floating icon completely",
+                                    subtitle = "ON/OFF switch. Closing the floating icon minimizes it to the screen edge; turn OFF here to remove it.",
                                     checked = settings.overlay.enabled,
                                     onCheckedChange = { wantEnable ->
                                         if (wantEnable && !hasOverlayPerm) {
@@ -472,6 +513,189 @@ fun SettingsScreen(
                                         }
                                     }
                                 )
+
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Button(
+                                        onClick = {
+                                            if (!hasOverlayPerm) onRequestOverlayPermission() else onRestoreFloatingOverlay()
+                                        },
+                                        shape = RoundedCornerShape(10.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = if (overlayEdgeHidden) ZroEmerald else ZroCobalt,
+                                            contentColor = Color.White
+                                        ),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("restore_floating_overlay_btn")
+                                    ) {
+                                        Icon(Icons.Rounded.Restore, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            if (overlayEdgeHidden) "Restore Hidden Icon" else "Restore Floating Icon"
+                                        )
+                                    }
+                                }
+                                if (overlayEdgeHidden) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Floating icon is docked to the screen edge. Tap the edge icon or press Restore above.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = ZroEmerald
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.height(14.dp))
+                                Text("Floating Icon Logo", style = MaterialTheme.typography.titleSmall, color = Color.White)
+                                Spacer(modifier = Modifier.height(8.dp))
+                                val (previewW, previewH) = settings.overlay.effectiveDimensionsDp()
+                                val previewShape = when (settings.overlay.shape) {
+                                    OverlayIconShape.CIRCLE -> CircleShape
+                                    OverlayIconShape.SQUARE -> RoundedCornerShape(12.dp)
+                                    OverlayIconShape.RECTANGLE -> RoundedCornerShape(10.dp)
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(
+                                                width = previewW.coerceIn(40, 84).dp,
+                                                height = previewH.coerceIn(40, 72).dp
+                                            )
+                                            .clip(previewShape)
+                                            .background(Color(0xFF0D1119))
+                                            .border(2.dp, ZroCobalt, previewShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        val logoUri = settings.overlay.customLogoUri
+                                        if (!logoUri.isNullOrBlank()) {
+                                            AsyncImage(
+                                                model = logoUri,
+                                                contentDescription = "Custom floating channel logo",
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        } else {
+                                            Image(
+                                                painter = painterResource(id = R.drawable.img_zro_logo_fg),
+                                                contentDescription = "Default Zro Live logo",
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        }
+                                    }
+                                    Column(
+                                        modifier = Modifier.weight(1f),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = onPickCustomOverlayLogo,
+                                            shape = RoundedCornerShape(10.dp),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("upload_overlay_logo_btn")
+                                        ) {
+                                            Icon(Icons.Rounded.Image, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Upload Channel Logo")
+                                        }
+                                        if (!settings.overlay.customLogoUri.isNullOrBlank()) {
+                                            OutlinedButton(
+                                                onClick = onResetCustomOverlayLogo,
+                                                shape = RoundedCornerShape(10.dp),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .testTag("reset_overlay_logo_btn")
+                                            ) {
+                                                Text("Use Default Zro Logo")
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text("Icon Shape", style = MaterialTheme.typography.titleSmall, color = Color.White)
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OverlayIconShape.entries.forEach { shape ->
+                                        FilterChip(
+                                            selected = settings.overlay.shape == shape,
+                                            onClick = { onUpdateOverlay(settings.overlay.copy(shape = shape)) },
+                                            label = { Text(shape.label) },
+                                            modifier = Modifier.testTag("overlay_shape_${shape.name.lowercase()}")
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text("Icon Size", style = MaterialTheme.typography.titleSmall, color = Color.White)
+                                Spacer(modifier = Modifier.height(6.dp))
+                                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    OverlayIconSize.entries.forEach { sz ->
+                                        FilterChip(
+                                            selected = settings.overlay.iconSize == sz,
+                                            onClick = { onUpdateOverlay(settings.overlay.copy(iconSize = sz)) },
+                                            label = { Text(sz.label) },
+                                            modifier = Modifier.testTag("overlay_size_${sz.name.lowercase()}")
+                                        )
+                                    }
+                                }
+
+                                if (settings.overlay.iconSize == OverlayIconSize.CUSTOM) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    if (settings.overlay.shape == OverlayIconShape.RECTANGLE) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text("Custom Width", style = MaterialTheme.typography.labelLarge, color = Color.White)
+                                            Text("${settings.overlay.customWidthDp} dp", style = MaterialTheme.typography.labelMedium, fontFamily = JetBrainsMonoFontFamily, color = ZroCobalt)
+                                        }
+                                        Slider(
+                                            value = settings.overlay.customWidthDp.toFloat(),
+                                            onValueChange = { onUpdateOverlay(settings.overlay.copy(customWidthDp = it.toInt().coerceIn(44, 140))) },
+                                            valueRange = 44f..140f,
+                                            colors = SliderDefaults.colors(thumbColor = ZroCobalt, activeTrackColor = ZroCobalt),
+                                            modifier = Modifier.testTag("overlay_custom_width_slider")
+                                        )
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text("Custom Height", style = MaterialTheme.typography.labelLarge, color = Color.White)
+                                            Text("${settings.overlay.customHeightDp} dp", style = MaterialTheme.typography.labelMedium, fontFamily = JetBrainsMonoFontFamily, color = ZroCobalt)
+                                        }
+                                        Slider(
+                                            value = settings.overlay.customHeightDp.toFloat(),
+                                            onValueChange = { onUpdateOverlay(settings.overlay.copy(customHeightDp = it.toInt().coerceIn(32, 96))) },
+                                            valueRange = 32f..96f,
+                                            colors = SliderDefaults.colors(thumbColor = ZroCobalt, activeTrackColor = ZroCobalt),
+                                            modifier = Modifier.testTag("overlay_custom_height_slider")
+                                        )
+                                    } else {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text("Custom Size", style = MaterialTheme.typography.labelLarge, color = Color.White)
+                                            Text("${settings.overlay.customSizeDp} dp", style = MaterialTheme.typography.labelMedium, fontFamily = JetBrainsMonoFontFamily, color = ZroCobalt)
+                                        }
+                                        Slider(
+                                            value = settings.overlay.customSizeDp.toFloat(),
+                                            onValueChange = { onUpdateOverlay(settings.overlay.copy(customSizeDp = it.toInt().coerceIn(36, 96))) },
+                                            valueRange = 36f..96f,
+                                            colors = SliderDefaults.colors(thumbColor = ZroCobalt, activeTrackColor = ZroCobalt),
+                                            modifier = Modifier.testTag("overlay_custom_size_slider")
+                                        )
+                                    }
+                                }
 
                                 Spacer(modifier = Modifier.height(10.dp))
                                 Row(
@@ -493,19 +717,7 @@ fun SettingsScreen(
                                     colors = SliderDefaults.colors(thumbColor = ZroCobalt, activeTrackColor = ZroCobalt)
                                 )
 
-                                Text("Icon Size", style = MaterialTheme.typography.titleSmall, color = Color.White)
                                 Spacer(modifier = Modifier.height(6.dp))
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    OverlayIconSize.entries.forEach { sz ->
-                                        FilterChip(
-                                            selected = settings.overlay.iconSize == sz,
-                                            onClick = { onUpdateOverlay(settings.overlay.copy(iconSize = sz)) },
-                                            label = { Text(sz.label) }
-                                        )
-                                    }
-                                }
-
-                                Spacer(modifier = Modifier.height(10.dp))
                                 Text("Default Corner Position", style = MaterialTheme.typography.titleSmall, color = Color.White)
                                 Spacer(modifier = Modifier.height(6.dp))
                                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {

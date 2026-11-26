@@ -88,10 +88,35 @@ class StreamingForegroundService : Service() {
         const val ACTION_STOP_VOICE_FG = "com.example.zro.ACTION_STOP_VOICE_FG"
         const val ACTION_SWITCH_VIDEO_SOURCE = "com.example.zro.ACTION_SWITCH_VIDEO_SOURCE"
         const val ACTION_SWITCH_SCENE = "com.example.zro.ACTION_SWITCH_SCENE"
+        const val ACTION_UPDATE_LIVE_BITRATE = "com.example.zro.ACTION_UPDATE_LIVE_BITRATE"
         const val EXTRA_SESSION_ID = "extra_session_id"
         const val EXTRA_VIDEO_SOURCE = "extra_video_source"
         const val EXTRA_SCENE_SLOT = "extra_scene_slot"
         const val EXTRA_IS_RECONNECT = "extra_is_reconnect"
+        const val EXTRA_BITRATE_KBPS = "extra_bitrate_kbps"
+
+        /**
+         * Suggests a safer lower bitrate when network uplink degrades (POOR health, rising dropped frames,
+         * or measured uplink sustainably below 65% of target). Returns null when network is healthy.
+         */
+        fun computeWeakNetworkSuggestedBitrate(
+            measuredKbps: Int,
+            activeTargetKbps: Int,
+            health: StreamHealth,
+            recentDroppedFrames: Long
+        ): Int? {
+            if (activeTargetKbps <= 1500) return null
+            val uplinkStarved = measuredKbps in 100 until (activeTargetKbps * 0.65f).toInt()
+            val degraded = health == StreamHealth.POOR || recentDroppedFrames >= 3L || uplinkStarved
+            if (!degraded) return null
+            val baseTarget = if (measuredKbps >= 800) {
+                (measuredKbps * 0.85f).toInt()
+            } else {
+                (activeTargetKbps * 0.70f).toInt()
+            }
+            val rounded = ((baseTarget / 500) * 500).coerceIn(1000, (activeTargetKbps - 500).coerceAtLeast(1000))
+            return if (rounded < activeTargetKbps) rounded else null
+        }
 
         /**
          * Preserves exact YouTube 16:9 / 9:16 broadcast resolutions (1920x1080, 1280x720, 640x360)
@@ -195,6 +220,7 @@ class StreamingForegroundService : Service() {
     private val peakBitrateKbps = AtomicInteger(0)
 
     private var activeBitrateKbps = 4500
+    private var selectedTargetBitrateKbps = 4500
     private var activeCaptureMode = CaptureMode.FULL_SCREEN
     @Volatile private var activeVideoSource = LiveVideoSource.LOCAL_FULL_SCREEN
     private var activeIsReconnect = false
@@ -205,7 +231,9 @@ class StreamingForegroundService : Service() {
     private var activeSessionTitle = "Mobile Gaming Live"
     private var activeSessionVisibility = "PUBLIC"
     private var activeSessionResolutionLabel = "720p"
-    private var activeSessionFps = 30
+    @Volatile private var activeSessionFps = 30
+    @Volatile private var baseSessionFps = 30
+    @Volatile private var thermalFpsThrottledFlag = false
     private var activeStreamWidth = 1280
     private var activeStreamHeight = 720
     private var activeStereoAudio = true
@@ -230,7 +258,9 @@ class StreamingForegroundService : Service() {
         dualMirrorObserverJob = serviceScope.launch {
             DualPhoneEngine.shared.telemetry.collect { dt ->
                 val proj = mediaProjection
+                // Only spin up a separate mirror VirtualDisplay if localCaptureVirtualDisplay is NOT already running
                 if (proj != null &&
+                    localCaptureVirtualDisplay == null &&
                     dt.role == DualPhoneRole.PHONE1_GAMEPLAY &&
                     dt.linkState == DualLinkState.CONNECTED &&
                     mirrorVirtualDisplay == null
@@ -284,6 +314,10 @@ class StreamingForegroundService : Service() {
                     requestVideoKeyFrame()
                 }
                 refreshNotification()
+            }
+            ACTION_UPDATE_LIVE_BITRATE -> {
+                val requested = intent.getIntExtra(EXTRA_BITRATE_KBPS, activeBitrateKbps)
+                handleLiveBitrateUpdate(requested)
             }
             ACTION_STOP_STREAM -> stopAllCaptureAndBroadcast(error = null)
             ACTION_TOGGLE_PAUSE -> {
@@ -411,9 +445,8 @@ class StreamingForegroundService : Service() {
             if (previewSurface != null) {
                 createOrUpdateVirtualDisplay(projection, width, height, previewSurface)
             }
-            // Start real local screen ImageReader capture so OBS StudioCanvasPreview shows the actual phone screen immediately!
+            // Start single unified local screen ImageReader capture (feeds OBS Preview + Live Compositor + Dual-Phone mirror)
             startLocalScreenFrameCapture(projection, width, height)
-            startDualPhoneMirrorCaptureIfNeeded(projection)
 
             val sourceLabel = if (activeCaptureMode == CaptureMode.GAME_APP_ONLY) {
                 "Selected Game / App Window (Private)"
@@ -739,13 +772,14 @@ class StreamingForegroundService : Service() {
                 acquireBroadcastWakeLock()
 
                 // Step 4: Initialize Video Encoder & attach real OBS StudioLiveCompositor pipeline!
+                selectedTargetBitrateKbps = activeBitrateKbps
+                baseSessionFps = activeSessionFps
+                thermalFpsThrottledFlag = false
                 val encoderName = setupVideoEncoder(width, height, activeSessionFps, activeBitrateKbps)
                 releaseVirtualDisplayOnly()
                 if (projection != null) {
-                    // Always feed local screen capture into ImageReader so BOTH OBS Preview and Live Compositor receive real frames
-                    // (and Auto Solo fallback has instant local frames if Phone 2 disconnects mid-stream!)
+                    // Single unified ImageReader captures screen once for OBS Preview, Live Compositor & Dual-Phone mirror (saves GPU/heat)
                     startLocalScreenFrameCapture(projection, width, height)
-                    startDualPhoneMirrorCaptureIfNeeded(projection)
                 }
 
                 // Step 4B: If Dual Live (16:9 + 9:16), initialize separate secondary portrait H.264 encoder & RTMP publisher
@@ -929,12 +963,22 @@ class StreamingForegroundService : Service() {
             val reader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 3)
             localCaptureImageReader = reader
 
-            // Double-buffered bitmaps eliminate torn frames while keeping GC allocations near zero
+            // Double-buffered bitmaps + pre-bound Canvas eliminate per-frame allocations & reduce GC heat
             var writeIndex = 0
             val frontBuffers = arrayOfNulls<Bitmap>(2)
+            val frontCanvases = arrayOfNulls<Canvas>(2)
             var paddedTmp: Bitmap? = null
             val srcCrop = Rect(0, 0, capW, capH)
             val dstCrop = Rect(0, 0, capW, capH)
+
+            // Reuse a single downscaled mirror buffer when acting as Dual-Phone Phone 1 (eliminates a 2nd VirtualDisplay!)
+            val mirrorW = 854
+            val mirrorH = 480
+            var mirrorScaledBmp: Bitmap? = null
+            var mirrorScaledCanvas: Canvas? = null
+            val mirrorDstRect = Rect(0, 0, mirrorW, mirrorH)
+            val mirrorBaos = ByteArrayOutputStream(48 * 1024)
+            var lastMirrorPushMs = 0L
 
             reader.setOnImageAvailableListener({ r ->
                 val img = runCatching { r.acquireLatestImage() }.getOrNull() ?: return@setOnImageAvailableListener
@@ -951,6 +995,7 @@ class StreamingForegroundService : Service() {
                     if (outBmp == null || outBmp.isRecycled || outBmp.width != capW || outBmp.height != capH) {
                         outBmp = Bitmap.createBitmap(capW, capH, Bitmap.Config.ARGB_8888)
                         frontBuffers[nextIdx] = outBmp
+                        frontCanvases[nextIdx] = Canvas(outBmp)
                     }
 
                     if (paddedW == capW) {
@@ -962,10 +1007,33 @@ class StreamingForegroundService : Service() {
                             paddedTmp = tmp
                         }
                         tmp.copyPixelsFromBuffer(plane.buffer)
-                        Canvas(outBmp).drawBitmap(tmp, srcCrop, dstCrop, null)
+                        val dstCanvas = frontCanvases[nextIdx] ?: Canvas(outBmp).also { frontCanvases[nextIdx] = it }
+                        dstCanvas.drawBitmap(tmp, srcCrop, dstCrop, null)
                     }
                     writeIndex = nextIdx
                     ZroStreamCoordinator.updateLocalCapturedFrame(outBmp)
+
+                    // Unified Dual-Phone mirror push (~15 FPS) without running a duplicate VirtualDisplay
+                    val dt = DualPhoneEngine.shared.telemetry.value
+                    if (dt.role == DualPhoneRole.PHONE1_GAMEPLAY &&
+                        dt.linkState == DualLinkState.CONNECTED &&
+                        !isPaused.get()
+                    ) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastMirrorPushMs >= 66L) {
+                            lastMirrorPushMs = now
+                            var mBmp = mirrorScaledBmp
+                            if (mBmp == null || mBmp.isRecycled) {
+                                mBmp = Bitmap.createBitmap(mirrorW, mirrorH, Bitmap.Config.ARGB_8888)
+                                mirrorScaledBmp = mBmp
+                                mirrorScaledCanvas = Canvas(mBmp)
+                            }
+                            mirrorScaledCanvas?.drawBitmap(outBmp, srcCrop, mirrorDstRect, null)
+                            mirrorBaos.reset()
+                            mBmp.compress(Bitmap.CompressFormat.JPEG, 68, mirrorBaos)
+                            DualPhoneEngine.shared.pushMirroredFrameJpeg(mirrorBaos.toByteArray(), mirrorW, mirrorH, minIntervalMs = 66L)
+                        }
+                    }
                 } catch (_: Exception) {
                     // Best-effort frame acquisition
                 } finally {
@@ -1006,11 +1074,19 @@ class StreamingForegroundService : Service() {
         compositorPumpJob = serviceScope.launch {
             while (isActive && isStreaming.get()) {
                 val frameStartMs = System.currentTimeMillis()
-                val targetFps = activeSessionFps.coerceIn(15, 90)
-                val targetIntervalMs = (1000L / targetFps).coerceAtLeast(11L)
+                val workspace = ZroStreamCoordinator.activeStudioWorkspace.value
+                // Save CPU/GPU & phone heat on static scenes (Starting Soon / BRB / Ending / Privacy Shield)
+                val isStaticScene = isPrivacyShieldActive.get() ||
+                    workspace.brbActive ||
+                    workspace.activeSceneSlot != SceneSlot.GAMEPLAY_LIVE
+                val effectiveFps = if (isStaticScene) {
+                    minOf(activeSessionFps, 12).coerceAtLeast(10)
+                } else {
+                    activeSessionFps.coerceIn(15, 90)
+                }
+                val targetIntervalMs = (1000L / effectiveFps).coerceAtLeast(11L)
 
                 if (!isPaused.get()) {
-                    val workspace = ZroStreamCoordinator.activeStudioWorkspace.value
                     val meters = ZroAudioEngine.meterState.value
                     val chat = ZroStreamCoordinator.liveChatMessages.value
                     val remoteFrame = DualPhoneEngine.shared.mirroredFrame.value
@@ -1161,7 +1237,7 @@ class StreamingForegroundService : Service() {
             height = height,
             fps = fps,
             bitrateKbps = bitrateKbps,
-            preferHardware = false
+            preferHardware = true
         )
         secondaryVideoInputSurface = handle.inputSurface
         secondaryVideoEncoder = handle.codec
@@ -1537,39 +1613,64 @@ class StreamingForegroundService : Service() {
                     attemptReconnect(pub)
                 }
 
-                // Adaptive Bitrate & Honest Thermal Auto-Protection every 5s
+                // Adaptive Bitrate, Weak-Network Suggestions & Honest Thermal Auto-Protection every 5s
                 var thermalStepApplied = ZroStreamCoordinator.telemetry.value.thermalThrottled
+                var suggestedWeakBitrate = ZroStreamCoordinator.telemetry.value.weakNetworkSuggestedBitrateKbps
+                var recentDropsWindow = 0L
                 if (tick % 5 == 0) {
                     val perf = ZroStreamCoordinator.currentPerfSettings
                     val streamCfg = ZroStreamCoordinator.currentStreamSettings
                     val dev = telemetryMonitor.snapshot()
+                    val tempMeasured = dev.batteryTempCelsius
+                    val isThermalHot = dev.isOverheating ||
+                        (tempMeasured != null && tempMeasured >= perf.thermalThresholdCelsius)
+                    val isThermalSevere = tempMeasured != null && tempMeasured >= (perf.thermalThresholdCelsius + 3f)
                     ZroStreamCoordinator.updateDeviceTemperature(
                         dev.batteryTempCelsius,
                         DeviceTelemetryMonitor.formatTemperature(dev)
                     )
                     val recentDrops = dropped - lastDropped
+                    recentDropsWindow = recentDrops
                     lastDropped = dropped
 
-                    if (perf.autoThermalQualityStepDown && dev.isOverheating) {
-                        if (activeBitrateKbps > 1500) {
+                    if (isThermalHot) {
+                        if (perf.autoThermalQualityStepDown && activeBitrateKbps > 1500) {
                             val stepped = (activeBitrateKbps * 0.78f).toInt().coerceAtLeast(1500)
                             applyDynamicVideoBitrate(stepped)
+                            thermalStepApplied = true
                         }
-                        if (activeSessionFps > 30) {
-                            activeSessionFps = 30
+                        if (perf.autoThermalFpsStepDown) {
+                            val desiredFpsCap = when {
+                                isThermalSevere && activeSessionFps > 24 -> 24
+                                activeSessionFps > 30 -> 30
+                                else -> activeSessionFps
+                            }
+                            if (desiredFpsCap < activeSessionFps) {
+                                activeSessionFps = desiredFpsCap
+                                thermalFpsThrottledFlag = true
+                                thermalStepApplied = true
+                            }
                         }
-                        thermalStepApplied = true
-                    } else if (streamCfg.adaptiveBitrate && recentDrops >= 4 && activeBitrateKbps > 1000) {
-                        val stepped = (activeBitrateKbps * 0.85f).toInt().coerceAtLeast(1000)
-                        applyDynamicVideoBitrate(stepped)
-                    } else if (streamCfg.adaptiveBitrate && recentDrops == 0L && !dev.isOverheating && activeBitrateKbps < streamCfg.bitrateKbps) {
-                        val cap = minOf(
-                            streamCfg.bitrateKbps,
-                            DeviceTelemetryMonitor.maxAllowedBitrateKbps(dev, perf.profile, perf.lowRamMode, streamCfg.lowDataMode)
-                        )
-                        if (activeBitrateKbps < cap) {
-                            val recovered = (activeBitrateKbps + 350).coerceAtMost(cap)
-                            applyDynamicVideoBitrate(recovered)
+                    } else {
+                        // Restore thermal FPS step-down once device cools safely below (threshold - 2°C)
+                        if (thermalFpsThrottledFlag &&
+                            (tempMeasured == null || tempMeasured <= (perf.thermalThresholdCelsius - 2f))
+                        ) {
+                            activeSessionFps = baseSessionFps
+                            thermalFpsThrottledFlag = false
+                        }
+                        if (streamCfg.adaptiveBitrate && recentDrops >= 4 && activeBitrateKbps > 1000) {
+                            val stepped = (activeBitrateKbps * 0.85f).toInt().coerceAtLeast(1000)
+                            applyDynamicVideoBitrate(stepped)
+                        } else if (streamCfg.adaptiveBitrate && recentDrops == 0L && activeBitrateKbps < selectedTargetBitrateKbps) {
+                            val cap = minOf(
+                                selectedTargetBitrateKbps,
+                                DeviceTelemetryMonitor.maxAllowedBitrateKbps(dev, perf.profile, perf.lowRamMode, streamCfg.lowDataMode)
+                            )
+                            if (activeBitrateKbps < cap) {
+                                val recovered = (activeBitrateKbps + 350).coerceAtMost(cap)
+                                applyDynamicVideoBitrate(recovered)
+                            }
                         }
                     }
 
@@ -1588,17 +1689,34 @@ class StreamingForegroundService : Service() {
                     else -> StreamHealth.GOOD
                 }
 
+                if (isLiveConfirmed.get() && tick >= 6) {
+                    suggestedWeakBitrate = if (health == StreamHealth.EXCELLENT || health == StreamHealth.GOOD) {
+                        null
+                    } else {
+                        computeWeakNetworkSuggestedBitrate(
+                            measuredKbps = kbps,
+                            activeTargetKbps = activeBitrateKbps,
+                            health = health,
+                            recentDroppedFrames = recentDropsWindow
+                        )
+                    }
+                }
+
                 ZroStreamCoordinator.updateTelemetry { prev ->
                     prev.copy(
                         durationSec = elapsedSec,
                         actualBitrateKbps = kbps,
                         targetBitrateKbps = activeBitrateKbps,
+                        selectedBitrateKbps = selectedTargetBitrateKbps,
+                        weakNetworkSuggestedBitrateKbps = suggestedWeakBitrate,
+                        targetFps = activeSessionFps,
                         actualFps = fpsNow,
                         droppedFrames = dropped,
                         totalFrames = total,
                         bytesSentTotal = totalBytes,
                         streamHealth = health,
                         thermalThrottled = thermalStepApplied,
+                        thermalFpsThrottled = thermalFpsThrottledFlag,
                         gameAudioCaptureNote = ZroAudioEngine.gameCaptureStatus.value
                     )
                 }
@@ -1696,13 +1814,79 @@ class StreamingForegroundService : Service() {
         return arr
     }
 
-    private fun applyDynamicVideoBitrate(newBitrateKbps: Int) {
-        activeBitrateKbps = newBitrateKbps
-        runCatching {
+    /**
+     * Adjusts video bitrate live without restarting the RTMP stream using MediaCodec.setParameters.
+     * Reports honest feedback if the device H.264 encoder does not support dynamic runtime bitrate changes.
+     */
+    private fun handleLiveBitrateUpdate(requestedKbps: Int) {
+        val perf = ZroStreamCoordinator.currentPerfSettings
+        val streamCfg = ZroStreamCoordinator.currentStreamSettings
+        val dev = telemetryMonitor.snapshot()
+        val maxSafe = DeviceTelemetryMonitor.maxAllowedBitrateKbps(
+            dev,
+            perf.profile,
+            perf.lowRamMode,
+            streamCfg.lowDataMode
+        ).coerceAtLeast(1500)
+        val clamped = requestedKbps.coerceIn(1000, maxSafe)
+        selectedTargetBitrateKbps = clamped
+
+        if (!isStreaming.get() || videoEncoder == null) {
+            activeBitrateKbps = clamped
+            ZroStreamCoordinator.updateTelemetry { prev ->
+                prev.copy(
+                    selectedBitrateKbps = clamped,
+                    targetBitrateKbps = clamped,
+                    weakNetworkSuggestedBitrateKbps = null
+                )
+            }
+            return
+        }
+
+        val applied = applyDynamicVideoBitrate(clamped)
+        if (applied) {
+            val mbps = String.format(java.util.Locale.US, "%.1f", clamped / 1000f)
+            val capNote = if (clamped < requestedKbps) " (capped for thermal/device safety)" else ""
+            ZroStreamCoordinator.updateTelemetry { prev ->
+                prev.copy(
+                    selectedBitrateKbps = clamped,
+                    targetBitrateKbps = clamped,
+                    liveBitrateChangeSupported = true,
+                    liveBitrateStatusMessage = "Live bitrate applied: $mbps Mbps$capNote",
+                    weakNetworkSuggestedBitrateKbps = null
+                )
+            }
+            refreshNotification()
+        } else {
+            ZroStreamCoordinator.updateTelemetry { prev ->
+                prev.copy(
+                    selectedBitrateKbps = clamped,
+                    liveBitrateChangeSupported = false,
+                    liveBitrateStatusMessage = "This device's H.264 encoder rejected live bitrate changes. Stop stream, adjust bitrate in Live Setup, and reconnect."
+                )
+            }
+        }
+    }
+
+    private fun applyDynamicVideoBitrate(newBitrateKbps: Int): Boolean {
+        val encoder = videoEncoder ?: return false
+        return runCatching {
             val params = Bundle().apply {
                 putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, newBitrateKbps * 1000)
             }
-            videoEncoder?.setParameters(params)
+            encoder.setParameters(params)
+            if (isDualLiveActive.get()) {
+                val secKbps = (newBitrateKbps * 0.65f).toInt().coerceIn(1000, 6000)
+                val secParams = Bundle().apply {
+                    putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, secKbps * 1000)
+                }
+                runCatching { secondaryVideoEncoder?.setParameters(secParams) }
+            }
+            activeBitrateKbps = newBitrateKbps
+            true
+        }.getOrElse { e ->
+            Log.w(TAG, "Dynamic bitrate change rejected by encoder: ${e.message}")
+            false
         }
     }
 

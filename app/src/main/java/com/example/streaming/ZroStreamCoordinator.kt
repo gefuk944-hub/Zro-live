@@ -42,6 +42,9 @@ object ZroStreamCoordinator {
     private val _overlayVisible = MutableStateFlow(false)
     val overlayVisible: StateFlow<Boolean> = _overlayVisible.asStateFlow()
 
+    private val _overlayEdgeHidden = MutableStateFlow(false)
+    val overlayEdgeHidden: StateFlow<Boolean> = _overlayEdgeHidden.asStateFlow()
+
     private val _activeVoiceRoomName = MutableStateFlow<String?>(null)
     val activeVoiceRoomName: StateFlow<String?> = _activeVoiceRoomName.asStateFlow()
 
@@ -200,6 +203,38 @@ object ZroStreamCoordinator {
 
     fun setOverlayVisible(visible: Boolean) {
         _overlayVisible.value = visible
+        if (!visible) {
+            _overlayEdgeHidden.value = false
+        }
+    }
+
+    fun setOverlayEdgeHidden(edgeHidden: Boolean) {
+        _overlayEdgeHidden.value = edgeHidden
+    }
+
+    fun requestRestoreOverlay(context: Context) {
+        _overlayEdgeHidden.value = false
+        val intent = Intent(context, com.example.overlay.FloatingOverlayService::class.java).apply {
+            action = com.example.overlay.FloatingOverlayService.ACTION_RESTORE
+        }
+        runCatching { context.startService(intent) }
+    }
+
+    fun requestUpdateLiveBitrate(context: Context, bitrateKbps: Int) {
+        val safeKbps = bitrateKbps.coerceIn(1000, 12000)
+        _telemetry.update { prev ->
+            prev.copy(
+                selectedBitrateKbps = safeKbps,
+                targetBitrateKbps = if (isSessionActive()) prev.targetBitrateKbps else safeKbps
+            )
+        }
+        if (isSessionActive()) {
+            val intent = Intent(context, StreamingForegroundService::class.java).apply {
+                action = StreamingForegroundService.ACTION_UPDATE_LIVE_BITRATE
+                putExtra(StreamingForegroundService.EXTRA_BITRATE_KBPS, safeKbps)
+            }
+            runCatching { context.startService(intent) }
+        }
     }
 
     fun setActiveVoiceRoomName(name: String?) {
@@ -282,6 +317,11 @@ object ZroStreamCoordinator {
             state = if (error != null) StreamLifecycleState.ERROR else StreamLifecycleState.IDLE,
             streamHealth = StreamHealth.OFFLINE,
             targetBitrateKbps = currentStreamSettings.bitrateKbps,
+            selectedBitrateKbps = currentStreamSettings.bitrateKbps,
+            liveBitrateChangeSupported = true,
+            liveBitrateStatusMessage = null,
+            weakNetworkSuggestedBitrateKbps = null,
+            thermalFpsThrottled = false,
             targetFps = currentStreamSettings.fps,
             resolutionLabel = currentStreamSettings.resolution.shortLabel,
             captureActive = false,

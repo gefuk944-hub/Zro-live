@@ -659,7 +659,59 @@ object StudioWorkspaceReducer {
         return state.copy(scenes = updatedScenes)
     }
 
-    // --- LAYER CROPPING (4-EDGE INTERACTIVE + PRESETS + RESET) ---
+    // --- LAYER CROPPING (4-EDGE INTERACTIVE + PRESETS + RESET + RESTORE ORIGINAL SIZE) ---
+    // Layer (x, y, width, height) ALWAYS equals the exact visible cropped bounding box so
+    // selection borders, drag gestures, and 8-handle resizes have zero invisible/empty margins.
+
+    private fun ensureOriginalDimensions(layer: SceneLayer): SceneLayer {
+        if (layer.origWidth > 0.01f && layer.origHeight > 0.01f) return layer
+        val visW = (1f - layer.cropLeft - layer.cropRight).coerceIn(0.15f, 1f)
+        val visH = (1f - layer.cropTop - layer.cropBottom).coerceIn(0.15f, 1f)
+        val fullW = (layer.width / visW).coerceIn(MIN_WIDTH, 1f)
+        val fullH = (layer.height / visH).coerceIn(MIN_HEIGHT, 1f)
+        return layer.copy(origWidth = fullW, origHeight = fullH)
+    }
+
+    private fun applyCropFractionsTightBoundingBox(
+        layer: SceneLayer,
+        newLeft: Float,
+        newTop: Float,
+        newRight: Float,
+        newBottom: Float
+    ): SceneLayer {
+        val tracked = ensureOriginalDimensions(layer)
+        val oldVisW = (1f - tracked.cropLeft - tracked.cropRight).coerceIn(0.15f, 1f)
+        val oldVisH = (1f - tracked.cropTop - tracked.cropBottom).coerceIn(0.15f, 1f)
+        val fullW = (tracked.width / oldVisW).coerceAtLeast(MIN_WIDTH)
+        val fullH = (tracked.height / oldVisH).coerceAtLeast(MIN_HEIGHT)
+        val fullX = tracked.x - fullW * tracked.cropLeft
+        val fullY = tracked.y - fullH * tracked.cropTop
+
+        val maxCombined = 0.85f
+        val l = newLeft.coerceIn(0f, 0.78f)
+        val r = newRight.coerceIn(0f, (maxCombined - l).coerceIn(0f, 0.78f))
+        val t = newTop.coerceIn(0f, 0.78f)
+        val b = newBottom.coerceIn(0f, (maxCombined - t).coerceIn(0f, 0.78f))
+
+        val newVisW = (1f - l - r).coerceAtLeast(0.15f)
+        val newVisH = (1f - t - b).coerceAtLeast(0.15f)
+
+        val rawW = (fullW * newVisW).coerceIn(MIN_WIDTH, 1.0f)
+        val rawH = (fullH * newVisH).coerceIn(MIN_HEIGHT, 1.0f)
+        val rawX = (fullX + fullW * l).coerceIn(0f, (1f - rawW).coerceAtLeast(0f))
+        val rawY = (fullY + fullH * t).coerceIn(0f, (1f - rawH).coerceAtLeast(0f))
+
+        return tracked.copy(
+            x = rawX,
+            y = rawY,
+            width = rawW,
+            height = rawH,
+            cropLeft = l,
+            cropTop = t,
+            cropRight = r,
+            cropBottom = b
+        )
+    }
 
     fun cropLayerEdge(
         state: StudioWorkspaceState,
@@ -668,23 +720,33 @@ object StudioWorkspaceReducer {
         deltaNorm: Float
     ): StudioWorkspaceState {
         return updateLayer(state, layerId) { layer ->
+            val visW = (1f - layer.cropLeft - layer.cropRight).coerceIn(0.15f, 1f)
+            val visH = (1f - layer.cropTop - layer.cropBottom).coerceIn(0.15f, 1f)
             val maxCombined = 0.85f
             when (edge) {
                 CropEdge.LEFT -> {
-                    val maxLeft = (maxCombined - layer.cropRight).coerceIn(0f, 0.45f)
-                    layer.copy(cropLeft = (layer.cropLeft + deltaNorm).coerceIn(0f, maxLeft))
+                    val deltaFull = deltaNorm * visW
+                    val maxLeft = (maxCombined - layer.cropRight).coerceIn(0f, 0.78f)
+                    val nextL = (layer.cropLeft + deltaFull).coerceIn(0f, maxLeft)
+                    applyCropFractionsTightBoundingBox(layer, nextL, layer.cropTop, layer.cropRight, layer.cropBottom)
                 }
                 CropEdge.RIGHT -> {
-                    val maxRight = (maxCombined - layer.cropLeft).coerceIn(0f, 0.45f)
-                    layer.copy(cropRight = (layer.cropRight - deltaNorm).coerceIn(0f, maxRight))
+                    val deltaFull = deltaNorm * visW
+                    val maxRight = (maxCombined - layer.cropLeft).coerceIn(0f, 0.78f)
+                    val nextR = (layer.cropRight - deltaFull).coerceIn(0f, maxRight)
+                    applyCropFractionsTightBoundingBox(layer, layer.cropLeft, layer.cropTop, nextR, layer.cropBottom)
                 }
                 CropEdge.TOP -> {
-                    val maxTop = (maxCombined - layer.cropBottom).coerceIn(0f, 0.45f)
-                    layer.copy(cropTop = (layer.cropTop + deltaNorm).coerceIn(0f, maxTop))
+                    val deltaFull = deltaNorm * visH
+                    val maxTop = (maxCombined - layer.cropBottom).coerceIn(0f, 0.78f)
+                    val nextT = (layer.cropTop + deltaFull).coerceIn(0f, maxTop)
+                    applyCropFractionsTightBoundingBox(layer, layer.cropLeft, nextT, layer.cropRight, layer.cropBottom)
                 }
                 CropEdge.BOTTOM -> {
-                    val maxBottom = (maxCombined - layer.cropTop).coerceIn(0f, 0.45f)
-                    layer.copy(cropBottom = (layer.cropBottom - deltaNorm).coerceIn(0f, maxBottom))
+                    val deltaFull = deltaNorm * visH
+                    val maxBottom = (maxCombined - layer.cropTop).coerceIn(0f, 0.78f)
+                    val nextB = (layer.cropBottom - deltaFull).coerceIn(0f, maxBottom)
+                    applyCropFractionsTightBoundingBox(layer, layer.cropLeft, layer.cropTop, layer.cropRight, nextB)
                 }
             }
         }
@@ -699,11 +761,11 @@ object StudioWorkspaceReducer {
         cropBottom: Float? = null
     ): StudioWorkspaceState {
         return updateLayer(state, layerId) { layer ->
-            val l = (cropLeft ?: layer.cropLeft).coerceIn(0f, 0.45f)
-            val r = (cropRight ?: layer.cropRight).coerceIn(0f, (0.85f - l).coerceIn(0f, 0.45f))
-            val t = (cropTop ?: layer.cropTop).coerceIn(0f, 0.45f)
-            val b = (cropBottom ?: layer.cropBottom).coerceIn(0f, (0.85f - t).coerceIn(0f, 0.45f))
-            layer.copy(cropLeft = l, cropTop = t, cropRight = r, cropBottom = b)
+            val l = (cropLeft ?: layer.cropLeft).coerceIn(0f, 0.78f)
+            val r = (cropRight ?: layer.cropRight).coerceIn(0f, (0.85f - l).coerceIn(0f, 0.78f))
+            val t = (cropTop ?: layer.cropTop).coerceIn(0f, 0.78f)
+            val b = (cropBottom ?: layer.cropBottom).coerceIn(0f, (0.85f - t).coerceIn(0f, 0.78f))
+            applyCropFractionsTightBoundingBox(layer, l, t, r, b)
         }
     }
 
@@ -717,19 +779,24 @@ object StudioWorkspaceReducer {
         return updateLayer(state, layerId) { layer ->
             val targetRatio = preset.targetRatio
             if (targetRatio == null) {
-                layer.copy(cropLeft = 0f, cropTop = 0f, cropRight = 0f, cropBottom = 0f)
+                applyCropFractionsTightBoundingBox(layer, 0f, 0f, 0f, 0f)
             } else {
-                val physicalW = (layer.width * canvasAspect).coerceAtLeast(0.01f)
-                val physicalH = layer.height.coerceAtLeast(0.01f)
+                // Compute aspect on the full uncropped frame so switching aspect presets never drifts
+                val visW = (1f - layer.cropLeft - layer.cropRight).coerceIn(0.15f, 1f)
+                val visH = (1f - layer.cropTop - layer.cropBottom).coerceIn(0.15f, 1f)
+                val fullW = (layer.width / visW).coerceAtLeast(MIN_WIDTH)
+                val fullH = (layer.height / visH).coerceAtLeast(MIN_HEIGHT)
+                val physicalW = (fullW * canvasAspect).coerceAtLeast(0.01f)
+                val physicalH = fullH.coerceAtLeast(0.01f)
                 val currentRatio = physicalW / physicalH
                 if (currentRatio > targetRatio) {
                     val keepFrac = (targetRatio / currentRatio).coerceIn(0.15f, 1f)
                     val trimEach = ((1f - keepFrac) / 2f).coerceIn(0f, 0.42f)
-                    layer.copy(cropLeft = trimEach, cropRight = trimEach, cropTop = 0f, cropBottom = 0f)
+                    applyCropFractionsTightBoundingBox(layer, trimEach, 0f, trimEach, 0f)
                 } else {
                     val keepFrac = (currentRatio / targetRatio).coerceIn(0.15f, 1f)
                     val trimEach = ((1f - keepFrac) / 2f).coerceIn(0f, 0.42f)
-                    layer.copy(cropLeft = 0f, cropRight = 0f, cropTop = trimEach, cropBottom = trimEach)
+                    applyCropFractionsTightBoundingBox(layer, 0f, trimEach, 0f, trimEach)
                 }
             }
         }
@@ -737,7 +804,48 @@ object StudioWorkspaceReducer {
 
     fun resetLayerCrop(state: StudioWorkspaceState, layerId: String): StudioWorkspaceState {
         return updateLayer(state, layerId) { layer ->
-            layer.copy(cropLeft = 0f, cropTop = 0f, cropRight = 0f, cropBottom = 0f)
+            applyCropFractionsTightBoundingBox(layer, 0f, 0f, 0f, 0f)
+        }
+    }
+
+    /**
+     * Restores the layer's original uncropped dimensions & aspect ratio centered at its current position.
+     */
+    fun restoreLayerOriginalSize(state: StudioWorkspaceState, layerId: String): StudioWorkspaceState {
+        val scene = state.activeScene
+        return updateLayer(state, layerId) { layer ->
+            val centerX = layer.x + layer.width / 2f
+            val centerY = layer.y + layer.height / 2f
+            val (restoredW, restoredH) = when {
+                layer.origWidth > 0.02f && layer.origHeight > 0.02f ->
+                    layer.origWidth.coerceIn(MIN_WIDTH, 1f) to layer.origHeight.coerceIn(MIN_HEIGHT, 1f)
+                layer.sourceMediaWidth > 0 && layer.sourceMediaHeight > 0 ->
+                    StudioMediaStore.computeNormalizedLayerSize(
+                        mediaWidthPx = layer.sourceMediaWidth,
+                        mediaHeightPx = layer.sourceMediaHeight,
+                        sceneIsVertical = scene.isVertical
+                    )
+                layer.type == LayerSourceType.GAMEPLAY_SCREEN ||
+                    layer.type == LayerSourceType.BACKGROUND ||
+                    layer.type == LayerSourceType.STARTING_SOON ||
+                    layer.type == LayerSourceType.BRB_BANNER ||
+                    layer.type == LayerSourceType.ENDING_BANNER -> 1f to 1f
+                layer.type == LayerSourceType.WEBCAM -> 0.21f to 0.34f
+                else -> 0.45f to 0.35f
+            }
+            val newX = (centerX - restoredW / 2f).coerceIn(0f, (1f - restoredW).coerceAtLeast(0f))
+            val newY = (centerY - restoredH / 2f).coerceIn(0f, (1f - restoredH).coerceAtLeast(0f))
+            layer.copy(
+                x = newX,
+                y = newY,
+                width = restoredW,
+                height = restoredH,
+                cropLeft = 0f,
+                cropTop = 0f,
+                cropRight = 0f,
+                cropBottom = 0f,
+                rotationDeg = 0f
+            )
         }
     }
 
