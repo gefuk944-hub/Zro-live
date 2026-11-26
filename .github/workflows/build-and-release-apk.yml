@@ -32,17 +32,80 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK 36.1 & accept licenses
+      - name: Configure Android SDK & install required packages
+        shell: bash
         run: |
-          set +o pipefail
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          yes | sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
-          yes | sdkmanager --install "platforms;android-36.1" || true
-          yes | sdkmanager --install "build-tools;36.1.0" || true
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          mkdir -p "$SDK_ROOT"
+
+          find_sdkmanager() {
+            if [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+              echo "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+              return 0
+            fi
+            local found
+            found=$(find "$SDK_ROOT/cmdline-tools" -maxdepth 3 -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1 || true)
+            if [ -n "$found" ] && [ -x "$found" ]; then
+              echo "$found"
+              return 0
+            fi
+            if command -v sdkmanager >/dev/null 2>&1; then
+              command -v sdkmanager
+              return 0
+            fi
+            return 1
+          }
+
+          if ! SDKMANAGER="$(find_sdkmanager)"; then
+            echo "Preinstalled cmdline-tools sdkmanager not found; downloading official Android command-line tools..."
+            TMP_ZIP="/tmp/android-cmdline-tools.zip"
+            TMP_EXTRACT="/tmp/android-cmdline-tools-extract"
+            curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o "$TMP_ZIP"
+            rm -rf "$TMP_EXTRACT"
+            mkdir -p "$TMP_EXTRACT" "$SDK_ROOT/cmdline-tools"
+            unzip -q "$TMP_ZIP" -d "$TMP_EXTRACT"
+            rm -rf "$SDK_ROOT/cmdline-tools/latest"
+            mv "$TMP_EXTRACT/cmdline-tools" "$SDK_ROOT/cmdline-tools/latest"
+            rm -rf "$TMP_ZIP" "$TMP_EXTRACT"
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          fi
+
+          echo "Using sdkmanager: $SDKMANAGER"
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" --version
+
+          accept_licenses() {
+            set +o pipefail
+            yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses > /dev/null 2>&1 || true
+            set -o pipefail
+          }
+
+          install_sdk_packages() {
+            set +o pipefail
+            yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install "$@"
+            local rc="${PIPESTATUS[1]}"
+            set -o pipefail
+            return "$rc"
+          }
+
+          accept_licenses
+
+          # Install only modern Android SDK components matching app/build.gradle.kts (compileSdk 36.1, targetSdk 36)
+          install_sdk_packages \
+            "platform-tools" \
+            "platforms;android-36" \
+            "platforms;android-36.1" \
+            "build-tools;36.0.0"
+
+          accept_licenses
+
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+
+          echo "Installed Android SDK packages:"
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" --list_installed
 
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
