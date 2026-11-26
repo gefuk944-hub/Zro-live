@@ -1,6 +1,7 @@
 package com.example.streaming
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -35,6 +36,7 @@ import android.content.ComponentCallbacks2
 import com.example.audio.ZroAudioEngine
 import com.example.data.SettingsStore
 import com.example.data.model.CaptureMode
+import com.example.data.model.LiveBroadcastMode
 import com.example.data.model.LiveVideoSource
 import com.example.data.model.PerformanceProfile
 import com.example.data.model.StreamHealth
@@ -98,6 +100,43 @@ class StreamingForegroundService : Service() {
             val alignedH = (h / 2) * 2
             return alignedW.coerceAtLeast(320) to alignedH.coerceAtLeast(180)
         }
+
+        /**
+         * Verifies whether this device can genuinely sustain simultaneous Dual Live (16:9 + 9:16)
+         * using two concurrent H.264 video encoders. Never fakes support on constrained devices.
+         */
+        fun checkDualLiveSupport(context: Context): Pair<Boolean, String> {
+            return try {
+                if (ZroStreamCoordinator.currentPerfSettings.lowRamMode) {
+                    return false to "Dual Live is disabled while Low-RAM mode is active. Switch to 16:9 Live or Shorts Live."
+                }
+                val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                val memInfo = ActivityManager.MemoryInfo()
+                am?.getMemoryInfo(memInfo)
+                val totalRamMb = if (memInfo.totalMem > 0L) memInfo.totalMem / (1024L * 1024L) else 4096L
+                if (totalRamMb < 3400L) {
+                    return false to "Dual Live requires at least 4 GB RAM (${totalRamMb} MB detected). Use 16:9 Live or Shorts Live."
+                }
+
+                val list = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+                val avcEncoders = list.codecInfos.filter { info ->
+                    info.isEncoder && info.supportedTypes.any { it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, ignoreCase = true) }
+                }
+                val maxInstances = avcEncoders.maxOfOrNull { info ->
+                    runCatching {
+                        info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).maxSupportedInstances
+                    }.getOrDefault(1)
+                } ?: 0
+
+                if (maxInstances >= 2 || avcEncoders.size >= 2) {
+                    true to "Supported (${totalRamMb / 1024} GB RAM • concurrent H.264 encoders ready)"
+                } else {
+                    false to "This device only exposes 1 H.264 encoder instance. Dual Live requires 2 concurrent encoders."
+                }
+            } catch (e: Exception) {
+                false to "Unable to verify dual H.264 encoder capability (${e.localizedMessage ?: "unknown error"})."
+            }
+        }
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -114,6 +153,19 @@ class StreamingForegroundService : Service() {
     private var videoInputSurface: Surface? = null
     private var audioEncoder: MediaCodec? = null
     private var rtmpPublisher: RtmpPublisher? = null
+
+    // Secondary encoder & RTMP publisher for simultaneous Dual Live (16:9 + 9:16 Shorts)
+    private var secondaryVirtualDisplay: VirtualDisplay? = null
+    private var secondaryVideoEncoder: MediaCodec? = null
+    private var secondaryVideoInputSurface: Surface? = null
+    private var secondaryRtmpPublisher: RtmpPublisher? = null
+    private var secondaryVideoDrainJob: Job? = null
+    private var secondaryCachedSps: ByteArray? = null
+    private var secondaryCachedPps: ByteArray? = null
+    private var secondaryFirstVideoPtsUs = -1L
+    private val isDualLiveActive = AtomicBoolean(false)
+    private var activeSecondaryWidth = 720
+    private var activeSecondaryHeight = 1280
 
     private var videoDrainJob: Job? = null
     private var audioDrainJob: Job? = null
@@ -325,7 +377,7 @@ class StreamingForegroundService : Service() {
             registerProjectionCallback(projection)
 
             val settings = ZroStreamCoordinator.currentStreamSettings
-            val (width, height) = resolveDimensions(settings.resolution.width, settings.resolution.height, settings.orientation)
+            val (width, height) = resolveDimensions(settings.resolution.width, settings.resolution.height, settings.effectiveOrientation())
             val previewSurface = ZroStreamCoordinator.previewSurfaceRef.get()
             createOrUpdateVirtualDisplay(projection, width, height, previewSurface)
             startDualPhoneMirrorCaptureIfNeeded(projection)
@@ -463,12 +515,34 @@ class StreamingForegroundService : Service() {
         val settings = ZroStreamCoordinator.currentStreamSettings
         val primaryUrl = settings.effectivePrimaryServerUrl()
         val backupUrl = settings.effectiveBackupServerUrl()
+        val isDualMode = settings.broadcastMode == LiveBroadcastMode.DUAL_LIVE
+        val shortsUrl = settings.effectiveShortsServerUrl()
 
         // Step 1: Validate streaming configuration & network BEFORE initializing encoders or connecting
         val configValidation = RtmpPublisher.validateConfig(primaryUrl, backupUrl, settings.streamKey)
         if (!configValidation.valid) {
             ZroStreamCoordinator.resetToIdle(configValidation.errorMessage ?: "Invalid RTMP stream configuration.")
             return
+        }
+        if (isDualMode) {
+            val (dualSupported, dualReason) = checkDualLiveSupport(this)
+            if (!dualSupported) {
+                ZroStreamCoordinator.resetToIdle(dualReason)
+                return
+            }
+            val shortsValidation = RtmpPublisher.validateConfig(shortsUrl, "", settings.shortsStreamKey)
+            if (!shortsValidation.valid) {
+                ZroStreamCoordinator.resetToIdle(
+                    "Dual Live requires a valid Shorts 9:16 RTMP URL & Stream Key. ${shortsValidation.errorMessage ?: ""}".trim()
+                )
+                return
+            }
+            if (shortsUrl.equals(primaryUrl, ignoreCase = true) && settings.shortsStreamKey.trim() == settings.streamKey.trim()) {
+                ZroStreamCoordinator.resetToIdle(
+                    "Dual Live requires two separate Stream Keys (one for 16:9 Live and one for 9:16 Shorts Live)."
+                )
+                return
+            }
         }
         if (!hasActiveInternetConnection()) {
             ZroStreamCoordinator.resetToIdle("No active internet connection detected. Connect to Wi-Fi or mobile data and try again.")
@@ -611,7 +685,7 @@ class StreamingForegroundService : Service() {
                 }
 
                 val connInfo = connectResult.getOrThrow()
-                val (width, height) = resolveDimensions(settings.resolution.width, settings.resolution.height, settings.orientation)
+                val (width, height) = resolveDimensions(settings.resolution.width, settings.resolution.height, settings.effectiveOrientation())
                 activeStreamWidth = width
                 activeStreamHeight = height
 
@@ -649,11 +723,61 @@ class StreamingForegroundService : Service() {
                     createOrUpdateVirtualDisplay(projection, width, height, videoInputSurface)
                     startDualPhoneMirrorCaptureIfNeeded(projection)
                 }
+
+                // Step 4B: If Dual Live (16:9 + 9:16), initialize separate secondary portrait H.264 encoder & RTMP publisher
+                isDualLiveActive.set(false)
+                secondaryCachedSps = null
+                secondaryCachedPps = null
+                secondaryFirstVideoPtsUs = -1L
+                if (isDualMode) {
+                    ZroStreamCoordinator.updateTelemetry {
+                        it.copy(statusDetail = "16:9 connected. Connecting 9:16 Shorts Live secondary encoder…")
+                    }
+                    val secPub = RtmpPublisher()
+                    secondaryRtmpPublisher = secPub
+                    val secConnect = secPub.connectWithFailover(
+                        primaryUrl = shortsUrl,
+                        backupUrl = "",
+                        streamKey = settings.shortsStreamKey,
+                        preferBackup = false
+                    )
+                    if (secConnect.isFailure) {
+                        val secErr = secConnect.exceptionOrNull()?.localizedMessage ?: "Secondary Shorts RTMP connection failed."
+                        stopAllCaptureAndBroadcast(error = "Dual Live Shorts RTMP failed: $secErr")
+                        return@launch
+                    }
+                    val (secRawW, secRawH) = settings.effectiveSecondaryShortsDimensions()
+                    val (secW, secH) = resolveAlignedDimensions(secRawW, secRawH, portrait = true)
+                    activeSecondaryWidth = secW
+                    activeSecondaryHeight = secH
+                    val secFps = minOf(activeSessionFps, 30)
+                    val secBitrate = (activeBitrateKbps * 0.65f).toInt().coerceIn(1500, 3500)
+                    secPub.sendMetaData(
+                        width = secW,
+                        height = secH,
+                        fps = secFps,
+                        videoBitrateKbps = secBitrate,
+                        audioSampleRate = ZroAudioEngine.SAMPLE_RATE,
+                        audioBitrateKbps = if (activeStereoAudio) 128 else 96,
+                        stereo = activeStereoAudio
+                    )
+                    secPub.sendAacSequenceHeader(fallbackAsc)
+                    setupSecondaryVideoEncoder(secW, secH, secFps, secBitrate)
+                    if (activeVideoSource != LiveVideoSource.REMOTE_SECOND_PHONE && projection != null) {
+                        createSecondaryVirtualDisplay(projection, secW, secH, secondaryVideoInputSurface)
+                    }
+                    isDualLiveActive.set(true)
+                }
+
                 ZroStreamCoordinator.updateTelemetry {
                     it.copy(
-                        activeEncoderName = encoderName,
+                        activeEncoderName = if (isDualLiveActive.get()) "$encoderName + Dual 9:16" else encoderName,
                         videoEncoderReady = true,
-                        statusDetail = "Video encoder active ($encoderName). Starting AAC audio mixer…"
+                        statusDetail = if (isDualLiveActive.get()) {
+                            "Dual Live encoders active (16:9 + 9:16). Starting AAC audio mixer…"
+                        } else {
+                            "Video encoder active ($encoderName). Starting AAC audio mixer…"
+                        }
                     )
                 }
 
@@ -684,7 +808,11 @@ class StreamingForegroundService : Service() {
                         audioEncoderReady = true,
                         gameAudioCaptureActive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && projection != null,
                         gameAudioCaptureNote = ZroAudioEngine.gameCaptureStatus.value,
-                        statusDetail = "Sending H.264 video & AAC audio packets…"
+                        statusDetail = if (isDualLiveActive.get()) {
+                            "Sending Dual Live (16:9 + 9:16 Shorts) H.264 & AAC…"
+                        } else {
+                            "Sending H.264 video & AAC audio packets…"
+                        }
                     )
                 }
                 refreshNotification()
@@ -692,6 +820,9 @@ class StreamingForegroundService : Service() {
                 // Request an immediate IDR keyframe and begin draining encoded H.264 + AAC frames
                 requestVideoKeyFrame()
                 startVideoDrainLoop()
+                if (isDualLiveActive.get()) {
+                    startSecondaryVideoDrainLoop()
+                }
                 startAudioDrainLoop()
                 startTelemetryAndStabilityLoop()
             } catch (e: Exception) {
@@ -963,6 +1094,121 @@ class StreamingForegroundService : Service() {
         return codec.name
     }
 
+    private fun setupSecondaryVideoEncoder(width: Int, height: Int, fps: Int, bitrateKbps: Int): String {
+        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(MediaFormat.KEY_BIT_RATE, bitrateKbps * 1000)
+            setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            }
+        }
+        val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        try {
+            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        } catch (_: Exception) {
+            format.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        }
+        secondaryVideoInputSurface = codec.createInputSurface()
+        codec.start()
+        secondaryVideoEncoder = codec
+        return codec.name
+    }
+
+    private fun createSecondaryVirtualDisplay(projection: MediaProjection, width: Int, height: Int, surface: Surface?) {
+        runCatching { secondaryVirtualDisplay?.release() }
+        secondaryVirtualDisplay = projection.createVirtualDisplay(
+            "ZroLiveDualShortsCapture",
+            width,
+            height,
+            resolveDensityDpi(),
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            surface,
+            null,
+            null
+        )
+    }
+
+    private fun startSecondaryVideoDrainLoop() {
+        secondaryVideoDrainJob?.cancel()
+        secondaryVideoDrainJob = serviceScope.launch {
+            val bufferInfo = MediaCodec.BufferInfo()
+            var reusableNalBuf = ByteArray(192 * 1024)
+            while (isActive && isStreaming.get() && isDualLiveActive.get()) {
+                val codec = secondaryVideoEncoder ?: break
+                try {
+                    val outIdx = codec.dequeueOutputBuffer(bufferInfo, 20_000)
+                    when {
+                        outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                            val fmt = codec.outputFormat
+                            val csd0 = fmt.getByteBuffer("csd-0")
+                            val csd1 = fmt.getByteBuffer("csd-1")
+                            if (csd0 != null) {
+                                val b0 = duplicateToBytes(csd0)
+                                val (s0, p0) = RtmpPublisher.extractSpsPpsFromBuffer(b0, b0.size)
+                                if (s0 != null) secondaryCachedSps = s0
+                                if (p0 != null) secondaryCachedPps = p0
+                            }
+                            if (csd1 != null) {
+                                val b1 = duplicateToBytes(csd1)
+                                val (s1, p1) = RtmpPublisher.extractSpsPpsFromBuffer(b1, b1.size)
+                                if (p1 != null) secondaryCachedPps = p1
+                                else if (secondaryCachedPps == null && b1.isNotEmpty()) secondaryCachedPps = extractNalWithoutStartCode(csd1)
+                                if (s1 != null && secondaryCachedSps == null) secondaryCachedSps = s1
+                            }
+                            if (secondaryCachedSps != null && secondaryCachedPps != null) {
+                                secondaryRtmpPublisher?.sendAvcSequenceHeader(secondaryCachedSps!!, secondaryCachedPps!!)
+                            }
+                        }
+                        outIdx >= 0 -> {
+                            val outBuf = codec.getOutputBuffer(outIdx)
+                            val size = bufferInfo.size
+                            if (outBuf != null && size > 0) {
+                                if (reusableNalBuf.size < size) {
+                                    reusableNalBuf = ByteArray(maxOf(size, reusableNalBuf.size * 2))
+                                }
+                                outBuf.position(bufferInfo.offset)
+                                outBuf.limit(bufferInfo.offset + size)
+                                outBuf.get(reusableNalBuf, 0, size)
+
+                                val isCodecConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                                if (isCodecConfig) {
+                                    val (sps, pps) = RtmpPublisher.extractSpsPpsFromBuffer(reusableNalBuf, size)
+                                    if (sps != null) secondaryCachedSps = sps
+                                    if (pps != null) secondaryCachedPps = pps
+                                    if (secondaryCachedSps != null && secondaryCachedPps != null) {
+                                        secondaryRtmpPublisher?.sendAvcSequenceHeader(secondaryCachedSps!!, secondaryCachedPps!!)
+                                    }
+                                } else if (!isPaused.get() && !isPrivacyShieldActive.get()) {
+                                    val isKey = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+                                    val ptsUs = bufferInfo.presentationTimeUs
+                                    val tsMs = if (ptsUs > 0L) {
+                                        if (secondaryFirstVideoPtsUs < 0L) secondaryFirstVideoPtsUs = ptsUs
+                                        ((ptsUs - secondaryFirstVideoPtsUs) / 1000L).coerceAtLeast(0L).toInt()
+                                    } else {
+                                        val base = if (streamStartEpochMs > 0L) streamStartEpochMs else System.currentTimeMillis()
+                                        (System.currentTimeMillis() - base).coerceAtLeast(0L).toInt()
+                                    }
+                                    secondaryRtmpPublisher?.sendVideoFrame(reusableNalBuf, size, isKey, tsMs)
+                                }
+                            }
+                            codec.releaseOutputBuffer(outIdx, false)
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (isStreaming.get() && isDualLiveActive.get()) {
+                        Log.w(TAG, "Secondary Dual Live encoder error: ${e.message}")
+                        delay(50)
+                    }
+                }
+            }
+        }
+    }
+
     private fun createOrUpdateVirtualDisplay(projection: MediaProjection, width: Int, height: Int, surface: Surface?) {
         val existing = virtualDisplay
         if (existing != null) {
@@ -1185,6 +1431,7 @@ class StreamingForegroundService : Service() {
                                 if (asc.isNotEmpty()) {
                                     cachedAsc = asc
                                     rtmpPublisher?.sendAacSequenceHeader(asc)
+                                    if (isDualLiveActive.get()) secondaryRtmpPublisher?.sendAacSequenceHeader(asc)
                                 }
                             }
                         }
@@ -1200,6 +1447,7 @@ class StreamingForegroundService : Service() {
                                     outBuf.get(asc, 0, size)
                                     cachedAsc = asc
                                     rtmpPublisher?.sendAacSequenceHeader(asc)
+                                    if (isDualLiveActive.get()) secondaryRtmpPublisher?.sendAacSequenceHeader(asc)
                                 } else if (!isPaused.get()) {
                                     if (reusableAacBuf.size < size) {
                                         reusableAacBuf = ByteArray(maxOf(size, reusableAacBuf.size * 2))
@@ -1209,6 +1457,7 @@ class StreamingForegroundService : Service() {
                                     outBuf.get(reusableAacBuf, 0, size)
                                     val tsMs = computeRelativeAudioTimestampMs(bufferInfo.presentationTimeUs)
                                     rtmpPublisher?.sendAudioFrame(reusableAacBuf, size, tsMs)
+                                    if (isDualLiveActive.get()) secondaryRtmpPublisher?.sendAudioFrame(reusableAacBuf, size, tsMs)
                                 }
                             }
                             codec.releaseOutputBuffer(outIdx, false)
@@ -1422,6 +1671,9 @@ class StreamingForegroundService : Service() {
                 putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
             }
             videoEncoder?.setParameters(params)
+            if (isDualLiveActive.get()) {
+                secondaryVideoEncoder?.setParameters(params)
+            }
         }
     }
 
@@ -1551,7 +1803,9 @@ class StreamingForegroundService : Service() {
         activeSessionId = null
         streamStartEpochMs = 0L
 
+        isDualLiveActive.set(false)
         videoDrainJob?.cancel(); videoDrainJob = null
+        secondaryVideoDrainJob?.cancel(); secondaryVideoDrainJob = null
         audioDrainJob?.cancel(); audioDrainJob = null
         silentAudioFallbackJob?.cancel(); silentAudioFallbackJob = null
         monitorJob?.cancel(); monitorJob = null
@@ -1560,16 +1814,20 @@ class StreamingForegroundService : Service() {
         stopDualPhoneMirrorCapture()
         ZroAudioEngine.stopStreamingAudio()
         runCatching { rtmpPublisher?.close() }; rtmpPublisher = null
+        runCatching { secondaryRtmpPublisher?.close() }; secondaryRtmpPublisher = null
         runCatching { virtualDisplay?.release() }; virtualDisplay = null
+        runCatching { secondaryVirtualDisplay?.release() }; secondaryVirtualDisplay = null
         runCatching { videoInputSurface?.release() }; videoInputSurface = null
+        runCatching { secondaryVideoInputSurface?.release() }; secondaryVideoInputSurface = null
         runCatching { videoEncoder?.stop() }; runCatching { videoEncoder?.release() }; videoEncoder = null
+        runCatching { secondaryVideoEncoder?.stop() }; runCatching { secondaryVideoEncoder?.release() }; secondaryVideoEncoder = null
         runCatching { audioEncoder?.stop() }; runCatching { audioEncoder?.release() }; audioEncoder = null
         runCatching { mediaProjection?.stop() }; mediaProjection = null
 
         val wasCleanStop = error == null
         if (wasCleanStop) {
             serviceScope.launch { runCatching { settingsStore.markActiveLiveCleanlyEnded() } }
-        } else if (finishedSessionId != null && (wasStreaming || wasConfirmedLive)) {
+        } else if (finishedSessionId != null) {
             val sanitizedErr = CrashRecoveryStore.scrubSecrets(error)
             CrashRecoveryStore.recordEvent(applicationContext, "NETWORK", "Interrupted live ($finishedSessionId): $sanitizedErr")
             serviceScope.launch {

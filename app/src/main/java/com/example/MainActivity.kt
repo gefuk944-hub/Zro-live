@@ -197,59 +197,22 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
     val context = LocalContext.current
     val localDisplayName = "Mobile Gaming Studio"
 
-    // Reactive FirebaseAuth state: automatically activates Firestore cloud sync when signed in with Google/YouTube,
-    // while keeping manual RTMP streaming & studio 100% usable without login.
-    var signedInUid by remember { mutableStateOf<String?>(null) }
-    var signedInName by remember { mutableStateOf(localDisplayName) }
-    var signedInPhoto by remember { mutableStateOf<String?>(null) }
-
-    DisposableEffect(Unit) {
-        val auth = runCatching { com.google.firebase.auth.FirebaseAuth.getInstance() }.getOrNull()
-        val syncUser: (com.google.firebase.auth.FirebaseUser?) -> Unit = { user ->
-            if (user != null && !user.isAnonymous) {
-                signedInUid = user.uid
-                signedInName = user.displayName?.takeIf { it.isNotBlank() } ?: "YouTube Creator"
-                signedInPhoto = user.photoUrl?.toString()
-            } else {
-                signedInUid = null
-                signedInName = localDisplayName
-                signedInPhoto = null
-            }
-        }
-        syncUser(auth?.currentUser)
-        val listener = com.google.firebase.auth.FirebaseAuth.AuthStateListener { firebaseAuth ->
-            syncUser(firebaseAuth.currentUser)
-        }
-        runCatching { auth?.addAuthStateListener(listener) }
-        onDispose {
-            runCatching { auth?.removeAuthStateListener(listener) }
-        }
-    }
-
-    val activeUid = signedInUid
-    val sessionKey = activeUid ?: "zro_local_session"
-
     val viewModel: ZroMainViewModel = viewModel(
-        key = sessionKey,
+        key = "zro_local_session",
         factory = viewModelFactory {
             initializer {
                 val app = checkNotNull(this[APPLICATION_KEY]) {
                     "APPLICATION_KEY missing from CreationExtras"
                 }
-                val firestoreRepo = if (!activeUid.isNullOrBlank()) {
-                    runCatching { com.example.data.ZroFirestoreRepository(app) }.getOrNull()
-                } else {
-                    null
-                }
                 ZroMainViewModel(
                     appContext = app,
-                    repository = firestoreRepo,
+                    repository = null,
                     settingsStore = settingsStore,
                     telemetryMonitor = DeviceTelemetryMonitor(app),
                     chatClient = YouTubeLiveChatClient(),
-                    currentUserId = activeUid,
-                    userDisplayName = signedInName,
-                    userAvatarUrl = signedInPhoto
+                    currentUserId = null,
+                    userDisplayName = localDisplayName,
+                    userAvatarUrl = null
                 )
             }
         }
@@ -289,7 +252,6 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
     val dualTelemetry by viewModel.dualTelemetry.collectAsStateWithLifecycle()
     val mirroredFrame by viewModel.mirroredFrame.collectAsStateWithLifecycle()
     val screenshotCount by viewModel.localScreenshotCount.collectAsStateWithLifecycle()
-    val youTubeAccount by viewModel.youTubeAccount.collectAsStateWithLifecycle()
     val rtmpTestResult by viewModel.rtmpTestResult.collectAsStateWithLifecycle()
     val isTestingRtmp by viewModel.isTestingRtmp.collectAsStateWithLifecycle()
     val recoverableSession by viewModel.recoverableSession.collectAsStateWithLifecycle()
@@ -312,6 +274,7 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
         )
     }
     var pendingBgLayerId by remember { mutableStateOf<String?>(null) }
+    var pendingReplaceLayerId by remember { mutableStateOf<String?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     val pushSubpage: (AppSubpage) -> Unit = { page ->
@@ -461,6 +424,24 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
         }
     }
 
+    val replaceLayerMediaPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        val layerId = pendingReplaceLayerId
+        pendingReplaceLayerId = null
+        if (uri != null && layerId != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val mime = runCatching { context.contentResolver.getType(uri) }.getOrNull().orEmpty()
+            viewModel.importAndReplaceLayerSource(
+                layerId = layerId,
+                uri = uri,
+                isVideoHint = mime.startsWith("video/")
+            )
+        }
+    }
+
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -589,9 +570,34 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
             backupUrl = settings.stream.effectiveBackupServerUrl(),
             streamKey = settings.stream.streamKey
         )
+        val dualError: String? = if (settings.stream.broadcastMode == com.example.data.model.LiveBroadcastMode.DUAL_LIVE) {
+            val (dualOk, dualReason) = com.example.streaming.StreamingForegroundService.checkDualLiveSupport(context)
+            when {
+                !dualOk -> dualReason
+                else -> {
+                    val shortsCheck = RtmpPublisher.validateConfig(
+                        primaryUrl = settings.stream.effectiveShortsServerUrl(),
+                        backupUrl = "",
+                        streamKey = settings.stream.shortsStreamKey
+                    )
+                    when {
+                        !shortsCheck.valid -> "Dual Live requires a valid Shorts 9:16 RTMP URL & Stream Key in Live Setup."
+                        settings.stream.effectiveShortsServerUrl().equals(settings.stream.effectivePrimaryServerUrl(), ignoreCase = true) &&
+                            settings.stream.shortsStreamKey.trim() == settings.stream.streamKey.trim() ->
+                            "Dual Live requires a separate Stream Key for 9:16 Shorts Live."
+                        else -> null
+                    }
+                }
+            }
+        } else {
+            null
+        }
         if (!streamCheck.valid) {
             pushSubpage(AppSubpage.LIVE_SETUP)
             viewModel.showMessage(streamCheck.errorMessage ?: "Enter your Stream RTMP URL and Stream Key in Live Setup.")
+        } else if (dualError != null) {
+            pushSubpage(AppSubpage.LIVE_SETUP)
+            viewModel.showMessage(dualError)
         } else {
             val secondPhoneConnected = dualTelemetry.linkState == DualLinkState.CONNECTED &&
                 dualTelemetry.role == DualPhoneRole.PHONE2_STUDIO
@@ -868,15 +874,15 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                             onOpenSceneStudio = { pushSubpage(AppSubpage.LAYERS_PANEL) },
                             onStartLive = requestStartBroadcast,
                             onStopLive = { viewModel.endStream() },
-                            youTubeAccount = youTubeAccount,
                             rtmpTestResult = rtmpTestResult,
                             isTestingRtmp = isTestingRtmp,
-                            onConnectYouTubeAccount = { viewModel.signInYouTubeAccount(context) },
-                            onDisconnectYouTubeAccount = { viewModel.signOutYouTubeAccount() },
                             onSaveConfiguration = { viewModel.saveStreamConfiguration() },
                             onTestConnection = { viewModel.testRtmpConnection() },
                             connectivitySnapshot = connectivitySnapshot,
-                            onProbeStunServer = { viewModel.probeStunAndRefreshConnectivity() }
+                            onProbeStunServer = { viewModel.probeStunAndRefreshConnectivity() },
+                            onSwitchBroadcastMode = { viewModel.switchBroadcastMode(it) },
+                            hasRecoverableSession = recoverableSession != null,
+                            onReconnectLive = handleReconnectPreviousLive
                         )
 
                         AppSubpage.LAYERS_PANEL -> ObsSceneStudioScreen(
@@ -976,7 +982,16 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                             onOpenFullScreenPreview = { showFullScreenPreview = true },
                             onAlignCenter = { id -> viewModel.alignLayerCenter(id) },
                             onResizeLayerExact = { id, w, h -> viewModel.resizeLayerExact(id, w, h) },
-                            onApplyCustomSizeUnits = { id, uw, uh -> viewModel.applyLayerCustomSizeUnits(id, uw, uh) }
+                            onApplyCustomSizeUnits = { id, uw, uh -> viewModel.applyLayerCustomSizeUnits(id, uw, uh) },
+                            broadcastMode = settings.stream.broadcastMode,
+                            onSwitchBroadcastMode = { viewModel.switchBroadcastMode(it) },
+                            onReorderLayerTopToBottom = { fromIdx, toIdx -> viewModel.reorderLayerTopToBottom(fromIdx, toIdx) },
+                            onReplaceLayerSource = { layer ->
+                                pendingReplaceLayerId = layer.id
+                                replaceLayerMediaPicker.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                                )
+                            }
                         )
 
                         AppSubpage.CHAT -> ChatControlScreen(

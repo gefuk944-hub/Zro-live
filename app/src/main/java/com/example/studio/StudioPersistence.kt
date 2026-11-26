@@ -46,18 +46,30 @@ object StudioPersistence {
         return root.toString()
     }
 
-    fun deserializeWorkspace(raw: String?): StudioWorkspaceState {
-        if (raw.isNullOrBlank()) return StudioWorkspaceState()
+    fun deserializeWorkspace(raw: String?, verticalDefault: Boolean = false): StudioWorkspaceState {
+        if (raw.isNullOrBlank()) {
+            return StudioWorkspaceState(scenes = StudioWorkspaceState.defaultFourScenes(verticalDefault))
+        }
         return runCatching {
             val root = JSONObject(raw)
             val activeSlot = SceneSlot.fromName(root.optString("activeSceneSlot"))
-            val scenesMap = StudioWorkspaceState.defaultFourScenes().toMutableMap()
+            val scenesMap = StudioWorkspaceState.defaultFourScenes(verticalDefault).toMutableMap()
             val scenesArr = root.optJSONArray("scenes")
             if (scenesArr != null) {
                 for (i in 0 until scenesArr.length()) {
                     val obj = scenesArr.optJSONObject(i) ?: continue
                     val parsed = deserializeScene(obj)
-                    scenesMap[parsed.slot] = parsed
+                    // Upgrade untouched legacy Scene 2 ("Vertical / Shorts") in 16:9 mode to 16:9 "STREAMING START SOON"
+                    val isUntouchedLegacyShortsScene2 = !verticalDefault &&
+                        parsed.slot == SceneSlot.SHORTS_VERTICAL &&
+                        parsed.isVertical &&
+                        parsed.name.equals("Vertical / Shorts", ignoreCase = true) &&
+                        parsed.layers.map { it.id }.toSet() == setOf("s2_bg", "s2_gameplay", "s2_webcam", "s2_chat")
+                    scenesMap[parsed.slot] = if (isUntouchedLegacyShortsScene2) {
+                        StudioWorkspaceState.defaultSceneFor(SceneSlot.SHORTS_VERTICAL, verticalDefault = false)
+                    } else {
+                        parsed
+                    }
                 }
             }
             val parsedTiles = mutableListOf<RemoteControlTileId>()
@@ -164,6 +176,7 @@ object StudioPersistence {
         put("cropRight", l.cropRight.toDouble())
         put("cropBottom", l.cropBottom.toDouble())
         put("lockAspectRatio", l.lockAspectRatio)
+        put("scaleMode", l.scaleMode.name)
         put("borderWidthDp", l.borderWidthDp.toDouble())
         put("borderColorHex", l.borderColorHex)
         put("shadowEnabled", l.shadowEnabled)
@@ -218,6 +231,7 @@ object StudioPersistence {
         cropRight = o.optDouble("cropRight", 0.0).toFloat().coerceIn(0f, 0.80f),
         cropBottom = o.optDouble("cropBottom", 0.0).toFloat().coerceIn(0f, 0.80f),
         lockAspectRatio = o.optBoolean("lockAspectRatio", false),
+        scaleMode = LayerScaleMode.fromName(o.optString("scaleMode")),
         borderWidthDp = o.optDouble("borderWidthDp", 0.0).toFloat().coerceIn(0f, 8f),
         borderColorHex = o.optLong("borderColorHex", 0xFF3B82F6L),
         shadowEnabled = o.optBoolean("shadowEnabled", false),

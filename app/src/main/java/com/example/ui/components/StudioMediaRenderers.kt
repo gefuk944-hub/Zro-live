@@ -72,6 +72,7 @@ import coil.decode.ImageDecoderDecoder
 import coil.request.ImageRequest
 import com.example.studio.ChromaKeyProcessor
 import com.example.studio.LayerChromaKeySettings
+import com.example.studio.LayerScaleMode
 import com.example.studio.SceneLayer
 import com.example.studio.StudioMediaStore
 import com.example.ui.theme.JetBrainsMonoFontFamily
@@ -348,6 +349,27 @@ fun StudioVideoLayerView(
             update = { tv ->
                 // Keep TextureView invisible underneath when keyed overlay is active so transparency reveals layers below
                 tv.alpha = if (applyChroma && keyedVideoFrame != null) 0f else 1f
+                if (layer.scaleMode == LayerScaleMode.FIT && tv.width > 0 && tv.height > 0) {
+                    val mp = playerHolder[0]
+                    val vw = runCatching { mp?.videoWidth ?: 0 }.getOrDefault(0)
+                    val vh = runCatching { mp?.videoHeight ?: 0 }.getOrDefault(0)
+                    if (vw > 0 && vh > 0) {
+                        val viewRatio = tv.width.toFloat() / tv.height.toFloat()
+                        val videoRatio = vw.toFloat() / vh.toFloat()
+                        val m = Matrix()
+                        if (videoRatio > viewRatio) {
+                            val sy = viewRatio / videoRatio
+                            m.setScale(1f, sy, tv.width / 2f, tv.height / 2f)
+                        } else {
+                            val sx = videoRatio / viewRatio
+                            m.setScale(sx, 1f, tv.width / 2f, tv.height / 2f)
+                        }
+                        tv.setTransform(m)
+                    }
+                } else {
+                    // Default Stretch (Fill Box): stretch cleanly to fill exact layer box
+                    tv.setTransform(Matrix())
+                }
             }
         )
 
@@ -355,7 +377,7 @@ fun StudioVideoLayerView(
             Image(
                 bitmap = keyedVideoFrame!!.asImageBitmap(),
                 contentDescription = "${layer.name} keyed video",
-                contentScale = ContentScale.Crop,
+                contentScale = if (layer.scaleMode == LayerScaleMode.FIT) ContentScale.Fit else ContentScale.FillBounds,
                 modifier = Modifier
                     .fillMaxSize()
                     .testTag("studio_video_chroma_${layer.id}")
@@ -425,6 +447,7 @@ private fun startVideoPlayback(
 fun CameraXChromaFacecamView(
     useFront: Boolean,
     chromaSettings: LayerChromaKeySettings,
+    scaleMode: LayerScaleMode = LayerScaleMode.STRETCH,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -488,7 +511,7 @@ fun CameraXChromaFacecamView(
             Image(
                 bitmap = bmp.asImageBitmap(),
                 contentDescription = "Chroma Key Facecam",
-                contentScale = ContentScale.Crop,
+                contentScale = if (scaleMode == LayerScaleMode.FIT) ContentScale.Fit else ContentScale.FillBounds,
                 modifier = Modifier.fillMaxSize()
             )
         } else {

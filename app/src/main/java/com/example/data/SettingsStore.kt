@@ -16,6 +16,8 @@ import com.example.data.model.AudioSettings
 import com.example.data.model.CaptureMode
 import com.example.data.model.EncoderPreference
 import com.example.data.model.GeneralSettings
+import com.example.data.model.LiveBroadcastMode
+import com.example.data.model.ModeStreamPreset
 import com.example.data.model.NoiseCancellationLevel
 import com.example.data.model.NotificationSettings
 import com.example.data.model.OverlayCorner
@@ -144,6 +146,26 @@ class SettingsStore(private val context: Context) {
         val USE_BACKUP_SERVER = booleanPreferencesKey("use_backup_server")
         val ACTIVE_LIVE_SNAPSHOT_JSON = stringPreferencesKey("active_live_snapshot_json")
         val SAVED_LIVE_PROFILES_JSON = stringPreferencesKey("saved_live_profiles_json")
+
+        // Independent 16:9 Live & Shorts Live (9:16) settings & Studio workspaces
+        val BROADCAST_MODE = stringPreferencesKey("broadcast_mode")
+        val LANDSCAPE_RES = stringPreferencesKey("landscape_res")
+        val LANDSCAPE_FPS = intPreferencesKey("landscape_fps")
+        val LANDSCAPE_BITRATE = intPreferencesKey("landscape_bitrate")
+        val SHORTS_RES = stringPreferencesKey("shorts_res")
+        val SHORTS_FPS = intPreferencesKey("shorts_fps")
+        val SHORTS_BITRATE = intPreferencesKey("shorts_bitrate")
+        val DUAL_RES = stringPreferencesKey("dual_res")
+        val DUAL_FPS = intPreferencesKey("dual_fps")
+        val DUAL_BITRATE = intPreferencesKey("dual_bitrate")
+        val SHORTS_RTMP_URL = stringPreferencesKey("shorts_rtmp_url")
+        val SHORTS_STREAM_KEY = stringPreferencesKey("shorts_stream_key")
+        val STUDIO_WORKSPACE_SHORTS_JSON = stringPreferencesKey("studio_workspace_shorts_json")
+        val STUDIO_PREVIOUS_BACKUP_SHORTS_JSON = stringPreferencesKey("studio_previous_backup_shorts_json")
+        val AUTHORIZED_LAYOUT_SHORTS_JSON = stringPreferencesKey("authorized_layout_shorts_json")
+        val STUDIO_WORKSPACE_DUAL_JSON = stringPreferencesKey("studio_workspace_dual_json")
+        val STUDIO_PREVIOUS_BACKUP_DUAL_JSON = stringPreferencesKey("studio_previous_backup_dual_json")
+        val AUTHORIZED_LAYOUT_DUAL_JSON = stringPreferencesKey("authorized_layout_dual_json")
     }
 
     val settingsFlow: Flow<ZroAppSettings> = context.zroDataStore.data
@@ -181,7 +203,25 @@ class SettingsStore(private val context: Context) {
                     chatEnabled = p[Keys.CHAT_ENABLED] ?: true,
                     chatVisible = p[Keys.CHAT_VISIBLE] ?: true,
                     chatNotifications = p[Keys.CHAT_NOTIFS] ?: true,
-                    lowDataMode = p[Keys.LOW_DATA_MODE] ?: false
+                    lowDataMode = p[Keys.LOW_DATA_MODE] ?: false,
+                    broadcastMode = LiveBroadcastMode.fromName(p[Keys.BROADCAST_MODE]),
+                    landscapePreset = ModeStreamPreset(
+                        resolution = VideoResolution.fromName(p[Keys.LANDSCAPE_RES] ?: p[Keys.RESOLUTION]),
+                        fps = p[Keys.LANDSCAPE_FPS] ?: (p[Keys.FPS] ?: 30),
+                        bitrateKbps = p[Keys.LANDSCAPE_BITRATE] ?: (p[Keys.BITRATE_KBPS] ?: 4500)
+                    ),
+                    shortsPreset = ModeStreamPreset(
+                        resolution = VideoResolution.fromName(p[Keys.SHORTS_RES]),
+                        fps = p[Keys.SHORTS_FPS] ?: 30,
+                        bitrateKbps = p[Keys.SHORTS_BITRATE] ?: 4500
+                    ),
+                    dualPreset = ModeStreamPreset(
+                        resolution = VideoResolution.fromName(p[Keys.DUAL_RES]),
+                        fps = p[Keys.DUAL_FPS] ?: 30,
+                        bitrateKbps = p[Keys.DUAL_BITRATE] ?: 3500
+                    ),
+                    shortsRtmpUrl = p[Keys.SHORTS_RTMP_URL] ?: "",
+                    shortsStreamKey = p[Keys.SHORTS_STREAM_KEY] ?: ""
                 ),
                 audio = AudioSettings(
                     micEnabled = p[Keys.MIC_ENABLED] ?: true,
@@ -362,6 +402,19 @@ class SettingsStore(private val context: Context) {
             p[Keys.CHAT_VISIBLE] = s.chatVisible
             p[Keys.CHAT_NOTIFS] = s.chatNotifications
             p[Keys.LOW_DATA_MODE] = s.lowDataMode
+            val synced = s.withSyncedActiveModePreset()
+            p[Keys.BROADCAST_MODE] = synced.broadcastMode.name
+            p[Keys.LANDSCAPE_RES] = synced.landscapePreset.resolution.name
+            p[Keys.LANDSCAPE_FPS] = synced.landscapePreset.fps
+            p[Keys.LANDSCAPE_BITRATE] = synced.landscapePreset.bitrateKbps
+            p[Keys.SHORTS_RES] = synced.shortsPreset.resolution.name
+            p[Keys.SHORTS_FPS] = synced.shortsPreset.fps
+            p[Keys.SHORTS_BITRATE] = synced.shortsPreset.bitrateKbps
+            p[Keys.DUAL_RES] = synced.dualPreset.resolution.name
+            p[Keys.DUAL_FPS] = synced.dualPreset.fps
+            p[Keys.DUAL_BITRATE] = synced.dualPreset.bitrateKbps
+            p[Keys.SHORTS_RTMP_URL] = synced.shortsRtmpUrl
+            p[Keys.SHORTS_STREAM_KEY] = synced.shortsStreamKey
         }
     }
 
@@ -395,40 +448,76 @@ class SettingsStore(private val context: Context) {
 
     val studioWorkspaceFlow: Flow<StudioWorkspaceState> = context.zroDataStore.data
         .catch { emit(androidx.datastore.preferences.core.emptyPreferences()) }
-        .map { p -> StudioPersistence.deserializeWorkspace(p[Keys.STUDIO_WORKSPACE_JSON]) }
+        .map { p -> StudioPersistence.deserializeWorkspace(p[Keys.STUDIO_WORKSPACE_JSON], verticalDefault = false) }
 
-    suspend fun saveStudioWorkspace(state: StudioWorkspaceState) {
-        context.zroDataStore.edit { p ->
-            p[Keys.STUDIO_WORKSPACE_JSON] = StudioPersistence.serializeWorkspace(state)
-        }
+    private fun workspaceKeyFor(mode: LiveBroadcastMode) = when (mode) {
+        LiveBroadcastMode.LANDSCAPE_16_9 -> Keys.STUDIO_WORKSPACE_JSON
+        LiveBroadcastMode.SHORTS_9_16 -> Keys.STUDIO_WORKSPACE_SHORTS_JSON
+        LiveBroadcastMode.DUAL_LIVE -> Keys.STUDIO_WORKSPACE_DUAL_JSON
     }
 
-    suspend fun savePreviousStudioBackup(state: StudioWorkspaceState) {
-        context.zroDataStore.edit { p ->
-            p[Keys.STUDIO_PREVIOUS_BACKUP_JSON] = StudioPersistence.serializeWorkspace(state)
-        }
+    private fun backupKeyFor(mode: LiveBroadcastMode) = when (mode) {
+        LiveBroadcastMode.LANDSCAPE_16_9 -> Keys.STUDIO_PREVIOUS_BACKUP_JSON
+        LiveBroadcastMode.SHORTS_9_16 -> Keys.STUDIO_PREVIOUS_BACKUP_SHORTS_JSON
+        LiveBroadcastMode.DUAL_LIVE -> Keys.STUDIO_PREVIOUS_BACKUP_DUAL_JSON
     }
 
-    suspend fun restorePreviousStudioBackup(): StudioWorkspaceState? {
+    private fun authorizedKeyFor(mode: LiveBroadcastMode) = when (mode) {
+        LiveBroadcastMode.LANDSCAPE_16_9 -> Keys.AUTHORIZED_LAYOUT_JSON
+        LiveBroadcastMode.SHORTS_9_16 -> Keys.AUTHORIZED_LAYOUT_SHORTS_JSON
+        LiveBroadcastMode.DUAL_LIVE -> Keys.AUTHORIZED_LAYOUT_DUAL_JSON
+    }
+
+    suspend fun loadStudioWorkspaceForMode(mode: LiveBroadcastMode): StudioWorkspaceState {
         val prefs = context.zroDataStore.data.first()
-        val raw = prefs[Keys.STUDIO_PREVIOUS_BACKUP_JSON] ?: return null
-        val restored = StudioPersistence.deserializeWorkspace(raw)
-        saveStudioWorkspace(restored)
+        val key = workspaceKeyFor(mode)
+        return StudioPersistence.deserializeWorkspace(prefs[key], verticalDefault = mode.isVertical)
+    }
+
+    suspend fun saveStudioWorkspace(state: StudioWorkspaceState, mode: LiveBroadcastMode = LiveBroadcastMode.LANDSCAPE_16_9) {
+        val key = workspaceKeyFor(mode)
+        context.zroDataStore.edit { p ->
+            p[key] = StudioPersistence.serializeWorkspace(state)
+        }
+    }
+
+    suspend fun savePreviousStudioBackup(state: StudioWorkspaceState, mode: LiveBroadcastMode = LiveBroadcastMode.LANDSCAPE_16_9) {
+        val key = backupKeyFor(mode)
+        context.zroDataStore.edit { p ->
+            p[key] = StudioPersistence.serializeWorkspace(state)
+        }
+    }
+
+    suspend fun restorePreviousStudioBackup(mode: LiveBroadcastMode = LiveBroadcastMode.LANDSCAPE_16_9): StudioWorkspaceState? {
+        val prefs = context.zroDataStore.data.first()
+        val key = backupKeyFor(mode)
+        val raw = prefs[key] ?: return null
+        val restored = StudioPersistence.deserializeWorkspace(raw, verticalDefault = mode.isVertical)
+        saveStudioWorkspace(restored, mode)
         return restored
     }
 
-    suspend fun saveAuthorizedDeviceLayout(state: StudioWorkspaceState) {
+    suspend fun saveAuthorizedDeviceLayout(
+        state: StudioWorkspaceState,
+        mode: LiveBroadcastMode = LiveBroadcastMode.LANDSCAPE_16_9
+    ) {
         val serialized = StudioPersistence.serializeWorkspace(state)
+        val authKey = authorizedKeyFor(mode)
+        val wsKey = workspaceKeyFor(mode)
         context.zroDataStore.edit { p ->
-            p[Keys.AUTHORIZED_LAYOUT_JSON] = serialized
-            p[Keys.STUDIO_WORKSPACE_JSON] = serialized
+            p[authKey] = serialized
+            p[wsKey] = serialized
         }
     }
 
-    suspend fun loadAuthorizedDeviceLayout(): StudioWorkspaceState? {
+    suspend fun loadAuthorizedDeviceLayout(
+        mode: LiveBroadcastMode = LiveBroadcastMode.LANDSCAPE_16_9
+    ): StudioWorkspaceState? {
         val prefs = context.zroDataStore.data.first()
-        val raw = prefs[Keys.AUTHORIZED_LAYOUT_JSON] ?: prefs[Keys.STUDIO_WORKSPACE_JSON] ?: return null
-        return StudioPersistence.deserializeWorkspace(raw)
+        val authKey = authorizedKeyFor(mode)
+        val wsKey = workspaceKeyFor(mode)
+        val raw = prefs[authKey] ?: prefs[wsKey] ?: return null
+        return StudioPersistence.deserializeWorkspace(raw, verticalDefault = mode.isVertical)
     }
 
     suspend fun saveOverlaySettings(o: OverlaySettings) {

@@ -134,13 +134,23 @@ enum class SceneSlot(
     val defaultVertical: Boolean
 ) {
     GAMEPLAY_LIVE(0, "Gameplay", "Scene 1", false),
-    SHORTS_VERTICAL(1, "Vertical / Shorts", "Scene 2", true),
+    SHORTS_VERTICAL(1, "Starting Soon", "Scene 2", false),
     BRB_BREAK(2, "BRB / Privacy", "Scene 3", false),
     ENDING_THANKS(3, "Ending / Thanks", "Scene 4", false);
 
     companion object {
         fun fromName(raw: String?): SceneSlot =
             entries.firstOrNull { it.name == raw } ?: GAMEPLAY_LIVE
+    }
+}
+
+enum class LayerScaleMode(val label: String) {
+    STRETCH("Stretch"),
+    FIT("Fit");
+
+    companion object {
+        fun fromName(raw: String?): LayerScaleMode =
+            entries.firstOrNull { it.name == raw } ?: STRETCH
     }
 }
 
@@ -223,6 +233,7 @@ data class SceneLayer(
     val cropRight: Float = 0f,
     val cropBottom: Float = 0f,
     val lockAspectRatio: Boolean = false,
+    val scaleMode: LayerScaleMode = LayerScaleMode.STRETCH,
     val borderWidthDp: Float = 0f,
     val borderColorHex: Long = 0xFF3B82F6L,
     val shadowEnabled: Boolean = false,
@@ -350,162 +361,204 @@ data class StudioWorkspaceState(
         get() = scenes[activeSceneSlot] ?: defaultSceneFor(activeSceneSlot)
 
     companion object {
-        fun defaultFourScenes(): Map<SceneSlot, StudioScene> = mapOf(
-            SceneSlot.GAMEPLAY_LIVE to defaultSceneFor(SceneSlot.GAMEPLAY_LIVE),
-            SceneSlot.SHORTS_VERTICAL to defaultSceneFor(SceneSlot.SHORTS_VERTICAL),
-            SceneSlot.BRB_BREAK to defaultSceneFor(SceneSlot.BRB_BREAK),
-            SceneSlot.ENDING_THANKS to defaultSceneFor(SceneSlot.ENDING_THANKS)
+        fun defaultFourScenes(verticalDefault: Boolean = false): Map<SceneSlot, StudioScene> = mapOf(
+            SceneSlot.GAMEPLAY_LIVE to defaultSceneFor(SceneSlot.GAMEPLAY_LIVE, verticalDefault),
+            SceneSlot.SHORTS_VERTICAL to defaultSceneFor(SceneSlot.SHORTS_VERTICAL, verticalDefault),
+            SceneSlot.BRB_BREAK to defaultSceneFor(SceneSlot.BRB_BREAK, verticalDefault),
+            SceneSlot.ENDING_THANKS to defaultSceneFor(SceneSlot.ENDING_THANKS, verticalDefault)
         )
 
-        fun defaultSceneFor(slot: SceneSlot): StudioScene = when (slot) {
-            SceneSlot.GAMEPLAY_LIVE -> StudioScene(
-                slot = SceneSlot.GAMEPLAY_LIVE,
-                name = "Gameplay",
-                isVertical = false,
-                transitionType = SceneTransitionType.FADE,
-                transitionDurationMs = 250,
-                layers = listOf(
-                    SceneLayer(
-                        id = "s1_gameplay",
-                        name = "Gameplay Capture",
-                        type = LayerSourceType.GAMEPLAY_SCREEN,
-                        visible = true,
-                        locked = false,
-                        zIndex = 0,
-                        x = 0f,
-                        y = 0f,
-                        width = 1f,
-                        height = 1f
-                    ),
-                    SceneLayer(
-                        id = "s1_logo",
-                        name = "Channel Logo",
-                        type = LayerSourceType.LOGO,
-                        visible = true,
-                        locked = false,
-                        zIndex = 1,
-                        x = 0.025f,
-                        y = 0.04f,
-                        width = 0.14f,
-                        height = 0.11f,
-                        textContent = "ZRO LIVE",
-                        fontSizeSp = 12f,
-                        borderWidthDp = 1f,
-                        borderColorHex = 0xFF3B82F6L
-                    ),
-                    SceneLayer(
-                        id = "s1_webcam",
-                        name = "Facecam",
-                        type = LayerSourceType.WEBCAM,
-                        visible = true,
-                        locked = false,
-                        zIndex = 2,
-                        x = 0.74f,
-                        y = 0.62f,
-                        width = 0.23f,
-                        height = 0.33f,
-                        facecamShape = FacecamShape.ROUNDED_RECT,
-                        borderWidthDp = 1.5f,
-                        borderColorHex = 0xFF3B82F6L,
-                        shadowEnabled = true
-                    ),
-                    SceneLayer(
-                        id = "s1_chat",
-                        name = "Live Chat",
-                        type = LayerSourceType.CHAT_OVERLAY,
-                        visible = true,
-                        locked = false,
-                        zIndex = 3,
-                        x = 0.025f,
-                        y = 0.62f,
-                        width = 0.34f,
-                        height = 0.34f,
-                        opacity = 0.88f,
-                        backgroundColorHex = 0xAA0C0E12L
-                    ),
-                    SceneLayer(
-                        id = "s1_sub",
-                        name = "Subscriber Goal",
-                        type = LayerSourceType.SUBSCRIBER_COUNTER,
-                        visible = true,
-                        locked = false,
-                        zIndex = 4,
-                        x = 0.72f,
-                        y = 0.04f,
-                        width = 0.25f,
-                        height = 0.14f,
-                        subTitle = "SUBSCRIBERS",
-                        subCount = 0,
-                        subGoal = 1000,
-                        borderWidthDp = 1f,
-                        borderColorHex = 0xFF22C55EL
+        fun defaultSceneFor(slot: SceneSlot, verticalDefault: Boolean = false): StudioScene = when (slot) {
+            SceneSlot.GAMEPLAY_LIVE -> if (verticalDefault) {
+                StudioScene(
+                    slot = SceneSlot.GAMEPLAY_LIVE,
+                    name = "Shorts Gameplay",
+                    isVertical = true,
+                    transitionType = SceneTransitionType.FADE,
+                    transitionDurationMs = 250,
+                    layers = listOf(
+                        SceneLayer(
+                            id = "s1_gameplay",
+                            name = "Gameplay Capture",
+                            type = LayerSourceType.GAMEPLAY_SCREEN,
+                            visible = true,
+                            locked = false,
+                            zIndex = 0,
+                            x = 0f,
+                            y = 0f,
+                            width = 1f,
+                            height = 1f,
+                            scaleMode = LayerScaleMode.STRETCH
+                        ),
+                        SceneLayer(
+                            id = "s1_branding",
+                            name = "Sponsor / Branding Bar",
+                            type = LayerSourceType.TEXT,
+                            visible = true,
+                            locked = false,
+                            zIndex = 1,
+                            x = 0.04f,
+                            y = 0.91f,
+                            width = 0.92f,
+                            height = 0.06f,
+                            textContent = "SPONSOR • ZEO LIVE • SUBSCRIBE",
+                            fontSizeSp = 11f,
+                            backgroundColorHex = 0xCC0D1321L,
+                            borderWidthDp = 1f,
+                            borderColorHex = 0xFF3B82F6L
+                        ),
+                        SceneLayer(
+                            id = "s1_chat",
+                            name = "Live Widget",
+                            type = LayerSourceType.CHAT_OVERLAY,
+                            visible = true,
+                            locked = false,
+                            zIndex = 2,
+                            x = 0.04f,
+                            y = 0.68f,
+                            width = 0.56f,
+                            height = 0.21f,
+                            opacity = 0.88f,
+                            backgroundColorHex = 0xAA0C0E12L
+                        ),
+                        SceneLayer(
+                            id = "s1_webcam",
+                            name = "Facecam",
+                            type = LayerSourceType.WEBCAM,
+                            visible = true,
+                            locked = false,
+                            zIndex = 3,
+                            x = 0.64f,
+                            y = 0.04f,
+                            width = 0.32f,
+                            height = 0.19f,
+                            facecamShape = FacecamShape.ROUNDED_RECT,
+                            borderWidthDp = 1.5f,
+                            borderColorHex = 0xFF3B82F6L,
+                            shadowEnabled = true
+                        )
                     )
                 )
-            )
+            } else {
+                StudioScene(
+                    slot = SceneSlot.GAMEPLAY_LIVE,
+                    name = "Gameplay",
+                    isVertical = false,
+                    transitionType = SceneTransitionType.FADE,
+                    transitionDurationMs = 250,
+                    layers = listOf(
+                        SceneLayer(
+                            id = "s1_gameplay",
+                            name = "Gameplay Capture",
+                            type = LayerSourceType.GAMEPLAY_SCREEN,
+                            visible = true,
+                            locked = false,
+                            zIndex = 0,
+                            x = 0f,
+                            y = 0f,
+                            width = 1f,
+                            height = 1f,
+                            scaleMode = LayerScaleMode.STRETCH
+                        ),
+                        SceneLayer(
+                            id = "s1_branding",
+                            name = "Sponsor / Branding Bar",
+                            type = LayerSourceType.TEXT,
+                            visible = true,
+                            locked = false,
+                            zIndex = 1,
+                            x = 0.25f,
+                            y = 0.89f,
+                            width = 0.73f,
+                            height = 0.09f,
+                            textContent = "SPONSOR • ZEO LIVE • SUBSCRIBE",
+                            fontSizeSp = 12f,
+                            backgroundColorHex = 0xCC0D1321L,
+                            borderWidthDp = 1f,
+                            borderColorHex = 0xFF3B82F6L
+                        ),
+                        SceneLayer(
+                            id = "s1_chat",
+                            name = "Live Widget",
+                            type = LayerSourceType.CHAT_OVERLAY,
+                            visible = true,
+                            locked = false,
+                            zIndex = 2,
+                            x = 0.02f,
+                            y = 0.14f,
+                            width = 0.24f,
+                            height = 0.46f,
+                            opacity = 0.88f,
+                            backgroundColorHex = 0xAA0C0E12L
+                        ),
+                        SceneLayer(
+                            id = "s1_webcam",
+                            name = "Facecam",
+                            type = LayerSourceType.WEBCAM,
+                            visible = true,
+                            locked = false,
+                            zIndex = 3,
+                            x = 0.02f,
+                            y = 0.63f,
+                            width = 0.21f,
+                            height = 0.34f,
+                            facecamShape = FacecamShape.ROUNDED_RECT,
+                            borderWidthDp = 1.5f,
+                            borderColorHex = 0xFF3B82F6L,
+                            shadowEnabled = true
+                        ),
+                        SceneLayer(
+                            id = "s1_sub",
+                            name = "Subscriber Goal",
+                            type = LayerSourceType.SUBSCRIBER_COUNTER,
+                            visible = true,
+                            locked = false,
+                            zIndex = 4,
+                            x = 0.74f,
+                            y = 0.03f,
+                            width = 0.24f,
+                            height = 0.13f,
+                            subTitle = "SUBSCRIBERS",
+                            subCount = 0,
+                            subGoal = 1000,
+                            borderWidthDp = 1f,
+                            borderColorHex = 0xFF22C55EL
+                        )
+                    )
+                )
+            }
 
             SceneSlot.SHORTS_VERTICAL -> StudioScene(
                 slot = SceneSlot.SHORTS_VERTICAL,
-                name = "Vertical / Shorts",
-                isVertical = true,
-                transitionType = SceneTransitionType.SLIDE,
+                name = "Starting Soon",
+                isVertical = verticalDefault,
+                transitionType = SceneTransitionType.FADE,
                 transitionDurationMs = 280,
                 layers = listOf(
                     SceneLayer(
-                        id = "s2_bg",
-                        name = "Studio Backdrop",
-                        type = LayerSourceType.BACKGROUND,
+                        id = "s2_starting_soon",
+                        name = "Streaming Start Soon",
+                        type = LayerSourceType.STARTING_SOON,
                         visible = true,
-                        locked = true,
+                        locked = false,
                         zIndex = 0,
                         x = 0f,
                         y = 0f,
                         width = 1f,
                         height = 1f,
-                        backgroundColorHex = 0xFF0C0E12L
-                    ),
-                    SceneLayer(
-                        id = "s2_gameplay",
-                        name = "Gameplay Capture",
-                        type = LayerSourceType.GAMEPLAY_SCREEN,
-                        visible = true,
-                        locked = false,
-                        zIndex = 1,
-                        x = 0.03f,
-                        y = 0.18f,
-                        width = 0.94f,
-                        height = 0.54f,
-                        cropLeft = 0.10f,
-                        cropRight = 0.10f,
-                        borderWidthDp = 1f,
-                        borderColorHex = 0xFF2C3240L
-                    ),
-                    SceneLayer(
-                        id = "s2_webcam",
-                        name = "Facecam",
-                        type = LayerSourceType.WEBCAM,
-                        visible = true,
-                        locked = false,
-                        zIndex = 2,
-                        x = 0.64f,
-                        y = 0.03f,
-                        width = 0.32f,
-                        height = 0.13f,
-                        facecamShape = FacecamShape.ROUNDED_RECT,
-                        borderWidthDp = 1.5f,
-                        borderColorHex = 0xFF3B82F6L
-                    ),
-                    SceneLayer(
-                        id = "s2_chat",
-                        name = "Vertical Chat",
-                        type = LayerSourceType.CHAT_OVERLAY,
-                        visible = true,
-                        locked = false,
-                        zIndex = 3,
-                        x = 0.04f,
-                        y = 0.75f,
-                        width = 0.92f,
-                        height = 0.21f,
-                        opacity = 0.88f
+                        scaleMode = LayerScaleMode.STRETCH,
+                        textContent = "STREAMING START SOON",
+                        subtitleText = "Live broadcast starting shortly — Stay tuned!",
+                        fontStyle = "DISPLAY",
+                        fontSizeSp = 24f,
+                        textColorHex = 0xFFFFFFFFL,
+                        backgroundColorHex = 0xFF0A1020L,
+                        borderWidthDp = 2f,
+                        borderColorHex = 0xFF3B82F6L,
+                        animationType = LayerAnimationType.SHIMMER,
+                        animationEnabled = true,
+                        motionBackgroundEnabled = true,
+                        presetTag = "STARTING_SOON"
                     )
                 )
             )
@@ -513,7 +566,7 @@ data class StudioWorkspaceState(
             SceneSlot.BRB_BREAK -> StudioScene(
                 slot = SceneSlot.BRB_BREAK,
                 name = "BRB / Privacy",
-                isVertical = false,
+                isVertical = verticalDefault,
                 transitionType = SceneTransitionType.FADE,
                 transitionDurationMs = 250,
                 layers = listOf(
@@ -565,7 +618,7 @@ data class StudioWorkspaceState(
             SceneSlot.ENDING_THANKS -> StudioScene(
                 slot = SceneSlot.ENDING_THANKS,
                 name = "Ending / Thanks",
-                isVertical = false,
+                isVertical = verticalDefault,
                 transitionType = SceneTransitionType.FADE,
                 transitionDurationMs = 350,
                 layers = listOf(

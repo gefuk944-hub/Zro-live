@@ -105,8 +105,11 @@ object StudioWorkspaceReducer {
         )
     }
 
-    fun resetActiveSceneToDefault(state: StudioWorkspaceState): StudioWorkspaceState {
-        val fresh = StudioWorkspaceState.defaultSceneFor(state.activeSceneSlot)
+    fun resetActiveSceneToDefault(
+        state: StudioWorkspaceState,
+        verticalDefault: Boolean = state.activeScene.isVertical
+    ): StudioWorkspaceState {
+        val fresh = StudioWorkspaceState.defaultSceneFor(state.activeSceneSlot, verticalDefault = verticalDefault)
         return state.copy(
             scenes = state.scenes + (state.activeSceneSlot to fresh),
             selectedLayerId = fresh.layers.lastOrNull()?.id
@@ -503,12 +506,13 @@ object StudioWorkspaceReducer {
     fun resetLayerTransform(state: StudioWorkspaceState, layerId: String): StudioWorkspaceState {
         return updateLayer(state, layerId) { layer ->
             when (layer.type) {
-                LayerSourceType.GAMEPLAY_SCREEN, LayerSourceType.BACKGROUND ->
-                    layer.copy(x = 0f, y = 0f, width = 1f, height = 1f, rotationDeg = 0f, cropLeft = 0f, cropTop = 0f, cropRight = 0f, cropBottom = 0f, opacity = 1f)
+                LayerSourceType.GAMEPLAY_SCREEN, LayerSourceType.BACKGROUND,
+                LayerSourceType.STARTING_SOON, LayerSourceType.BRB_BANNER, LayerSourceType.ENDING_BANNER ->
+                    layer.copy(x = 0f, y = 0f, width = 1f, height = 1f, rotationDeg = 0f, cropLeft = 0f, cropTop = 0f, cropRight = 0f, cropBottom = 0f, opacity = 1f, scaleMode = LayerScaleMode.STRETCH)
                 LayerSourceType.WEBCAM ->
-                    layer.copy(x = 0.74f, y = 0.62f, width = 0.23f, height = 0.33f, rotationDeg = 0f, cropLeft = 0f, cropTop = 0f, cropRight = 0f, cropBottom = 0f, opacity = 1f)
+                    layer.copy(x = 0.02f, y = 0.63f, width = 0.21f, height = 0.34f, rotationDeg = 0f, cropLeft = 0f, cropTop = 0f, cropRight = 0f, cropBottom = 0f, opacity = 1f, scaleMode = LayerScaleMode.STRETCH)
                 else ->
-                    layer.copy(x = 0.25f, y = 0.25f, width = 0.50f, height = 0.35f, rotationDeg = 0f, cropLeft = 0f, cropTop = 0f, cropRight = 0f, cropBottom = 0f, opacity = 1f)
+                    layer.copy(x = 0.25f, y = 0.25f, width = 0.50f, height = 0.35f, rotationDeg = 0f, cropLeft = 0f, cropTop = 0f, cropRight = 0f, cropBottom = 0f, opacity = 1f, scaleMode = LayerScaleMode.STRETCH)
             }
         }
     }
@@ -526,6 +530,69 @@ object StudioWorkspaceReducer {
         sorted.add(swapIdx, item)
         val reindexed = sorted.mapIndexed { newZ, l -> l.copy(zIndex = newZ) }
         return updateActiveScene(state) { it.copy(layers = reindexed) }
+    }
+
+    /**
+     * Reorders layers from a top-to-bottom Layer Manager list (index 0 = highest zIndex).
+     */
+    fun reorderLayerTopToBottom(
+        state: StudioWorkspaceState,
+        fromTopIndex: Int,
+        toTopIndex: Int
+    ): StudioWorkspaceState {
+        val scene = state.activeScene
+        if (scene.sceneLocked) return state
+        val desc = scene.layers.sortedByDescending { it.zIndex }.toMutableList()
+        if (fromTopIndex !in desc.indices || toTopIndex !in desc.indices || fromTopIndex == toTopIndex) {
+            return state
+        }
+        val moved = desc.removeAt(fromTopIndex)
+        desc.add(toTopIndex, moved)
+        // Reassign zIndex so top of list has highest zIndex
+        val asc = desc.asReversed().mapIndexed { newZ, l -> l.copy(zIndex = newZ) }
+        return updateActiveScene(state) { it.copy(layers = asc) }
+    }
+
+    /**
+     * Replaces a layer's underlying media or website source while preserving its exact position, size, and Z-order.
+     */
+    fun replaceLayerSource(
+        state: StudioWorkspaceState,
+        layerId: String,
+        mediaUri: String? = null,
+        mediaWidth: Int = 0,
+        mediaHeight: Int = 0,
+        isGif: Boolean = false,
+        isVideo: Boolean = false,
+        webUrl: String? = null
+    ): StudioWorkspaceState {
+        return updateLayer(state, layerId) { layer ->
+            when {
+                webUrl != null -> layer.copy(
+                    webUrl = webUrl,
+                    webReloadNonce = layer.webReloadNonce + 1
+                )
+                mediaUri != null -> {
+                    val nextType = when {
+                        layer.type == LayerSourceType.BACKGROUND ||
+                            layer.type == LayerSourceType.STARTING_SOON ||
+                            layer.type == LayerSourceType.BRB_BANNER ||
+                            layer.type == LayerSourceType.ENDING_BANNER ||
+                            layer.type == LayerSourceType.LOGO -> layer.type
+                        isVideo -> LayerSourceType.VIDEO_OVERLAY
+                        isGif -> LayerSourceType.GIF
+                        else -> LayerSourceType.IMAGE
+                    }
+                    layer.copy(
+                        type = nextType,
+                        mediaUri = mediaUri,
+                        sourceMediaWidth = if (mediaWidth > 0) mediaWidth else layer.sourceMediaWidth,
+                        sourceMediaHeight = if (mediaHeight > 0) mediaHeight else layer.sourceMediaHeight
+                    )
+                }
+                else -> layer
+            }
+        }
     }
 
     fun duplicateLayer(state: StudioWorkspaceState, layerId: String): StudioWorkspaceState {

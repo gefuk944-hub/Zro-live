@@ -35,11 +35,11 @@ import com.example.data.model.ZroAppSettings
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Environment
+import com.example.data.model.LiveBroadcastMode
 import com.example.data.model.LiveVideoSource
 import com.example.data.model.NoiseCancellationLevel
 import com.example.data.model.RtmpTestResult
 import com.example.data.model.VideoResolution
-import com.example.data.model.YouTubeAccountState
 import com.example.dualphone.DualPhoneEngine
 import com.example.dualphone.DualPhoneProtocol
 import com.example.dualphone.DualRemoteCommand
@@ -48,7 +48,6 @@ import com.example.dualphone.WifiDirectState
 import com.example.overlay.FloatingOverlayService
 import com.example.streaming.RtmpPublisher
 import com.example.streaming.StreamingForegroundService
-import com.example.streaming.YouTubeAuthHelper
 import com.example.streaming.ZroStreamCoordinator
 import com.example.studio.CameraSourceMode
 import com.example.studio.CanvasGridMode
@@ -257,9 +256,6 @@ class ZroMainViewModel(
     private val _localScreenshotCount = MutableStateFlow(0)
     val localScreenshotCount: StateFlow<Int> = _localScreenshotCount.asStateFlow()
 
-    private val _youTubeAccount = MutableStateFlow(YouTubeAuthHelper.currentAccountState())
-    val youTubeAccount: StateFlow<YouTubeAccountState> = _youTubeAccount.asStateFlow()
-
     private val _rtmpTestResult = MutableStateFlow<RtmpTestResult?>(null)
     val rtmpTestResult: StateFlow<RtmpTestResult?> = _rtmpTestResult.asStateFlow()
 
@@ -344,9 +340,10 @@ class ZroMainViewModel(
             _externalCameraInventory.value = ExternalCameraDetector.inspect(appContext)
         }
 
-        // Hydrate persisted 4-Scene OBS Studio workspace once at startup (never clobber active drags/selections)
+        // Hydrate persisted Studio workspace for the active broadcast mode (16:9 Live, Shorts Live, or Dual Live)
         viewModelScope.launch {
-            val loaded = settingsStore.studioWorkspaceFlow.first()
+            val initialMode = settingsStore.settingsFlow.first().stream.broadcastMode
+            val loaded = settingsStore.loadStudioWorkspaceForMode(initialMode)
             _studioState.value = loaded
             ZroStreamCoordinator.activeSceneSlotName = loaded.activeSceneSlot.name
         }
@@ -372,7 +369,7 @@ class ZroMainViewModel(
                             lastAutoRestoredDeviceKey = key
                             val cur = _studioState.value
                             if (cur.autoRestoreLastLayout) {
-                                val saved = settingsStore.loadAuthorizedDeviceLayout()
+                                val saved = settingsStore.loadAuthorizedDeviceLayout(settings.value.stream.broadcastMode)
                                 if (saved != null) {
                                     val updated = saved.copy(
                                         lastAuthorizedDeviceName = dt.connectedDeviceName,
@@ -426,7 +423,7 @@ class ZroMainViewModel(
                 ZroStreamCoordinator.currentAudioSettings = cfg.audio
                 ZroStreamCoordinator.currentOverlaySettings = cfg.overlay
                 ZroStreamCoordinator.currentPerfSettings = cfg.performance
-                CrashRecoveryStore.updateSecretsToScrub(cfg.stream.streamKey)
+                CrashRecoveryStore.updateSecretsToScrub(cfg.stream.streamKey, cfg.stream.shortsStreamKey)
                 ZroAudioEngine.updateSettings(appContext, cfg.audio)
                 ZroAudioEngine.applyPerformanceSettings(cfg.performance)
                 if (!ZroStreamCoordinator.isSessionActive()) {
@@ -564,15 +561,43 @@ class ZroMainViewModel(
     // --- SETTINGS UPDATES ---
 
     fun updateStreamSettings(updated: StreamSettings) {
-        ZroStreamCoordinator.currentStreamSettings = updated
-        viewModelScope.launch { settingsStore.saveStreamSettings(updated) }
+        val synced = updated.withSyncedActiveModePreset()
+        ZroStreamCoordinator.currentStreamSettings = synced
+        viewModelScope.launch { settingsStore.saveStreamSettings(synced) }
+    }
+
+    fun switchBroadcastMode(targetMode: LiveBroadcastMode) {
+        val currentCfg = settings.value.stream
+        if (currentCfg.broadcastMode == targetMode) return
+        if (ZroStreamCoordinator.isSessionActive()) {
+            showMessage("End the active live stream before switching between 16:9 Live and Shorts Live.")
+            return
+        }
+        val prevMode = currentCfg.broadcastMode
+        val prevStudio = _studioState.value
+        val nextCfg = currentCfg.switchBroadcastMode(targetMode)
+        ZroStreamCoordinator.currentStreamSettings = nextCfg
+        viewModelScope.launch {
+            settingsStore.saveStudioWorkspace(prevStudio, prevMode)
+            settingsStore.saveStreamSettings(nextCfg)
+            val nextStudio = settingsStore.loadStudioWorkspaceForMode(targetMode)
+            undoStack.clear()
+            redoStack.clear()
+            _canUndo.value = false
+            _canRedo.value = false
+            _studioState.value = nextStudio
+            ZroStreamCoordinator.activeSceneSlotName = nextStudio.activeSceneSlot.name
+            showMessage("Switched to ${targetMode.label} (${nextCfg.effectiveResolutionDisplay()})")
+        }
     }
 
     fun saveStreamConfiguration(updated: StreamSettings = settings.value.stream) {
         val cleaned = updated.copy(
             rtmpUrl = updated.rtmpUrl.trim(),
             backupRtmpUrl = updated.backupRtmpUrl.trim(),
-            streamKey = updated.streamKey.trim()
+            streamKey = updated.streamKey.trim(),
+            shortsRtmpUrl = updated.shortsRtmpUrl.trim(),
+            shortsStreamKey = updated.shortsStreamKey.trim()
         )
         updateStreamSettings(cleaned)
         val validation = RtmpPublisher.validateConfig(
@@ -582,9 +607,20 @@ class ZroMainViewModel(
         )
         if (!validation.valid) {
             showMessage("Saved draft — ${validation.errorMessage ?: "Invalid RTMP config."}")
-        } else {
-            showMessage("Streaming configuration saved (${cleaned.platform.label} • Key ${RtmpPublisher.maskStreamKey(cleaned.streamKey)}).")
+            return
         }
+        if (cleaned.broadcastMode == LiveBroadcastMode.DUAL_LIVE) {
+            val shortsValidation = RtmpPublisher.validateConfig(
+                primaryUrl = cleaned.effectiveShortsServerUrl(),
+                backupUrl = "",
+                streamKey = cleaned.shortsStreamKey
+            )
+            if (!shortsValidation.valid) {
+                showMessage("Saved draft — Dual Live also needs a valid Shorts 9:16 RTMP URL & Stream Key.")
+                return
+            }
+        }
+        showMessage("Streaming configuration saved (${cleaned.broadcastMode.label} • Key ${RtmpPublisher.maskStreamKey(cleaned.streamKey)}).")
     }
 
     fun testRtmpConnection() {
@@ -666,30 +702,6 @@ class ZroMainViewModel(
         }
     }
 
-    fun signInYouTubeAccount(activityContext: Context) {
-        if (_youTubeAccount.value.isLoading) return
-        _youTubeAccount.update { it.copy(isLoading = true, statusMessage = null) }
-        viewModelScope.launch {
-            val res = YouTubeAuthHelper.signInWithGoogleForYouTube(activityContext)
-            res.onSuccess { account ->
-                _youTubeAccount.value = account
-                showMessage("Connected YouTube / Google account: ${account.displayName.ifBlank { account.email }}")
-            }.onFailure { err ->
-                val msg = err.localizedMessage ?: "YouTube sign-in failed."
-                _youTubeAccount.update { it.copy(isLoading = false, statusMessage = msg) }
-                showMessage(msg)
-            }
-        }
-    }
-
-    fun signOutYouTubeAccount() {
-        viewModelScope.launch {
-            val state = YouTubeAuthHelper.signOut(appContext)
-            _youTubeAccount.value = state
-            showMessage("Disconnected YouTube / Google account.")
-        }
-    }
-
     /**
      * Updates capture mode while enforcing the privacy guarantee:
      * FULL_SCREEN can never be silently activated unless explicitly enabled by the user.
@@ -725,35 +737,49 @@ class ZroMainViewModel(
      * without creating a duplicate broadcast. Returns true if config is valid and ready to launch.
      */
     fun prepareReconnectPreviousLive(): Boolean {
-        val snap = recoverableSession.value ?: run {
-            showMessage("No interrupted live session found to reconnect.")
-            return false
-        }
+        val snap = recoverableSession.value
         val cur = settings.value.stream
-        val restoredRes = VideoResolution.fromName(snap.resolutionName)
-        val restored = cur.copy(
-            streamTitle = snap.title.ifBlank { cur.streamTitle },
-            rtmpUrl = snap.rtmpUrl.ifBlank { cur.rtmpUrl },
-            resolution = restoredRes,
-            fps = snap.fps.coerceIn(24, 60),
-            bitrateKbps = snap.bitrateKbps.coerceIn(1000, 15000)
-        )
-        updateStreamSettings(restored)
-        val restoredSlot = SceneSlot.fromName(snap.activeSceneSlotName)
-        if (_studioState.value.activeSceneSlot != restoredSlot) {
-            commitStudioState(StudioWorkspaceReducer.switchScene(_studioState.value, restoredSlot), recordUndo = false)
+        if (snap != null) {
+            val restoredRes = VideoResolution.fromName(snap.resolutionName)
+            val restored = cur.copy(
+                streamTitle = snap.title.ifBlank { cur.streamTitle },
+                rtmpUrl = snap.rtmpUrl.ifBlank { cur.rtmpUrl },
+                resolution = restoredRes,
+                fps = snap.fps.coerceIn(24, 60),
+                bitrateKbps = snap.bitrateKbps.coerceIn(1000, 15000)
+            )
+            updateStreamSettings(restored)
+            val restoredSlot = SceneSlot.fromName(snap.activeSceneSlotName)
+            if (_studioState.value.activeSceneSlot != restoredSlot) {
+                commitStudioState(StudioWorkspaceReducer.switchScene(_studioState.value, restoredSlot), recordUndo = false)
+            }
+            pendingReuseSessionId = snap.sessionId
+            val validation = RtmpPublisher.validateConfig(
+                primaryUrl = restored.effectivePrimaryServerUrl(),
+                backupUrl = restored.effectiveBackupServerUrl(),
+                streamKey = restored.streamKey
+            )
+            if (!validation.valid) {
+                showMessage("Restored '${snap.title}'. Enter your Stream Key in Live Setup to reconnect.")
+                return false
+            }
+            showMessage("Reconnecting to '${snap.title}' (same stream key & session)…")
+            return true
         }
-        pendingReuseSessionId = snap.sessionId
+        val lastKnownSid = streamTelemetry.value.activeSessionId
         val validation = RtmpPublisher.validateConfig(
-            primaryUrl = restored.effectivePrimaryServerUrl(),
-            backupUrl = restored.effectiveBackupServerUrl(),
-            streamKey = restored.streamKey
+            primaryUrl = cur.effectivePrimaryServerUrl(),
+            backupUrl = cur.effectiveBackupServerUrl(),
+            streamKey = cur.streamKey
         )
         if (!validation.valid) {
-            showMessage("Restored '${snap.title}'. Enter your Stream Key in Live Setup to reconnect.")
+            showMessage("Enter your Stream RTMP URL and Stream Key in Live Setup to reconnect.")
             return false
         }
-        showMessage("Reconnecting to '${snap.title}' (same session, no duplicate broadcast)…")
+        if (!lastKnownSid.isNullOrBlank()) {
+            pendingReuseSessionId = lastKnownSid
+        }
+        showMessage("Reconnecting live stream with same stream key & session…")
         return true
     }
 
@@ -1055,6 +1081,28 @@ class ZroMainViewModel(
         if (!configCheck.valid) {
             showMessage(configCheck.errorMessage ?: "Invalid RTMP streaming settings.")
             return
+        }
+        if (streamCfg.broadcastMode == LiveBroadcastMode.DUAL_LIVE) {
+            val (dualOk, dualReason) = StreamingForegroundService.checkDualLiveSupport(appContext)
+            if (!dualOk) {
+                showMessage(dualReason)
+                return
+            }
+            val shortsCheck = RtmpPublisher.validateConfig(
+                primaryUrl = streamCfg.effectiveShortsServerUrl(),
+                backupUrl = "",
+                streamKey = streamCfg.shortsStreamKey
+            )
+            if (!shortsCheck.valid) {
+                showMessage("Dual Live needs a valid Shorts 9:16 RTMP URL & Stream Key in Live Setup.")
+                return
+            }
+            if (streamCfg.effectiveShortsServerUrl().equals(streamCfg.effectivePrimaryServerUrl(), ignoreCase = true) &&
+                streamCfg.shortsStreamKey.trim() == streamCfg.streamKey.trim()
+            ) {
+                showMessage("Dual Live requires a separate Stream Key for 9:16 Shorts Live.")
+                return
+            }
         }
         if (resultCode != null && data != null) {
             ZroStreamCoordinator.pendingMediaProjectionResultCode = resultCode
@@ -1442,6 +1490,8 @@ class ZroMainViewModel(
         _canRedo.value = false
     }
 
+    private fun activeBroadcastMode(): LiveBroadcastMode = settings.value.stream.broadcastMode
+
     private fun commitStudioState(
         newState: StudioWorkspaceState,
         persist: Boolean = true,
@@ -1454,7 +1504,8 @@ class ZroMainViewModel(
         _studioState.value = newState
         ZroStreamCoordinator.activeSceneSlotName = newState.activeSceneSlot.name
         if (persist) {
-            viewModelScope.launch { settingsStore.saveStudioWorkspace(newState) }
+            val mode = activeBroadcastMode()
+            viewModelScope.launch { settingsStore.saveStudioWorkspace(newState, mode) }
         }
     }
 
@@ -1464,7 +1515,8 @@ class ZroMainViewModel(
         _canUndo.value = undoStack.isNotEmpty()
         _canRedo.value = redoStack.isNotEmpty()
         _studioState.value = prev
-        viewModelScope.launch { settingsStore.saveStudioWorkspace(prev) }
+        val mode = activeBroadcastMode()
+        viewModelScope.launch { settingsStore.saveStudioWorkspace(prev, mode) }
         showMessage("Undid last Studio change")
     }
 
@@ -1474,12 +1526,14 @@ class ZroMainViewModel(
         _canUndo.value = undoStack.isNotEmpty()
         _canRedo.value = redoStack.isNotEmpty()
         _studioState.value = next
-        viewModelScope.launch { settingsStore.saveStudioWorkspace(next) }
+        val mode = activeBroadcastMode()
+        viewModelScope.launch { settingsStore.saveStudioWorkspace(next, mode) }
         showMessage("Redid Studio change")
     }
 
     fun saveScreenLayoutExplicitly() {
         val dt = dualTelemetry.value
+        val mode = activeBroadcastMode()
         val stamped = _studioState.value.copy(
             savedLayoutTimestampMs = System.currentTimeMillis(),
             lastAuthorizedDeviceName = dt.connectedDeviceName.ifBlank { _studioState.value.lastAuthorizedDeviceName },
@@ -1487,9 +1541,9 @@ class ZroMainViewModel(
         )
         _studioState.value = stamped
         viewModelScope.launch {
-            settingsStore.saveAuthorizedDeviceLayout(stamped)
-            settingsStore.savePreviousStudioBackup(stamped)
-            showMessage("Screen layout & all 4 scenes saved. Will auto-restore on restart/reconnect.")
+            settingsStore.saveAuthorizedDeviceLayout(stamped, mode)
+            settingsStore.savePreviousStudioBackup(stamped, mode)
+            showMessage("Saved ${mode.label} layout & all 4 scenes.")
         }
     }
 
@@ -1498,15 +1552,17 @@ class ZroMainViewModel(
     }
 
     fun resetEntireLayoutConfirmed() {
-        viewModelScope.launch { settingsStore.savePreviousStudioBackup(_studioState.value) }
+        val mode = activeBroadcastMode()
+        viewModelScope.launch { settingsStore.savePreviousStudioBackup(_studioState.value, mode) }
         val fresh = StudioWorkspaceState(
+            scenes = StudioWorkspaceState.defaultFourScenes(verticalDefault = mode.isVertical),
             autoRestoreLastLayout = _studioState.value.autoRestoreLastLayout,
             remoteTileOrder = _studioState.value.remoteTileOrder,
             remoteTileScale = _studioState.value.remoteTileScale
         )
         commitStudioState(fresh)
-        viewModelScope.launch { settingsStore.saveAuthorizedDeviceLayout(fresh) }
-        showMessage("Layout reset to default Studio configuration.")
+        viewModelScope.launch { settingsStore.saveAuthorizedDeviceLayout(fresh, mode) }
+        showMessage("Reset ${mode.label} layout to defaults.")
     }
 
     fun triggerBrbPrivacy() {
@@ -1632,19 +1688,21 @@ class ZroMainViewModel(
     }
 
     fun saveSceneBackupSnapshot() {
+        val mode = activeBroadcastMode()
         viewModelScope.launch {
-            settingsStore.savePreviousStudioBackup(_studioState.value)
-            settingsStore.saveStudioWorkspace(_studioState.value)
-            showMessage("All 4 scenes saved! You can restore this snapshot anytime.")
+            settingsStore.savePreviousStudioBackup(_studioState.value, mode)
+            settingsStore.saveStudioWorkspace(_studioState.value, mode)
+            showMessage("All 4 scenes saved for ${mode.label}!")
         }
     }
 
     fun restorePreviousSceneBackup() {
+        val mode = activeBroadcastMode()
         viewModelScope.launch {
-            val restored = settingsStore.restorePreviousStudioBackup()
+            val restored = settingsStore.restorePreviousStudioBackup(mode)
             if (restored != null) {
                 _studioState.value = restored
-                showMessage("Restored previous saved scene settings.")
+                showMessage("Restored previous saved ${mode.label} scene settings.")
             } else {
                 showMessage("No previous backup saved yet. Tap 'Save Snapshot' first.")
             }
@@ -1652,8 +1710,9 @@ class ZroMainViewModel(
     }
 
     fun resetActiveSceneToDefault() {
-        viewModelScope.launch { settingsStore.savePreviousStudioBackup(_studioState.value) }
-        val next = StudioWorkspaceReducer.resetActiveSceneToDefault(_studioState.value)
+        val mode = activeBroadcastMode()
+        viewModelScope.launch { settingsStore.savePreviousStudioBackup(_studioState.value, mode) }
+        val next = StudioWorkspaceReducer.resetActiveSceneToDefault(_studioState.value, verticalDefault = mode.isVertical)
         commitStudioState(next)
         showMessage("Reset ${next.activeScene.name} to default layout.")
     }
@@ -1753,19 +1812,35 @@ class ZroMainViewModel(
     }
 
     fun importBackgroundMediaForLayer(layerId: String, uri: Uri) {
+        importAndReplaceLayerSource(layerId = layerId, uri = uri, isVideoHint = false)
+    }
+
+    fun importAndReplaceLayerSource(layerId: String, uri: Uri, isVideoHint: Boolean = false) {
+        val cur = _studioState.value
+        val target = cur.activeScene.layers.firstOrNull { it.id == layerId } ?: return
+        if (cur.activeScene.sceneLocked || target.locked) {
+            showMessage("Unlock '${target.name}' before replacing its source.")
+            return
+        }
         viewModelScope.launch {
             val imported = withContext(Dispatchers.IO) {
-                StudioMediaStore.importMediaToAppStorage(appContext, uri, isVideoHint = false).getOrNull()
+                StudioMediaStore.importMediaToAppStorage(appContext, uri, isVideoHint = isVideoHint).getOrNull()
             }
+            val mime = appContext.contentResolver.getType(uri).orEmpty()
+            val isGif = imported?.isGif ?: (mime.contains("gif", ignoreCase = true) || uri.toString().endsWith(".gif", ignoreCase = true))
+            val isVideo = imported?.isVideo ?: (isVideoHint || mime.startsWith("video/", ignoreCase = true))
             val finalUri = imported?.persistentUri ?: uri.toString()
-            updateLayerProps(layerId) {
-                it.copy(
-                    mediaUri = finalUri,
-                    sourceMediaWidth = imported?.widthPx ?: it.sourceMediaWidth,
-                    sourceMediaHeight = imported?.heightPx ?: it.sourceMediaHeight
-                )
-            }
-            showMessage("Updated scene background media.")
+            val next = StudioWorkspaceReducer.replaceLayerSource(
+                state = _studioState.value,
+                layerId = layerId,
+                mediaUri = finalUri,
+                mediaWidth = imported?.widthPx ?: 0,
+                mediaHeight = imported?.heightPx ?: 0,
+                isGif = isGif,
+                isVideo = isVideo
+            )
+            commitStudioState(next)
+            showMessage("Replaced source for '${target.name}'.")
         }
     }
 
@@ -1900,10 +1975,11 @@ class ZroMainViewModel(
     fun persistCurrentStudioState() {
         dragSnapshotPushed = false
         val snapshot = _studioState.value
+        val mode = activeBroadcastMode()
         viewModelScope.launch {
-            settingsStore.saveStudioWorkspace(snapshot)
+            settingsStore.saveStudioWorkspace(snapshot, mode)
             if (snapshot.autoRestoreLastLayout) {
-                settingsStore.saveAuthorizedDeviceLayout(snapshot)
+                settingsStore.saveAuthorizedDeviceLayout(snapshot, mode)
             }
         }
     }
@@ -2067,6 +2143,10 @@ class ZroMainViewModel(
 
     fun moveLayerZOrder(layerId: String, bringForward: Boolean) {
         commitStudioState(StudioWorkspaceReducer.moveLayerZOrder(_studioState.value, layerId, bringForward))
+    }
+
+    fun reorderLayerTopToBottom(fromTopIndex: Int, toTopIndex: Int) {
+        commitStudioState(StudioWorkspaceReducer.reorderLayerTopToBottom(_studioState.value, fromTopIndex, toTopIndex))
     }
 
     fun duplicateLayer(layerId: String) {

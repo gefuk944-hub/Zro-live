@@ -22,7 +22,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
-import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.GraphicEq
@@ -31,6 +30,7 @@ import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Videocam
@@ -71,16 +71,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.data.model.AudioSettings
+import com.example.data.model.LiveBroadcastMode
 import com.example.data.model.RtmpTestResult
 import com.example.data.model.StreamLifecycleState
-import com.example.data.model.StreamPlatform
 import com.example.data.model.VideoResolution
 import com.example.data.model.StreamRuntimeTelemetry
 import com.example.data.model.StreamSettings
 import com.example.data.model.StreamVisibility
-import com.example.data.model.YouTubeAccountState
 import com.example.streaming.RtmpPublisher
-import com.example.streaming.YouTubeAuthHelper
+import com.example.streaming.StreamingForegroundService
 import com.example.streaming.ZroStreamCoordinator
 import com.example.studio.DualLinkState
 import com.example.studio.DualPhoneTelemetry
@@ -122,15 +121,17 @@ fun LiveSetupScreen(
     onOpenSceneStudio: () -> Unit,
     onStartLive: () -> Unit,
     onStopLive: () -> Unit,
-    youTubeAccount: YouTubeAccountState = YouTubeAccountState(),
     rtmpTestResult: RtmpTestResult? = null,
     isTestingRtmp: Boolean = false,
-    onConnectYouTubeAccount: () -> Unit = {},
-    onDisconnectYouTubeAccount: () -> Unit = {},
     onSaveConfiguration: () -> Unit = {},
     onTestConnection: () -> Unit = {},
     connectivitySnapshot: AppConnectivitySnapshot = AppConnectivitySnapshot(),
-    onProbeStunServer: () -> Unit = {}
+    onProbeStunServer: () -> Unit = {},
+    onSwitchBroadcastMode: (LiveBroadcastMode) -> Unit = { mode ->
+        onUpdateStreamSettings(streamSettings.switchBroadcastMode(mode))
+    },
+    hasRecoverableSession: Boolean = false,
+    onReconnectLive: () -> Unit = onStartLive
 ) {
     val context = LocalContext.current
     val isLive = streamTelemetry.state == StreamLifecycleState.LIVE ||
@@ -141,6 +142,10 @@ fun LiveSetupScreen(
         streamTelemetry.state == StreamLifecycleState.RECONNECTING
 
     var showStreamKey by remember { mutableStateOf(false) }
+    var showShortsStreamKey by remember { mutableStateOf(false) }
+    val (dualLiveSupported, dualLiveStatusNote) = remember(context) {
+        StreamingForegroundService.checkDualLiveSupport(context)
+    }
 
     val keyLooksLikeUrl = RtmpPublisher.looksLikeUrl(streamSettings.streamKey)
     val configValidation = RtmpPublisher.validateConfig(
@@ -193,142 +198,113 @@ fun LiveSetupScreen(
                 )
             }
 
-            // 1. Stream Destination (Simple Stream RTMP URL + Stream Key) & Optional YouTube Login
+            // 1. Live Broadcast Mode (16:9 Live / Shorts Live / Dual Live)
             item {
                 GlassCard {
                     SectionHeader(
-                        title = "Stream Connection",
-                        subtitle = if (configValidationError == null) {
-                            "Configured • Key ${RtmpPublisher.maskStreamKey(streamSettings.streamKey)}"
-                        } else {
-                            "Enter your Stream RTMP URL and Stream Key to go live"
-                        }
+                        title = "Live Broadcast Mode",
+                        subtitle = "${streamSettings.broadcastMode.label} • ${streamSettings.effectiveResolutionDisplay()} • Saved per mode"
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-
-                    // Optional YouTube / Google Account Connect Row (not mandatory for RTMP)
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerLow,
-                        border = BorderStroke(
-                            1.dp,
-                            if (youTubeAccount.signedIn) ZroEmerald.copy(alpha = 0.5f)
-                            else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("youtube_account_card")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Column(
-                            modifier = Modifier.padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        LiveBroadcastMode.entries.forEach { mode ->
+                            val selected = streamSettings.broadcastMode == mode
+                            FilterChip(
+                                selected = selected,
+                                onClick = { onSwitchBroadcastMode(mode) },
+                                label = {
+                                    Text(
+                                        text = mode.shortLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = ZroCobalt.copy(alpha = 0.24f),
+                                    selectedLabelColor = Color.White
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("live_mode_${mode.name.lowercase()}")
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = streamSettings.broadcastMode.description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (streamSettings.broadcastMode == LiveBroadcastMode.DUAL_LIVE) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = (if (dualLiveSupported) ZroEmerald else ZroLiveRed).copy(alpha = 0.14f),
+                            border = BorderStroke(
+                                1.dp,
+                                (if (dualLiveSupported) ZroEmerald else ZroLiveRed).copy(alpha = 0.5f)
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("dual_live_support_banner")
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.AccountCircle,
-                                    contentDescription = "YouTube Account",
-                                    tint = if (youTubeAccount.signedIn) ZroEmerald else ZroLiveRed,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = if (youTubeAccount.signedIn) {
-                                            youTubeAccount.displayName.ifBlank { "Google / YouTube Connected" }
-                                        } else {
-                                            "YouTube / Google Account (Optional)"
-                                        },
-                                        style = MaterialTheme.typography.labelLarge,
-                                        color = Color.White,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = if (youTubeAccount.signedIn) {
-                                            youTubeAccount.email.ifBlank { "Signed in • RTMP ready" }
-                                        } else {
-                                            YouTubeAuthHelper.oauthStatusSummary(context)
-                                        },
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                if (youTubeAccount.signedIn) {
-                                    OutlinedButton(
-                                        onClick = onDisconnectYouTubeAccount,
-                                        shape = RoundedCornerShape(6.dp),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                                        modifier = Modifier.testTag("youtube_disconnect_btn")
-                                    ) {
-                                        Text("Sign Out", fontSize = 11.sp)
-                                    }
+                            Text(
+                                text = if (dualLiveSupported) {
+                                    "Dual Encoder Ready: $dualLiveStatusNote"
                                 } else {
-                                    Button(
-                                        onClick = onConnectYouTubeAccount,
-                                        enabled = !youTubeAccount.isLoading,
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = ZroLiveRed,
-                                            contentColor = Color.White
-                                        ),
-                                        shape = RoundedCornerShape(6.dp),
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                        modifier = Modifier.testTag("youtube_connect_btn")
-                                    ) {
-                                        if (youTubeAccount.isLoading) {
-                                            CircularProgressIndicator(
-                                                modifier = Modifier.size(13.dp),
-                                                strokeWidth = 1.8.dp,
-                                                color = Color.White
-                                            )
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                        }
-                                        Text(
-                                            if (youTubeAccount.isLoading) "Signing in…" else "Sign in",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                    }
+                                    "Dual Live Unavailable: $dualLiveStatusNote"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (dualLiveSupported) ZroEmerald else ZroLiveRed,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 2. Manual Stream Destination (RTMP URL + Stream Key — No Login Required)
+            item {
+                GlassCard {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            SectionHeader(
+                                title = "Stream Connection (RTMP)",
+                                subtitle = if (configValidationError == null) {
+                                    "Configured • Key ${RtmpPublisher.maskStreamKey(streamSettings.streamKey)}"
+                                } else {
+                                    "Enter your manual RTMP URL and Stream Key"
                                 }
-                            }
-                            if (!youTubeAccount.statusMessage.isNullOrBlank()) {
-                                Text(
-                                    text = youTubeAccount.statusMessage,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = if (youTubeAccount.signedIn) ZroEmerald else ZroAmber
-                                )
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.End
-                            ) {
-                                OutlinedButton(
-                                    onClick = {
-                                        runCatching {
-                                            context.startActivity(
-                                                Intent(Intent.ACTION_VIEW, Uri.parse("https://studio.youtube.com"))
-                                            )
-                                        }
-                                    },
-                                    shape = RoundedCornerShape(6.dp),
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                    modifier = Modifier
-                                        .height(28.dp)
-                                        .testTag("open_youtube_studio_btn")
-                                ) {
-                                    Icon(
-                                        Icons.AutoMirrored.Rounded.OpenInNew,
-                                        contentDescription = "Open YouTube Studio",
-                                        modifier = Modifier.size(13.dp)
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse("https://studio.youtube.com"))
                                     )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Open YouTube Studio", fontSize = 10.sp)
                                 }
-                            }
+                            },
+                            shape = RoundedCornerShape(6.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            modifier = Modifier
+                                .height(28.dp)
+                                .testTag("open_youtube_studio_btn")
+                        ) {
+                            Icon(
+                                Icons.AutoMirrored.Rounded.OpenInNew,
+                                contentDescription = "Open YouTube Studio",
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("YT Studio", fontSize = 10.sp)
                         }
                     }
 
@@ -435,6 +411,71 @@ fun LiveSetupScreen(
                             .fillMaxWidth()
                             .testTag("live_setup_stream_key_input")
                     )
+
+                    // Secondary Shorts 9:16 RTMP destination when Dual Live is selected
+                    if (streamSettings.broadcastMode == LiveBroadcastMode.DUAL_LIVE) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        val shortsUrlError = remember(streamSettings.shortsRtmpUrl) {
+                            if (streamSettings.shortsRtmpUrl.isNotBlank()) {
+                                RtmpPublisher.validateServerUrl(streamSettings.shortsRtmpUrl, "Shorts RTMP URL")
+                            } else null
+                        }
+                        val shortsKeyLooksLikeUrl = RtmpPublisher.looksLikeUrl(streamSettings.shortsStreamKey)
+                        OutlinedTextField(
+                            value = streamSettings.shortsRtmpUrl,
+                            onValueChange = { onUpdateStreamSettings(streamSettings.copy(shortsRtmpUrl = it)) },
+                            label = { Text("Shorts 9:16 RTMP URL (Dual Live)") },
+                            placeholder = { Text("rtmp://a.rtmp.youtube.com/live2 (leave blank to reuse primary)", fontSize = 11.sp) },
+                            isError = shortsUrlError != null,
+                            supportingText = {
+                                Text(
+                                    text = shortsUrlError ?: "Secondary vertical 9:16 RTMP ingest server",
+                                    color = if (shortsUrlError != null) ZroLiveRed else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 10.sp
+                                )
+                            },
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("live_setup_shorts_url_input")
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        OutlinedTextField(
+                            value = streamSettings.shortsStreamKey,
+                            onValueChange = { onUpdateStreamSettings(streamSettings.copy(shortsStreamKey = it)) },
+                            label = { Text("Shorts 9:16 Stream Key (Dual Live)") },
+                            placeholder = { Text("Paste separate YouTube Shorts Live stream key", fontSize = 11.sp) },
+                            isError = shortsKeyLooksLikeUrl,
+                            supportingText = {
+                                Text(
+                                    text = when {
+                                        shortsKeyLooksLikeUrl -> "That looks like a URL, not a Stream Key."
+                                        streamSettings.shortsStreamKey.isNotBlank() ->
+                                            "Protected & masked (${RtmpPublisher.maskStreamKey(streamSettings.shortsStreamKey)})"
+                                        else -> "Required for simultaneous 9:16 Shorts stream (kept masked)."
+                                    },
+                                    color = if (shortsKeyLooksLikeUrl) ZroLiveRed else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 10.sp
+                                )
+                            },
+                            singleLine = true,
+                            visualTransformation = if (showShortsStreamKey) VisualTransformation.None else PasswordVisualTransformation(),
+                            trailingIcon = {
+                                IconButton(
+                                    onClick = { showShortsStreamKey = !showShortsStreamKey },
+                                    modifier = Modifier.testTag("live_setup_toggle_shorts_key_visibility")
+                                ) {
+                                    Icon(
+                                        imageVector = if (showShortsStreamKey) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                                        contentDescription = if (showShortsStreamKey) "Hide shorts stream key" else "Show shorts stream key"
+                                    )
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("live_setup_shorts_key_input")
+                        )
+                    }
 
                     Spacer(modifier = Modifier.height(8.dp))
                     // Save Configuration & Optional Test Connection actions
@@ -600,6 +641,22 @@ fun LiveSetupScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = if (streamTelemetry.errorMessage != null) ZroLiveRed else MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            if (!isLive && (streamTelemetry.errorMessage != null || hasRecoverableSession)) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Button(
+                                    onClick = onReconnectLive,
+                                    colors = ButtonDefaults.buttonColors(containerColor = ZroAmber, contentColor = Color.Black),
+                                    shape = RoundedCornerShape(6.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("live_setup_reconnect_btn")
+                                ) {
+                                    Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(15.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Reconnect Same Live Session", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
                         }
                     }
                 }
@@ -705,12 +762,12 @@ fun LiveSetupScreen(
                 }
             }
 
-            // 3. Video Quality (Resolution / FPS / Bitrate)
+            // 3. Video Quality (Resolution / FPS / Bitrate — saved independently per mode)
             item {
                 GlassCard {
                     SectionHeader(
-                        title = "Video Encoder",
-                        subtitle = "${streamSettings.resolution.shortLabel} • ${streamSettings.fps} FPS • ${"%.1f".format(streamSettings.bitrateKbps / 1000f)} Mbps"
+                        title = "Video Encoder (${streamSettings.broadcastMode.shortLabel})",
+                        subtitle = "${streamSettings.effectiveResolutionDisplay()} • ${streamSettings.fps} FPS • ${"%.1f".format(streamSettings.bitrateKbps / 1000f)} Mbps"
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     val mainResolutions = listOf(

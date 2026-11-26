@@ -191,6 +191,28 @@ enum class StreamPlatform(val label: String, val defaultRtmpUrl: String) {
     }
 }
 
+enum class LiveBroadcastMode(
+    val label: String,
+    val shortLabel: String,
+    val aspectLabel: String,
+    val isVertical: Boolean
+) {
+    LANDSCAPE_16_9("16:9 Live", "16:9 Live", "16:9", false),
+    SHORTS_9_16("Shorts Live", "Shorts 9:16", "9:16", true),
+    DUAL_LIVE("Dual Live", "Dual 16:9+9:16", "16:9 + 9:16", false);
+
+    companion object {
+        fun fromName(raw: String?): LiveBroadcastMode =
+            entries.firstOrNull { it.name == raw } ?: LANDSCAPE_16_9
+    }
+}
+
+data class ModeStreamPreset(
+    val resolution: VideoResolution = VideoResolution.P720,
+    val fps: Int = 30,
+    val bitrateKbps: Int = 4500
+)
+
 // --- SETTINGS CONFIGURATION ---
 
 data class StreamSettings(
@@ -222,8 +244,88 @@ data class StreamSettings(
     val chatEnabled: Boolean = true,
     val chatVisible: Boolean = true,
     val chatNotifications: Boolean = true,
-    val lowDataMode: Boolean = false
+    val lowDataMode: Boolean = false,
+    val broadcastMode: LiveBroadcastMode = LiveBroadcastMode.LANDSCAPE_16_9,
+    val landscapePreset: ModeStreamPreset = ModeStreamPreset(VideoResolution.P720, 30, 4500),
+    val shortsPreset: ModeStreamPreset = ModeStreamPreset(VideoResolution.P720, 30, 4500),
+    val dualPreset: ModeStreamPreset = ModeStreamPreset(VideoResolution.P720, 30, 3500),
+    val shortsRtmpUrl: String = "",
+    val shortsStreamKey: String = ""
 ) {
+    fun effectiveOrientation(): StreamOrientation =
+        if (broadcastMode.isVertical) StreamOrientation.PORTRAIT else StreamOrientation.LANDSCAPE
+
+    fun effectiveDimensions(): Pair<Int, Int> {
+        val w = resolution.width
+        val h = resolution.height
+        return if (broadcastMode.isVertical) {
+            minOf(w, h) to maxOf(w, h)
+        } else {
+            maxOf(w, h) to minOf(w, h)
+        }
+    }
+
+    fun effectiveSecondaryShortsDimensions(): Pair<Int, Int> {
+        val cappedRes = if (resolution.width > 1280) VideoResolution.P720 else resolution
+        return minOf(cappedRes.width, cappedRes.height) to maxOf(cappedRes.width, cappedRes.height)
+    }
+
+    fun effectiveResolutionDisplay(): String {
+        val (w, h) = effectiveDimensions()
+        return if (broadcastMode == LiveBroadcastMode.DUAL_LIVE) {
+            val (sw, sh) = effectiveSecondaryShortsDimensions()
+            "${w}×${h} + ${sw}×${sh}"
+        } else {
+            "${w}×${h} (${broadcastMode.aspectLabel})"
+        }
+    }
+
+    fun withSyncedActiveModePreset(): StreamSettings {
+        val activePreset = ModeStreamPreset(resolution = resolution, fps = fps, bitrateKbps = bitrateKbps)
+        return when (broadcastMode) {
+            LiveBroadcastMode.LANDSCAPE_16_9 -> copy(
+                orientation = StreamOrientation.LANDSCAPE,
+                landscapePreset = activePreset
+            )
+            LiveBroadcastMode.SHORTS_9_16 -> copy(
+                orientation = StreamOrientation.PORTRAIT,
+                shortsPreset = activePreset
+            )
+            LiveBroadcastMode.DUAL_LIVE -> copy(
+                orientation = StreamOrientation.LANDSCAPE,
+                dualPreset = activePreset
+            )
+        }
+    }
+
+    fun switchBroadcastMode(target: LiveBroadcastMode): StreamSettings {
+        if (target == broadcastMode) return withSyncedActiveModePreset()
+        val synced = withSyncedActiveModePreset()
+        val nextPreset = when (target) {
+            LiveBroadcastMode.LANDSCAPE_16_9 -> synced.landscapePreset
+            LiveBroadcastMode.SHORTS_9_16 -> synced.shortsPreset
+            LiveBroadcastMode.DUAL_LIVE -> synced.dualPreset
+        }
+        return synced.copy(
+            broadcastMode = target,
+            orientation = if (target.isVertical) StreamOrientation.PORTRAIT else StreamOrientation.LANDSCAPE,
+            resolution = nextPreset.resolution,
+            fps = nextPreset.fps,
+            bitrateKbps = nextPreset.bitrateKbps
+        )
+    }
+
+    fun effectiveShortsServerUrl(): String {
+        val raw = shortsRtmpUrl.trim()
+        if (raw.isBlank()) return ""
+        val withScheme = if (useRtmps && raw.startsWith("rtmp://", ignoreCase = true)) {
+            "rtmps://" + raw.removePrefix("rtmp://")
+        } else {
+            raw
+        }
+        return com.example.streaming.RtmpPublisher.normalizeEndpointUrl(withScheme)
+    }
+
     fun effectivePrimaryServerUrl(): String {
         val raw = rtmpUrl.trim()
         if (raw.isBlank()) return ""
@@ -246,15 +348,6 @@ data class StreamSettings(
         return com.example.streaming.RtmpPublisher.normalizeEndpointUrl(withScheme)
     }
 }
-
-data class YouTubeAccountState(
-    val signedIn: Boolean = false,
-    val displayName: String = "",
-    val email: String = "",
-    val photoUrl: String? = null,
-    val isLoading: Boolean = false,
-    val statusMessage: String? = null
-)
 
 data class RtmpTestResult(
     val inProgress: Boolean = false,

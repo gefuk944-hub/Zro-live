@@ -108,6 +108,7 @@ import com.example.studio.DualPhoneRole
 import com.example.studio.DualPhoneTelemetry
 import com.example.studio.FacecamShape
 import com.example.studio.LayerAnimationType
+import com.example.studio.LayerScaleMode
 import com.example.studio.LayerSourceType
 import com.example.studio.ResizeCorner
 import com.example.studio.SceneLayer
@@ -968,6 +969,12 @@ private fun LayerContentVisual(
         layer.graphicAdjustment.chromaKey.enabled &&
         layer.type.supportsChromaKey()
 
+    val mediaContentScale = if (layer.scaleMode == LayerScaleMode.FIT) {
+        ContentScale.Fit
+    } else {
+        ContentScale.FillBounds
+    }
+
     when (layer.type) {
         LayerSourceType.GAMEPLAY_SCREEN -> {
             Box(
@@ -990,7 +997,7 @@ private fun LayerContentVisual(
                     Image(
                         bitmap = displayFrame.asImageBitmap(),
                         contentDescription = "Authorized Phone 1 Gameplay Feed",
-                        contentScale = ContentScale.Fit,
+                        contentScale = mediaContentScale,
                         modifier = Modifier.fillMaxSize()
                     )
                 } else if (isPhone2 && !isConnected) {
@@ -1174,12 +1181,14 @@ private fun LayerContentVisual(
                         CameraXChromaFacecamView(
                             useFront = frontCam,
                             chromaSettings = layer.graphicAdjustment.chromaKey,
+                            scaleMode = layer.scaleMode,
                             modifier = Modifier.fillMaxSize()
                         )
                     } else {
                         CameraXFacecamPreview(
                             useFront = frontCam,
                             cameraSourceMode = cameraSourceMode,
+                            scaleMode = layer.scaleMode,
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -1225,7 +1234,7 @@ private fun LayerContentVisual(
                 if (!layer.mediaUri.isNullOrBlank()) {
                     StudioImageLayerView(
                         layer = layer,
-                        contentScale = ContentScale.Fit,
+                        contentScale = mediaContentScale,
                         bypassGraphicAdjustment = bypassGraphicAdjustment,
                         modifier = Modifier.fillMaxSize()
                     )
@@ -1406,7 +1415,7 @@ private fun LayerContentVisual(
                 if (!layer.mediaUri.isNullOrBlank()) {
                     StudioImageLayerView(
                         layer = layer,
-                        contentScale = ContentScale.Crop,
+                        contentScale = mediaContentScale,
                         bypassGraphicAdjustment = bypassGraphicAdjustment,
                         modifier = Modifier.fillMaxSize()
                     )
@@ -1426,7 +1435,7 @@ private fun LayerContentVisual(
                 if (!layer.mediaUri.isNullOrBlank()) {
                     StudioImageLayerView(
                         layer = layer,
-                        contentScale = ContentScale.Crop,
+                        contentScale = mediaContentScale,
                         bypassGraphicAdjustment = bypassGraphicAdjustment,
                         modifier = Modifier.fillMaxSize()
                     )
@@ -1571,7 +1580,8 @@ private fun BroadcastMotionBackdrop(
 fun CameraXFacecamPreview(
     useFront: Boolean,
     modifier: Modifier = Modifier,
-    cameraSourceMode: CameraSourceMode = if (useFront) CameraSourceMode.PHONE2_FRONT else CameraSourceMode.PHONE2_REAR
+    cameraSourceMode: CameraSourceMode = if (useFront) CameraSourceMode.PHONE2_FRONT else CameraSourceMode.PHONE2_REAR,
+    scaleMode: LayerScaleMode = LayerScaleMode.STRETCH
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -1581,10 +1591,15 @@ fun CameraXFacecamPreview(
         factory = { ctx ->
             PreviewView(ctx).apply {
                 implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                scaleType = PreviewView.ScaleType.FILL_CENTER
+                scaleType = if (scaleMode == LayerScaleMode.FIT) PreviewView.ScaleType.FIT_CENTER else PreviewView.ScaleType.FILL_CENTER
             }
         },
         update = { previewView ->
+            previewView.scaleType = if (scaleMode == LayerScaleMode.FIT) {
+                PreviewView.ScaleType.FIT_CENTER
+            } else {
+                PreviewView.ScaleType.FILL_CENTER
+            }
             val ctx = previewView.context
             val providerFuture = ProcessCameraProvider.getInstance(ctx)
             providerFuture.addListener({
@@ -1733,6 +1748,7 @@ fun FullScreen16x9PreviewDialog(
                         selectedLayerId = null
                     )
                 }
+                val previewAspect = if (workspace.activeScene.isVertical) 9f / 16f else 16f / 9f
                 StudioCanvasPreview(
                     workspace = cleanPreviewWorkspace,
                     mirroredFrame = mirroredFrame,
@@ -1743,9 +1759,11 @@ fun FullScreen16x9PreviewDialog(
                     cameraPermissionGranted = cameraPermissionGranted,
                     enableLiveCameraPreview = workspace.cameraEnabled && cameraPermissionGranted,
                     interactive = false,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(16f / 9f)
+                    modifier = if (workspace.activeScene.isVertical) {
+                        Modifier.aspectRatio(previewAspect)
+                    } else {
+                        Modifier.fillMaxWidth().aspectRatio(previewAspect)
+                    }
                 )
             }
 

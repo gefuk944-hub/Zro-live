@@ -66,17 +66,24 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DragHandle
+import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -84,6 +91,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.AudioMeterState
+import com.example.data.model.LiveBroadcastMode
 import com.example.data.model.YouTubeChatMessage
 import com.example.studio.CanvasGridMode
 import com.example.studio.CropAspectPreset
@@ -93,6 +101,7 @@ import com.example.studio.DualPhoneTelemetry
 import com.example.studio.GraphicPresetId
 import com.example.studio.LayerAnimationType
 import com.example.studio.LayerGraphicAdjustment
+import com.example.studio.LayerScaleMode
 import com.example.studio.LayerSourceType
 import com.example.studio.ResizeCorner
 import com.example.studio.SceneLayer
@@ -202,7 +211,11 @@ fun ObsSceneStudioScreen(
     onOpenFullScreenPreview: (() -> Unit)? = null,
     onAlignCenter: (String) -> Unit = { id -> onCenterH(id); onCenterV(id) },
     onResizeLayerExact: (String, Float, Float) -> Unit = { id, w, h -> onUpdateLayerProps(id) { it.copy(width = w, height = h) } },
-    onApplyCustomSizeUnits: (String, Float, Float) -> Unit = { _, _, _ -> }
+    onApplyCustomSizeUnits: (String, Float, Float) -> Unit = { _, _, _ -> },
+    broadcastMode: LiveBroadcastMode = LiveBroadcastMode.LANDSCAPE_16_9,
+    onSwitchBroadcastMode: (LiveBroadcastMode) -> Unit = {},
+    onReorderLayerTopToBottom: (Int, Int) -> Unit = { _, _ -> },
+    onReplaceLayerSource: (SceneLayer) -> Unit = {}
 ) {
     val activeScene = workspace.activeScene
     val selectedLayer = activeScene.layers.firstOrNull { it.id == workspace.selectedLayerId }
@@ -216,6 +229,13 @@ fun ObsSceneStudioScreen(
     var showMergeDialog by remember { mutableStateOf(false) }
     var showResetLayoutConfirm by remember { mutableStateOf(false) }
     var showAddSourceDialog by remember { mutableStateOf(false) }
+
+    // Automatically hide selection border & blue handles when leaving Studio editor
+    DisposableEffect(Unit) {
+        onDispose {
+            onSelectLayer(null)
+        }
+    }
 
     LaunchedEffect(workspace.selectedLayerId) {
         if (workspace.selectedLayerId != webInteractLayerId) {
@@ -654,11 +674,12 @@ fun ObsSceneStudioScreen(
                     Surface(
                         onClick = {
                             webInteractLayerId = null
+                            cropModeActive = false
                             onSelectLayer(null)
                         },
                         shape = RoundedCornerShape(5.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)),
+                        color = ZroEmerald.copy(alpha = 0.2f),
+                        border = BorderStroke(1.dp, ZroEmerald.copy(alpha = 0.7f)),
                         modifier = Modifier.testTag("studio_deselect_layer_btn")
                     ) {
                         Row(
@@ -668,11 +689,11 @@ fun ObsSceneStudioScreen(
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.Close,
-                                contentDescription = "Deselect layer",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                contentDescription = "Done editing layer",
+                                tint = ZroEmerald,
                                 modifier = Modifier.size(12.dp)
                             )
-                            Text("Deselect", fontSize = 10.sp, color = Color.White)
+                            Text("Done", fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
                         }
                     }
                 }
@@ -687,7 +708,7 @@ fun ObsSceneStudioScreen(
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // 3. Compact Canvas Toolbar: Grid Mode (2x6 default, 4x4, Off), Snap, Safe Area, Lock, Orientation, Zoom
+            // 3. Compact Canvas Toolbar: Live Mode (16:9 / Shorts / Dual), Grid Mode, Snap, Safe Area, Lock, Crop, Orientation, Zoom
             item {
                 Row(
                     modifier = Modifier
@@ -696,6 +717,18 @@ fun ObsSceneStudioScreen(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    LiveBroadcastMode.entries.forEach { mode ->
+                        FilterChip(
+                            selected = broadcastMode == mode,
+                            onClick = { onSwitchBroadcastMode(mode) },
+                            label = { Text(mode.shortLabel, fontSize = 11.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = ZroEmerald.copy(alpha = 0.24f),
+                                selectedLabelColor = Color.White
+                            ),
+                            modifier = Modifier.testTag("studio_mode_${mode.name.lowercase()}")
+                        )
+                    }
                     CanvasGridMode.entries.forEach { gm ->
                         val active = (if (workspace.showGrid) workspace.gridMode else CanvasGridMode.OFF) == gm
                         FilterChip(
@@ -963,11 +996,71 @@ fun ObsSceneStudioScreen(
                         }
                     }
 
+                    if (selectedLayer != null) {
+                        item(key = "sources_selected_layer_controls") {
+                            GlassCard {
+                                SectionHeader(
+                                    title = "Selected: ${selectedLayer.name}",
+                                    subtitle = "${selectedLayer.scaleMode.label} • Opacity ${(selectedLayer.opacity * 100).toInt()}%"
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    SmallActionButton("Replace", Icons.Rounded.SwapHoriz) {
+                                        if (selectedLayer.type == LayerSourceType.BROWSER_WEB) {
+                                            dockTab = StudioDockTab.TRANSFORM
+                                        } else {
+                                            onReplaceLayerSource(selectedLayer)
+                                        }
+                                    }
+                                    SmallActionButton("Fullscreen", Icons.Rounded.Fullscreen) {
+                                        onFillCanvas(selectedLayer.id)
+                                    }
+                                    SmallActionButton("Reset Size", Icons.Rounded.RestartAlt) {
+                                        onResetTransform(selectedLayer.id)
+                                    }
+                                    val nextScale = if (selectedLayer.scaleMode == LayerScaleMode.STRETCH) {
+                                        LayerScaleMode.FIT
+                                    } else {
+                                        LayerScaleMode.STRETCH
+                                    }
+                                    SmallActionButton(
+                                        label = if (selectedLayer.scaleMode == LayerScaleMode.STRETCH) "Stretch" else "Fit",
+                                        icon = Icons.Rounded.FitScreen
+                                    ) {
+                                        onUpdateLayerProps(selectedLayer.id) { it.copy(scaleMode = nextScale) }
+                                    }
+                                    SmallActionButton("Delete", Icons.Rounded.DeleteOutline) {
+                                        onDeleteLayer(selectedLayer.id)
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                StudioSlider(
+                                    label = "Opacity",
+                                    valueText = "${(selectedLayer.opacity * 100).toInt()}%",
+                                    value = selectedLayer.opacity,
+                                    range = 0.1f..1f
+                                ) { v ->
+                                    onUpdateLayerProps(selectedLayer.id) { it.copy(opacity = v) }
+                                }
+                            }
+                        }
+                    }
+
                     val ordered = activeScene.layers.sortedByDescending { it.zIndex }
-                    items(ordered, key = { it.id }) { layer ->
+                    val rowHeightPx = with(LocalDensity.current) { 78.dp.toPx() }
+                    items(ordered.size, key = { idx -> ordered[idx].id }) { topIdx ->
+                        val layer = ordered[topIdx]
                         val isSel = workspace.selectedLayerId == layer.id
                         val isCropped = layer.cropLeft > 0.005f || layer.cropRight > 0.005f ||
                             layer.cropTop > 0.005f || layer.cropBottom > 0.005f
+                        var dragAccumY by remember(layer.id, topIdx) { mutableFloatStateOf(0f) }
+
                         Surface(
                             shape = RoundedCornerShape(6.dp),
                             color = if (isSel) ZroCobalt.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surfaceContainerLow,
@@ -983,42 +1076,77 @@ fun ObsSceneStudioScreen(
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 5.dp)
+                                    .padding(start = 8.dp, end = 10.dp, top = 8.dp, bottom = 5.dp)
                             ) {
-                                Column(
+                                Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(bottom = 8.dp)
+                                        .padding(bottom = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Text(
-                                        text = layer.name,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        fontWeight = if (isSel) FontWeight.SemiBold else FontWeight.Normal,
-                                        color = if (layer.visible) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    val meta = buildString {
-                                        if (layer.type == LayerSourceType.MERGED_GROUP) {
-                                            append("Merged (${layer.mergedChildren.size})")
-                                        } else {
-                                            append(layer.type.label)
-                                        }
-                                        append(" • ${(layer.width * 100).toInt()}×${(layer.height * 100).toInt()}%")
-                                        if (layer.sourceMediaWidth > 0 && layer.sourceMediaHeight > 0) {
-                                            append(" • ${layer.sourceMediaWidth}×${layer.sourceMediaHeight}")
-                                        }
-                                        if (isCropped) append(" • Crop")
-                                        if (layer.graphicAdjustment.chromaKey.enabled) append(" • Chroma")
+                                    // Drag-and-drop Z-index reorder grip
+                                    Box(
+                                        modifier = Modifier
+                                            .size(28.dp)
+                                            .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(5.dp))
+                                            .pointerInput(layer.id, topIdx, ordered.size) {
+                                                detectVerticalDragGestures(
+                                                    onDragStart = { dragAccumY = 0f },
+                                                    onDragEnd = { dragAccumY = 0f },
+                                                    onDragCancel = { dragAccumY = 0f }
+                                                ) { change, dragAmount ->
+                                                    change.consume()
+                                                    dragAccumY += dragAmount
+                                                    if (dragAccumY > rowHeightPx * 0.6f && topIdx < ordered.lastIndex) {
+                                                        onReorderLayerTopToBottom(topIdx, topIdx + 1)
+                                                        dragAccumY = 0f
+                                                    } else if (dragAccumY < -rowHeightPx * 0.6f && topIdx > 0) {
+                                                        onReorderLayerTopToBottom(topIdx, topIdx - 1)
+                                                        dragAccumY = 0f
+                                                    }
+                                                }
+                                            }
+                                            .testTag("layer_drag_handle_${layer.id}"),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.DragHandle,
+                                            contentDescription = "Drag to reorder layer",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(16.dp)
+                                        )
                                     }
-                                    Text(
-                                        text = meta,
-                                        fontSize = 10.sp,
-                                        fontFamily = JetBrainsMonoFontFamily,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = layer.name,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = if (isSel) FontWeight.SemiBold else FontWeight.Normal,
+                                            color = if (layer.visible) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        val meta = buildString {
+                                            append("#${topIdx + 1} • ")
+                                            if (layer.type == LayerSourceType.MERGED_GROUP) {
+                                                append("Merged (${layer.mergedChildren.size})")
+                                            } else {
+                                                append(layer.type.label)
+                                            }
+                                            append(" • ${layer.scaleMode.label}")
+                                            append(" • ${(layer.width * 100).toInt()}×${(layer.height * 100).toInt()}%")
+                                            if (isCropped) append(" • Crop")
+                                            if (layer.graphicAdjustment.chromaKey.enabled) append(" • Chroma")
+                                        }
+                                        Text(
+                                            text = meta,
+                                            fontSize = 10.sp,
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
                                 }
                                 Row(
                                     modifier = Modifier
@@ -1027,6 +1155,28 @@ fun ObsSceneStudioScreen(
                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(28.dp, 22.dp)
+                                            .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(5.dp))
+                                            .clickable {
+                                                if (layer.type == LayerSourceType.BROWSER_WEB) {
+                                                    onSelectLayer(layer.id)
+                                                    dockTab = StudioDockTab.TRANSFORM
+                                                } else {
+                                                    onReplaceLayerSource(layer)
+                                                }
+                                            }
+                                            .testTag("layer_replace_btn_${layer.id}"),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            Icons.Rounded.SwapHoriz,
+                                            contentDescription = "Replace source",
+                                            tint = ZroCobalt,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
                                     Box(
                                         modifier = Modifier
                                             .size(28.dp, 22.dp)
@@ -1148,15 +1298,16 @@ fun ObsSceneStudioScreen(
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
 
-                                // Quick Alignment & Fit buttons (Fit, Fill, Center, Center H/V, Reset)
+                                // Quick Alignment & Fit buttons (Replace, Fit Fullscreen, Fill, Center, Reset)
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .horizontalScroll(rememberScrollState()),
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
+                                    SmallActionButton("Replace", Icons.Rounded.SwapHoriz) { onReplaceLayerSource(selectedLayer) }
+                                    SmallActionButton("Fullscreen", Icons.Rounded.Fullscreen) { onFillCanvas(selectedLayer.id) }
                                     SmallActionButton("Fit", Icons.Rounded.FitScreen) { onFitCanvas(selectedLayer.id) }
-                                    SmallActionButton("Fill", Icons.Rounded.FitScreen) { onFillCanvas(selectedLayer.id) }
                                     SmallActionButton("Center", Icons.Rounded.CenterFocusStrong) { onAlignCenter(selectedLayer.id) }
                                     SmallActionButton("Center H", Icons.Rounded.CenterFocusStrong) { onCenterH(selectedLayer.id) }
                                     SmallActionButton("Center V", Icons.Rounded.CenterFocusStrong) { onCenterV(selectedLayer.id) }
@@ -1164,6 +1315,35 @@ fun ObsSceneStudioScreen(
                                 }
 
                                 Spacer(modifier = Modifier.height(8.dp))
+                                // Scale Mode: Stretch (Fill Box - default) vs Fit (Keep Inside Box)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Scale Mode",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = Color.White,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    LayerScaleMode.entries.forEach { mode ->
+                                        FilterChip(
+                                            selected = selectedLayer.scaleMode == mode,
+                                            onClick = {
+                                                onUpdateLayerProps(selectedLayer.id) { it.copy(scaleMode = mode) }
+                                            },
+                                            label = { Text(mode.label, fontSize = 11.sp) },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                selectedContainerColor = ZroCobalt.copy(alpha = 0.24f),
+                                                selectedLabelColor = Color.White
+                                            ),
+                                            modifier = Modifier.testTag("layer_scale_mode_${mode.name.lowercase()}")
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(6.dp))
                                 OutlinedTextField(
                                     value = selectedLayer.name,
                                     onValueChange = { txt -> onUpdateLayerProps(selectedLayer.id) { it.copy(name = txt) } },
@@ -1178,7 +1358,7 @@ fun ObsSceneStudioScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text("Aspect Ratio Lock (Proportional)", style = MaterialTheme.typography.labelMedium, color = Color.White)
+                                    Text("Keep Aspect Ratio", style = MaterialTheme.typography.labelMedium, color = Color.White)
                                     Switch(
                                         checked = selectedLayer.lockAspectRatio,
                                         onCheckedChange = { locked ->
