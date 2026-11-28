@@ -4,14 +4,20 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.test.core.app.ApplicationProvider
+import android.view.View
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import com.example.streaming.GlChromaShaderSpec
 import com.example.studio.ChromaKeyPreset
 import com.example.studio.ChromaKeyProcessor
 import com.example.studio.CropEdge
+import com.example.studio.FixedViewportWebHostContainer
 import com.example.studio.LayerChromaKeySettings
 import com.example.studio.LayerGraphicAdjustment
 import com.example.studio.LayerSourceType
@@ -311,15 +317,101 @@ class ZroStudioEngineUpgradeTest {
     fun `remote control screen preserves existing layout and tactile buttons respond cleanly`() {
         composeRule.waitForIdle()
         // Navigate to Remote Control tab
-        composeRule.onNodeWithTag("nav_tab_dual").performClick()
+        composeRule.onNodeWithTag("nav_dual").performClick()
         composeRule.waitForIdle()
 
         // Existing Remote Control controls & 3-column Broadcast Deck remain intact
         composeRule.onNodeWithTag("remote_live_studio_preview").assertIsDisplayed()
         composeRule.onNodeWithTag("remote_layers_btn").assertIsDisplayed()
+        composeRule.onNodeWithTag("dual_studio_list").performScrollToNode(hasTestTag("remote_deck_grid"))
         composeRule.onNodeWithTag("remote_deck_grid").assertIsDisplayed()
         composeRule.onNodeWithTag("remote_tile_start_live").assertIsDisplayed()
         composeRule.onNodeWithTag("remote_tile_mute_mic").performClick()
         composeRule.waitForIdle()
+    }
+
+    @Test
+    fun `website layer auto prepends https strips wv user agent keeps visible fixed viewport host attached and ignores subresource errors`() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1. Auto-HTTPS & trimming
+        assertEquals(
+            "https://streamelements.com/overlay/123",
+            WebLayerManager.normalizeUrl("  streamelements.com/overlay/123  ")
+        )
+        assertEquals(
+            "http://192.168.1.10:8080/overlay",
+            WebLayerManager.normalizeUrl("http://192.168.1.10:8080/overlay")
+        )
+        assertEquals(
+            "https://streamlabs.com/alert-box/v3/token",
+            WebLayerManager.normalizeUrl("https://streamlabs.com/alert-box/v3/token")
+        )
+
+        // 2. User-Agent strips `; wv`
+        val rawUa = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UQ1A; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/126.0.0.0 Mobile Safari/537.36"
+        val cleanUa = WebLayerManager.sanitizeUserAgent(rawUa)
+        assertFalse(cleanUa.contains("; wv"))
+        assertTrue(cleanUa.contains("Chrome/126.0.0.0"))
+
+        // 3. Persistent visible host container (View.VISIBLE, alpha = 0.01f) measured at 1920x1080
+        val host = FixedViewportWebHostContainer(ctx)
+        assertEquals(View.VISIBLE, host.visibility)
+        assertEquals(0.01f, host.alpha, 0.0001f)
+        assertFalse(host.dispatchTouchEvent(null))
+        WebLayerManager.attachHostContainer(host)
+        assertTrue(WebLayerManager.hasAttachedHostContainer())
+
+        // 4. WebView creation configures full compatibility settings and attaches to visible host at 1920x1080
+        val wv = WebLayerManager.obtainWebView(
+            context = ctx,
+            layerId = "web_widget_compat",
+            validatedUrl = "streamelements.com/overlay/test",
+            viewport = WebViewportPreset.P1080,
+            reloadNonce = 0
+        )
+        assertNotNull(wv)
+        val settings = wv!!.settings
+        assertTrue(settings.javaScriptEnabled)
+        assertTrue(settings.domStorageEnabled)
+        assertTrue(settings.databaseEnabled)
+        assertEquals(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW, settings.mixedContentMode)
+        assertFalse(settings.userAgentString.contains("; wv"))
+
+        // Attached to visible host container at exact fixed 1920x1080 dimensions
+        host.measure(
+            View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
+        )
+        host.layout(0, 0, 1080, 1920)
+        assertTrue(wv.parent === host)
+        assertEquals(View.VISIBLE, wv.visibility)
+        assertEquals(1920, wv.layoutParams.width)
+        assertEquals(1080, wv.layoutParams.height)
+        assertEquals(1920, wv.measuredWidth)
+        assertEquals(1080, wv.measuredHeight)
+
+        // Sub-resource error does NOT set errorText, and redirects stay inside WebView
+        val client = wv.webViewClient
+        val subResourceReq = object : WebResourceRequest {
+            override fun getUrl() = android.net.Uri.parse("https://streamelements.com/favicon.ico")
+            override fun isForMainFrame() = false
+            override fun isRedirect() = false
+            override fun hasGesture() = false
+            override fun getMethod() = "GET"
+            override fun getRequestHeaders() = emptyMap<String, String>()
+        }
+        assertFalse(client.shouldOverrideUrlLoading(wv, subResourceReq))
+        client.onReceivedError(wv, subResourceReq, null)
+        client.onReceivedHttpError(wv, subResourceReq, null)
+        assertEquals(null, WebLayerManager.observeLayerState("web_widget_compat").value.errorText)
+
+        // Leaving interactive mode reattaches back to persistent visible host container
+        WebLayerManager.prepareForInteractiveAttachment("web_widget_compat")
+        WebLayerManager.reattachToHostContainer("web_widget_compat")
+        assertTrue(wv.parent === host)
+        assertEquals(View.VISIBLE, wv.visibility)
+
+        WebLayerManager.detachHostContainer(host)
     }
 }

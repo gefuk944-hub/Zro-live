@@ -75,6 +75,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -99,6 +100,8 @@ import com.example.streaming.StreamNotificationManager
 import com.example.streaming.ZroStreamCoordinator
 import com.example.studio.DualLinkState
 import com.example.studio.DualPhoneRole
+import com.example.studio.FixedViewportWebHostContainer
+import com.example.studio.WebLayerManager
 import com.example.telemetry.DeviceTelemetryMonitor
 import com.example.ui.components.FullScreen16x9PreviewDialog
 import com.example.ui.components.QrScannerDialog
@@ -183,11 +186,28 @@ private fun ZroAppRoot() {
     val appSettings by settingsStore.settingsFlow.collectAsStateWithLifecycle(initialValue = ZroAppSettings())
 
     ZroLiveTheme(themeStyle = appSettings.general.themeStyle) {
-        Surface(
-            modifier = Modifier.fillMaxSize(),
-            color = MaterialTheme.colorScheme.background
-        ) {
-            ZroMainShell(settingsStore = settingsStore)
+        Box(modifier = Modifier.fillMaxSize()) {
+            // Persistent visible host container (View.VISIBLE, alpha=0.01f) keeping active fixed-viewport
+            // WebView layers attached to the Activity Window at 1920x1080 so Chromium renders continuously.
+            AndroidView(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("persistent_web_host_container"),
+                factory = { ctx ->
+                    FixedViewportWebHostContainer(ctx).also { host ->
+                        WebLayerManager.attachHostContainer(host)
+                    }
+                },
+                onRelease = { host ->
+                    WebLayerManager.detachHostContainer(host)
+                }
+            )
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.background
+            ) {
+                ZroMainShell(settingsStore = settingsStore)
+            }
         }
     }
 }

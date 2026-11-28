@@ -5,11 +5,13 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.net.Uri
 import android.net.http.SslError
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -18,13 +20,16 @@ import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import com.example.telemetry.CrashRecoveryStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.lang.ref.WeakReference
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -43,6 +48,58 @@ data class WebLayerRuntimeState(
 )
 
 /**
+ * Persistent visible (`View.VISIBLE`, `alpha = 0.01f`) Activity-window host container that keeps
+ * all pooled [WebView] instances permanently attached and measured at their exact fixed virtual
+ * resolution (e.g., `1920x1080`) so Chromium renders frames, animations, and WebSockets continuously
+ * without ever intercepting touches or appearing visually on top of the app UI.
+ */
+class FixedViewportWebHostContainer(context: Context) : FrameLayout(context) {
+
+    init {
+        visibility = View.VISIBLE
+        alpha = 0.01f
+        clipChildren = false
+        clipToPadding = false
+        isClickable = false
+        isFocusable = false
+        isFocusableInTouchMode = false
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        setBackgroundColor(Color.TRANSPARENT)
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent?): Boolean = false
+
+    override fun onInterceptTouchEvent(ev: MotionEvent?): Boolean = false
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val defaultW = WebViewportPreset.P1080.widthPx
+        val defaultH = WebViewportPreset.P1080.heightPx
+        for (i in 0 until childCount) {
+            val child = getChildAt(i)
+            val lp = child.layoutParams
+            val targetW = if (lp != null && lp.width > 0) lp.width else defaultW
+            val targetH = if (lp != null && lp.height > 0) lp.height else defaultH
+            child.measure(
+                MeasureSpec.makeMeasureSpec(targetW, MeasureSpec.EXACTLY),
+                MeasureSpec.makeMeasureSpec(targetH, MeasureSpec.EXACTLY)
+            )
+        }
+        val selfW = resolveSize(1, widthMeasureSpec).coerceAtLeast(1)
+        val selfH = resolveSize(1, heightMeasureSpec).coerceAtLeast(1)
+        setMeasuredDimension(selfW, selfH)
+    }
+
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        for (i in 0 until childCount) {
+            val child = getChildAt(i)
+            val w = child.measuredWidth.coerceAtLeast(320)
+            val h = child.measuredHeight.coerceAtLeast(320)
+            child.layout(0, 0, w, h)
+        }
+    }
+}
+
+/**
  * Process-wide singleton manager for persistent, fixed-viewport Website (`BROWSER_WEB`) layers.
  *
  * Architectural guarantees:
@@ -50,14 +107,16 @@ data class WebLayerRuntimeState(
  *    switches, settings navigation, UI refreshes, app minimize, and background streaming in
  *    `StreamingForegroundService`. `loadUrl()` only executes when the URL actually changes, and
  *    `reload()` only executes when the user explicitly increments `webReloadNonce`.
- * 2. **Fixed Virtual Viewport (Zero Vertical Reflow on Crop)**: Every pooled `WebView` is laid out
- *    at its fixed virtual overlay preset (`1920x1080`, `1280x720`, or `800x800`) and is NEVER
- *    resized during crop or canvas drag gestures. Cropping is applied non-destructively via GPU
- *    UV coordinates (`uCropRect`) / `Canvas.clipRect`.
- * 3. **Crash Isolation**: Overrides `WebViewClient.onRenderProcessGone()` to safely destroy and
+ * 2. **Attached Visible Host Container (`View.VISIBLE`, `alpha = 0.01f`)**: Active `WebView`
+ *    instances stay attached inside [FixedViewportWebHostContainer] measured at their exact fixed
+ *    virtual resolution (`1920x1080`, `1280x720`, or `800x800`) — never `View.GONE` or detached —
+ *    so Chromium renders frames continuously without reflow on crop.
+ * 3. **Full Stream Widget Compatibility**: Auto-prepends `https://` when scheme is missing,
+ *    ignores sub-resource errors in `onReceivedError`/`onReceivedHttpError`, keeps redirects inside
+ *    the WebView, enables JS/DOM/database/mixed-content/third-party cookies, and strips `; wv` from
+ *    the User-Agent string.
+ * 4. **Crash Isolation**: Overrides `WebViewClient.onRenderProcessGone()` to safely destroy and
  *    recreate ONLY the single dead WebView instance and reload its saved URL without crashing the app.
- * 4. **Zero-Allocation Frame Capture**: Reuses a single fixed-resolution offscreen `Bitmap` per
- *    layer for both OpenGL ES preview texture upload and `StudioLiveCompositor` RTMP broadcast frames.
  */
 object WebLayerManager {
 
@@ -66,12 +125,15 @@ object WebLayerManager {
     // Offscreen capture scale factor keeps GPU upload & H.264 compositing crisp while staying fast (<2ms/frame)
     private const val CAPTURE_MAX_WIDTH = 960
 
+    private val WV_USER_AGENT_REGEX = Regex(";\\s*wv\\b", RegexOption.IGNORE_CASE)
+
     private class PooledWebEntry(
         val layerId: String,
         var webView: WebView?,
         var loadedUrl: String = "",
         var loadedNonce: Int = -1,
         var viewport: WebViewportPreset = WebViewportPreset.P1080,
+        var interactiveAttached: Boolean = false,
         var captureBitmap: Bitmap? = null,
         var captureCanvas: Canvas? = null,
         val stateFlow: MutableStateFlow<WebLayerRuntimeState> = MutableStateFlow(WebLayerRuntimeState(layerId))
@@ -79,6 +141,129 @@ object WebLayerManager {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val entries = ConcurrentHashMap<String, PooledWebEntry>()
+
+    @Volatile
+    private var hostContainerRef: WeakReference<FixedViewportWebHostContainer>? = null
+
+    /**
+     * Trims the user-entered URL and auto-prepends `https://` when `http://` or `https://` is missing.
+     * Rejects unsafe schemes (`javascript:`, `file:`, `content:`, `data:`, `intent:`).
+     */
+    fun normalizeUrl(raw: String?): String? {
+        val trimmed = raw?.trim().orEmpty()
+        if (trimmed.isEmpty()) return null
+        val lower = trimmed.lowercase()
+        if (lower.startsWith("javascript:") ||
+            lower.startsWith("file:") ||
+            lower.startsWith("content:") ||
+            lower.startsWith("data:") ||
+            lower.startsWith("intent:")
+        ) {
+            return null
+        }
+        val withScheme = if (lower.startsWith("https://") || lower.startsWith("http://")) {
+            trimmed
+        } else {
+            "https://$trimmed"
+        }
+        val parsed = runCatching { Uri.parse(withScheme) }.getOrNull() ?: return null
+        val scheme = parsed.scheme?.lowercase() ?: return null
+        if (scheme != "https" && scheme != "http") return null
+        if (parsed.host.isNullOrBlank()) return null
+        return withScheme
+    }
+
+    /**
+     * Strips the Android WebView `; wv` token from [rawUserAgent] so modern stream widgets,
+     * YouTube/Twitch/StreamElements/Streamlabs overlays, and OAuth/widget scripts load cleanly.
+     */
+    fun sanitizeUserAgent(rawUserAgent: String?): String {
+        val base = rawUserAgent?.trim().orEmpty()
+        if (base.isEmpty()) {
+            return "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+        }
+        return base
+            .replace(WV_USER_AGENT_REGEX, "")
+            .replace("Version/4.0 ", "")
+            .replace(Regex("\\s{2,}"), " ")
+            .trim()
+    }
+
+    /**
+     * Registers the Activity-level visible host container (`View.VISIBLE`, `alpha = 0.01f`) and
+     * immediately attaches all non-interactive pooled WebViews at their fixed virtual resolutions.
+     */
+    fun attachHostContainer(container: FixedViewportWebHostContainer) {
+        hostContainerRef = WeakReference(container)
+        val attachAll = {
+            container.visibility = View.VISIBLE
+            container.alpha = 0.01f
+            entries.values.forEach { entry ->
+                if (!entry.interactiveAttached) {
+                    entry.webView?.let { wv ->
+                        ensureAttachedToHostContainer(wv, entry.viewport)
+                    }
+                }
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            attachAll()
+        } else {
+            mainHandler.post(attachAll)
+        }
+    }
+
+    /**
+     * Detaches pooled WebViews from an old Activity container without destroying or reloading them
+     * (e.g., during configuration change).
+     */
+    fun detachHostContainer(container: FixedViewportWebHostContainer) {
+        if (hostContainerRef?.get() === container) {
+            hostContainerRef = null
+        }
+        runCatching {
+            container.removeAllViews()
+        }
+    }
+
+    fun hasAttachedHostContainer(): Boolean = hostContainerRef?.get() != null
+
+    /**
+     * Marks a pooled WebView as temporarily attached to an interactive user container and detaches
+     * it from the background host container without destroying or reloading it.
+     */
+    fun prepareForInteractiveAttachment(layerId: String): WebView? {
+        val entry = entries[layerId] ?: return null
+        val wv = entry.webView ?: return null
+        entry.interactiveAttached = true
+        detachFromParentSafely(wv)
+        wv.visibility = View.VISIBLE
+        wv.alpha = 1f
+        return wv
+    }
+
+    /**
+     * Returns a pooled WebView from interactive editing back to the persistent visible host
+     * container (`View.VISIBLE`, `alpha = 0.01f`) measured at its fixed virtual resolution so
+     * Chromium never pauses rendering.
+     */
+    fun reattachToHostContainer(layerId: String) {
+        val entry = entries[layerId] ?: return
+        entry.interactiveAttached = false
+        val wv = entry.webView ?: return
+        val reattach = {
+            wv.isClickable = false
+            wv.isFocusable = false
+            wv.isVerticalScrollBarEnabled = false
+            wv.isHorizontalScrollBarEnabled = false
+            ensureAttachedToHostContainer(wv, entry.viewport)
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            reattach()
+        } else {
+            mainHandler.post(reattach)
+        }
+    }
 
     /**
      * Pure logic helper: returns true only when a new valid URL needs to be loaded.
@@ -106,14 +291,15 @@ object WebLayerManager {
         viewport: WebViewportPreset,
         reloadNonce: Int
     ): WebLayerRuntimeState {
+        val normalized = normalizeUrl(url) ?: url.trim()
         val entry = entries.computeIfAbsent(layerId) { PooledWebEntry(layerId = layerId, webView = null) }
-        val urlChanged = shouldLoadUrl(entry.loadedUrl, url)
+        val urlChanged = shouldLoadUrl(entry.loadedUrl, normalized)
         val manualReload = !urlChanged && shouldReload(entry.loadedNonce, reloadNonce)
         val viewportChanged = entry.viewport != viewport
 
         entry.viewport = viewport
         if (urlChanged) {
-            entry.loadedUrl = url
+            entry.loadedUrl = normalized
             entry.loadedNonce = reloadNonce
         } else if (manualReload) {
             entry.loadedNonce = reloadNonce
@@ -121,10 +307,10 @@ object WebLayerManager {
 
         val current = entry.stateFlow.value
         val next = current.copy(
-            url = url,
+            url = normalized,
             viewportPreset = viewport,
             reloadNonce = reloadNonce,
-            isLoading = if (urlChanged || manualReload) url.isNotBlank() else current.isLoading,
+            isLoading = if (urlChanged || manualReload) normalized.isNotBlank() else current.isLoading,
             errorText = if (urlChanged || manualReload) null else current.errorText
         )
         entry.stateFlow.value = next
@@ -132,9 +318,19 @@ object WebLayerManager {
         if (viewportChanged) {
             entry.webView?.let { wv ->
                 if (Looper.myLooper() == Looper.getMainLooper()) {
-                    applyFixedViewportLayout(wv, viewport)
+                    if (!entry.interactiveAttached) {
+                        ensureAttachedToHostContainer(wv, viewport)
+                    } else {
+                        applyFixedViewportLayout(wv, viewport)
+                    }
                 } else {
-                    mainHandler.post { applyFixedViewportLayout(wv, viewport) }
+                    mainHandler.post {
+                        if (!entry.interactiveAttached) {
+                            ensureAttachedToHostContainer(wv, viewport)
+                        } else {
+                            applyFixedViewportLayout(wv, viewport)
+                        }
+                    }
                 }
             }
         }
@@ -143,6 +339,8 @@ object WebLayerManager {
 
     /**
      * Acquires (or reuses without reloading!) the pooled fixed-viewport [WebView] for [layerId].
+     * Automatically trims & prepends `https://` if missing and ensures the WebView stays attached
+     * to the persistent visible host container (`View.VISIBLE`, `alpha = 0.01f`).
      * MUST be called on the Main thread.
      */
     @SuppressLint("SetJavaScriptEnabled")
@@ -153,6 +351,7 @@ object WebLayerManager {
         viewport: WebViewportPreset,
         reloadNonce: Int
     ): WebView? {
+        val normalizedUrl = normalizeUrl(validatedUrl) ?: return null
         val appCtx = context.applicationContext
         val entry = entries.computeIfAbsent(layerId) { PooledWebEntry(layerId = layerId, webView = null) }
 
@@ -161,34 +360,48 @@ object WebLayerManager {
             entry.webView = created
             entry.viewport = viewport
             if (created != null) {
-                applyFixedViewportLayout(created, viewport)
+                if (!entry.interactiveAttached) {
+                    ensureAttachedToHostContainer(created, viewport)
+                } else {
+                    applyFixedViewportLayout(created, viewport)
+                }
             }
         } ?: return null
 
         if (entry.viewport != viewport) {
             entry.viewport = viewport
-            applyFixedViewportLayout(webView, viewport)
+            if (!entry.interactiveAttached) {
+                ensureAttachedToHostContainer(webView, viewport)
+            } else {
+                applyFixedViewportLayout(webView, viewport)
+            }
             // Recreate capture bitmap cleanly only when user explicitly changes virtual viewport preset
             synchronized(entry) {
                 entry.captureBitmap?.takeIf { !it.isRecycled }?.recycle()
                 entry.captureBitmap = null
                 entry.captureCanvas = null
             }
+        } else if (!entry.interactiveAttached) {
+            // Ensure WebView stays attached inside the visible host container (never detached or View.GONE)
+            ensureAttachedToHostContainer(webView, viewport)
         }
 
-        if (shouldLoadUrl(entry.loadedUrl, validatedUrl)) {
-            entry.loadedUrl = validatedUrl
+        if (shouldLoadUrl(entry.loadedUrl, normalizedUrl)) {
+            entry.loadedUrl = normalizedUrl
             entry.loadedNonce = reloadNonce
             entry.stateFlow.value = entry.stateFlow.value.copy(
-                url = validatedUrl,
+                url = normalizedUrl,
                 viewportPreset = viewport,
                 reloadNonce = reloadNonce,
                 isLoading = true,
                 loadProgress = 10,
                 errorText = null
             )
-            runCatching { webView.loadUrl(validatedUrl) }
-                .onFailure { Log.w(TAG, "Failed to load URL for $layerId: ${it.message}") }
+            runCatching {
+                webView.onResume()
+                webView.resumeTimers()
+                webView.loadUrl(normalizedUrl)
+            }.onFailure { Log.w(TAG, "Failed to load URL for $layerId: ${it.message}") }
         } else if (shouldReload(entry.loadedNonce, reloadNonce)) {
             entry.loadedNonce = reloadNonce
             entry.stateFlow.value = entry.stateFlow.value.copy(
@@ -197,12 +410,15 @@ object WebLayerManager {
                 loadProgress = 10,
                 errorText = null
             )
-            runCatching { webView.reload() }
-                .onFailure { Log.w(TAG, "Failed to reload URL for $layerId: ${it.message}") }
+            runCatching {
+                webView.onResume()
+                webView.resumeTimers()
+                webView.reload()
+            }.onFailure { Log.w(TAG, "Failed to reload URL for $layerId: ${it.message}") }
         } else {
             // Already loaded! Keep DOM, WebSockets, scroll position, and animations 100% intact.
             entry.stateFlow.value = entry.stateFlow.value.copy(
-                url = validatedUrl,
+                url = normalizedUrl,
                 viewportPreset = viewport,
                 reloadNonce = reloadNonce
             )
@@ -213,7 +429,7 @@ object WebLayerManager {
 
     /**
      * Detaches the pooled [WebView] from any previous parent without destroying or reloading it,
-     * ready to be attached in interactive edit mode.
+     * ready to be re-parented cleanly.
      */
     fun detachFromParentSafely(webView: WebView?) {
         if (webView == null) return
@@ -246,6 +462,9 @@ object WebLayerManager {
         if (viewport.widthPx <= 0 || viewport.heightPx <= 0) return null
 
         return runCatching {
+            if (!entry.interactiveAttached) {
+                ensureAttachedToHostContainer(wv, viewport)
+            }
             // Ensure WebView stays permanently laid out at its exact fixed virtual viewport
             if (wv.width != viewport.widthPx || wv.height != viewport.heightPx) {
                 applyFixedViewportLayout(wv, viewport)
@@ -302,15 +521,14 @@ object WebLayerManager {
      * thread inside `StreamingForegroundService` so web overlays keep updating live in background!).
      */
     fun requestBackgroundFrameRefresh(context: Context, layer: SceneLayer) {
-        val url = layer.webUrl.trim()
-        if (url.isBlank()) return
+        val normalizedUrl = normalizeUrl(layer.webUrl) ?: return
         val appCtx = context.applicationContext
         mainHandler.post {
             runCatching {
                 val wv = obtainWebView(
                     context = appCtx,
                     layerId = layer.id,
-                    validatedUrl = url,
+                    validatedUrl = normalizedUrl,
                     viewport = layer.webViewportPreset,
                     reloadNonce = layer.webReloadNonce
                 )
@@ -386,31 +604,41 @@ object WebLayerManager {
         val ids = entries.keys.toList()
         ids.forEach { releaseLayer(it) }
         entries.clear()
+        hostContainerRef = null
     }
 
+    @Suppress("DEPRECATION")
     @SuppressLint("SetJavaScriptEnabled")
     private fun createConfiguredWebView(appCtx: Context, entry: PooledWebEntry): WebView? {
         return runCatching {
-            WebView(appCtx).apply {
+            val viewCtx = hostContainerRef?.get()?.context ?: appCtx
+            WebView(viewCtx).apply {
+                visibility = View.VISIBLE
                 setBackgroundColor(Color.TRANSPARENT)
-                // Software-compatible layer allows reliable offscreen Canvas draw() even when not attached to a Window
-                setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                 settings.apply {
                     javaScriptEnabled = true
                     domStorageEnabled = true
+                    databaseEnabled = true
+                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     useWideViewPort = true
                     loadWithOverviewMode = true
                     mediaPlaybackRequiresUserGesture = false
                     cacheMode = WebSettings.LOAD_DEFAULT
                     allowFileAccess = false
-                    allowContentAccess = false
+                    allowContentAccess = true
                     setSupportZoom(false)
                     builtInZoomControls = false
                     displayZoomControls = false
+                    // Strip `; wv` so stream widgets, overlays, and embedded players load cleanly
+                    userAgentString = sanitizeUserAgent(userAgentString)
                 }
                 isVerticalScrollBarEnabled = false
                 isHorizontalScrollBarEnabled = false
-                runCatching { CookieManager.getInstance().setAcceptCookie(true) }
+                runCatching {
+                    val cookieManager = CookieManager.getInstance()
+                    cookieManager.setAcceptCookie(true)
+                    cookieManager.setAcceptThirdPartyCookies(this, true)
+                }
 
                 webChromeClient = object : WebChromeClient() {
                     override fun onProgressChanged(view: WebView?, newProgress: Int) {
@@ -423,8 +651,20 @@ object WebLayerManager {
 
                 webViewClient = object : WebViewClient() {
                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                        val scheme = request?.url?.scheme?.lowercase()
-                        return scheme != "https" && scheme != "http"
+                        // Keep all redirects inside the WebView
+                        return false
+                    }
+
+                    @Deprecated("Deprecated in Java")
+                    override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                        return false
+                    }
+
+                    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                        entry.stateFlow.value = entry.stateFlow.value.copy(
+                            isLoading = true,
+                            errorText = null
+                        )
                     }
 
                     override fun onPageFinished(view: WebView?, loadedUrl: String?) {
@@ -440,18 +680,27 @@ object WebLayerManager {
                         request: WebResourceRequest?,
                         error: WebResourceError?
                     ) {
-                        if (request?.isForMainFrame == true) {
-                            val desc = error?.description?.toString().orEmpty()
-                            entry.stateFlow.value = entry.stateFlow.value.copy(
-                                isLoading = false,
-                                errorText = when {
-                                    desc.contains("CLEARTEXT", ignoreCase = true) ->
-                                        "Insecure HTTP blocked. Use https://"
-                                    desc.isNotBlank() -> desc
-                                    else -> "Unable to load website"
-                                }
-                            )
-                        }
+                        if (request?.isForMainFrame != true) return
+                        val desc = error?.description?.toString().orEmpty()
+                        entry.stateFlow.value = entry.stateFlow.value.copy(
+                            isLoading = false,
+                            errorText = when {
+                                desc.isNotBlank() -> desc
+                                else -> "Unable to load website"
+                            }
+                        )
+                    }
+
+                    override fun onReceivedHttpError(
+                        view: WebView?,
+                        request: WebResourceRequest?,
+                        errorResponse: WebResourceResponse?
+                    ) {
+                        if (request?.isForMainFrame != true) return
+                        val statusCode = errorResponse?.statusCode ?: 0
+                        Log.w(TAG, "Main-frame HTTP status=$statusCode for layer=${entry.layerId} url=${request.url}")
+                        // Do not block the rendered page for HTTP error pages that still deliver content
+                        // (e.g., custom 404/auth widget redirects); only record hard gateway/server failures if load stops.
                     }
 
                     override fun onReceivedSslError(
@@ -511,6 +760,35 @@ object WebLayerManager {
         }.onFailure { e ->
             Log.e(TAG, "Unable to create WebView for layer ${entry.layerId}: ${e.message}")
         }.getOrNull()
+    }
+
+    /**
+     * Attaches [webView] inside the persistent visible [FixedViewportWebHostContainer] (`View.VISIBLE`,
+     * `alpha = 0.01f`) measured at [viewport] (`1920x1080` default) so Chromium continuously renders
+     * frames even while the layer is displayed via the OpenGL ES UV-crop / Chroma Key shader.
+     */
+    private fun ensureAttachedToHostContainer(webView: WebView, viewport: WebViewportPreset) {
+        val w = viewport.widthPx.coerceAtLeast(320)
+        val h = viewport.heightPx.coerceAtLeast(320)
+        webView.visibility = View.VISIBLE
+        webView.alpha = 1f
+        val host = hostContainerRef?.get()
+        if (host != null) {
+            runCatching {
+                host.visibility = View.VISIBLE
+                host.alpha = 0.01f
+                if (webView.parent !== host) {
+                    detachFromParentSafely(webView)
+                    host.addView(webView, FrameLayout.LayoutParams(w, h))
+                } else {
+                    val lp = webView.layoutParams
+                    if (lp == null || lp.width != w || lp.height != h) {
+                        webView.layoutParams = FrameLayout.LayoutParams(w, h)
+                    }
+                }
+            }
+        }
+        applyFixedViewportLayout(webView, viewport)
     }
 
     /**

@@ -121,29 +121,7 @@ object StudioImageLoaderProvider {
  * Rejects unsafe schemes (javascript:, file:, content:, data:).
  */
 object BrowserUrlValidator {
-    fun normalizeAndValidate(raw: String): String? {
-        val trimmed = raw.trim()
-        if (trimmed.isEmpty()) return null
-        val lower = trimmed.lowercase()
-        if (lower.startsWith("javascript:") ||
-            lower.startsWith("file:") ||
-            lower.startsWith("content:") ||
-            lower.startsWith("data:") ||
-            lower.startsWith("intent:")
-        ) {
-            return null
-        }
-        val withScheme = if (lower.startsWith("https://") || lower.startsWith("http://")) {
-            trimmed
-        } else {
-            "https://$trimmed"
-        }
-        val parsed = runCatching { Uri.parse(withScheme) }.getOrNull() ?: return null
-        val scheme = parsed.scheme?.lowercase() ?: return null
-        if (scheme != "https" && scheme != "http") return null
-        if (parsed.host.isNullOrBlank()) return null
-        return withScheme
-    }
+    fun normalizeAndValidate(raw: String): String? = WebLayerManager.normalizeUrl(raw)
 }
 
 /**
@@ -716,7 +694,9 @@ fun StudioWebSourceView(
                         viewport = viewportPreset,
                         reloadNonce = reloadNonce
                     )
-                    WebLayerManager.detachFromParentSafely(pooled)
+                    if (pooled != null) {
+                        WebLayerManager.prepareForInteractiveAttachment(layerId)
+                    }
                     android.widget.FrameLayout(ctx).apply {
                         setBackgroundColor(android.graphics.Color.TRANSPARENT)
                         if (pooled != null) {
@@ -744,18 +724,10 @@ fun StudioWebSourceView(
                     }
                 },
                 onRelease = { container ->
-                    // Detach cleanly back to pool without destroying or reloading!
+                    // Return the exact same WebView back to the persistent visible host container (never detached or reloaded!)
                     runCatching {
-                        if (container.childCount > 0) {
-                            val child = container.getChildAt(0) as? WebView
-                            container.removeAllViews()
-                            if (child != null) {
-                                child.isClickable = false
-                                child.isFocusable = false
-                                child.isVerticalScrollBarEnabled = false
-                                child.isHorizontalScrollBarEnabled = false
-                            }
-                        }
+                        container.removeAllViews()
+                        WebLayerManager.reattachToHostContainer(layerId)
                     }
                 }
             )
