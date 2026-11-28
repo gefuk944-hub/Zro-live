@@ -31,6 +31,7 @@ import com.example.data.model.OverlayCorner
 import com.example.data.model.OverlayIconShape
 import com.example.data.model.StreamLifecycleState
 import com.example.streaming.StreamNotificationManager
+import com.example.streaming.StreamStateManager
 import com.example.streaming.ZroStreamCoordinator
 import com.example.studio.SceneSlot
 import kotlinx.coroutines.CoroutineScope
@@ -60,6 +61,16 @@ class FloatingOverlayService : Service() {
         const val ACTION_REFRESH = "com.example.zro.OVERLAY_REFRESH"
         const val ACTION_RESTORE = "com.example.zro.OVERLAY_RESTORE"
         const val ACTION_MINIMIZE_EDGE = "com.example.zro.OVERLAY_MINIMIZE_EDGE"
+
+        /**
+         * BGMI multi-touch claw & joystick safe WindowManager flags:
+         * FLAG_NOT_FOCUSABLE + FLAG_NOT_TOUCH_MODAL with WRAP_CONTENT bounds ensure touches
+         * outside the compact floating icon pass straight through to the game without interference.
+         */
+        const val OVERLAY_WINDOW_FLAGS =
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -513,7 +524,7 @@ class FloatingOverlayService : Service() {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             typeFlag,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            OVERLAY_WINDOW_FLAGS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = grav
@@ -535,6 +546,11 @@ class FloatingOverlayService : Service() {
 
         scope.launch {
             ZroStreamCoordinator.telemetry.collectLatest {
+                refreshControlsText()
+            }
+        }
+        scope.launch {
+            StreamStateManager.state.collectLatest {
                 refreshControlsText()
             }
         }
@@ -812,7 +828,12 @@ class FloatingOverlayService : Service() {
         val isLive = tel.state == StreamLifecycleState.LIVE
         val isPaused = tel.state == StreamLifecycleState.PAUSED
         val isActive = tel.state.isActive
-        val timerStr = ZroStreamCoordinator.formatDuration(tel.durationSec)
+        val timerState = StreamStateManager.state.value
+        val timerStr = if (timerState.isStreaming || isActive) {
+            timerState.formattedDuration
+        } else {
+            ZroStreamCoordinator.formatDuration(tel.durationSec)
+        }
         val tempLabel = tel.deviceTempCelsius?.let { "${String.format(Locale.US, "%.1f", it)}°C" }
             ?: ZroStreamCoordinator.deviceTemperatureLabel.value
 

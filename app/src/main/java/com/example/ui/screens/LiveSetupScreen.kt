@@ -81,7 +81,9 @@ import com.example.data.model.VideoResolution
 import com.example.data.model.StreamRuntimeTelemetry
 import com.example.data.model.StreamSettings
 import com.example.data.model.StreamVisibility
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.streaming.RtmpPublisher
+import com.example.streaming.StreamStateManager
 import com.example.streaming.StreamingForegroundService
 import com.example.streaming.ZroStreamCoordinator
 import com.example.studio.DualLinkState
@@ -167,6 +169,13 @@ fun LiveSetupScreen(
     val showTimer = streamTelemetry.state == StreamLifecycleState.LIVE ||
         streamTelemetry.state == StreamLifecycleState.PAUSED
 
+    val liveTimerState by StreamStateManager.state.collectAsStateWithLifecycle()
+    val liveTimer = if (liveTimerState.isStreaming || isLive) {
+        liveTimerState.formattedDuration
+    } else {
+        ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -192,7 +201,7 @@ fun LiveSetupScreen(
                         isReconnecting = streamTelemetry.state == StreamLifecycleState.RECONNECTING,
                         brbActive = workspace.brbActive,
                         lifecycleState = effectiveBadgeState,
-                        durationText = if (showTimer) ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec) else ""
+                        durationText = if (showTimer) liveTimer else ""
                     )
                 }
             }
@@ -1028,7 +1037,6 @@ fun LiveSetupScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                val liveTimer = ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec)
                 BrandGradientButton(
                     text = when {
                         streamTelemetry.state == StreamLifecycleState.LIVE -> "STOP LIVE • $liveTimer"

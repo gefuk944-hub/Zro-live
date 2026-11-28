@@ -89,8 +89,8 @@ enum class VideoResolution(
     P240("240p", "240p", 426, 240, 1200),
     P360("360p", "360p", 640, 360, 1800),
     P480("480p", "480p", 854, 480, 2800),
-    P720("720p HD", "720p", 1280, 720, 4500),
-    P1080("1080p Full HD", "1080p", 1920, 1080, 7500),
+    P720("720p HD", "720p", 1280, 720, 3800),
+    P1080("1080p Full HD", "1080p", 1920, 1080, 5500),
     P1440("1440p QHD", "1440p", 2560, 1440, 14000),
     P2160("4K UHD", "4K", 3840, 2160, 24000);
 
@@ -111,16 +111,16 @@ enum class StreamPreset(
 ) {
     DATA_SAVER("DATA_SAVER", "Data Saver", "144p • 30 FPS", VideoResolution.P144, 30, 1000),
     LOW("LOW", "Low", "360p • 30 FPS", VideoResolution.P360, 30, 1800),
-    BALANCED("BALANCED", "Balanced", "480p • 30 FPS", VideoResolution.P480, 30, 2800),
-    HD("HD", "HD", "720p • 30 FPS", VideoResolution.P720, 30, 4500),
-    HD_SMOOTH("HD_SMOOTH", "HD Smooth", "720p • 60 FPS", VideoResolution.P720, 60, 6000),
-    FULL_HD("FULL_HD", "Full HD", "1080p • 30 FPS", VideoResolution.P1080, 30, 7500),
-    FULL_HD_SMOOTH("FULL_HD_SMOOTH", "Full HD Smooth", "1080p • 60 FPS", VideoResolution.P1080, 60, 10000, requiresHighCapability = true),
+    BALANCED("BALANCED", "Balanced", "480p • 30 FPS", VideoResolution.P480, 30, 2400),
+    HD("HD", "HD", "720p • 30 FPS", VideoResolution.P720, 30, 3800),
+    HD_SMOOTH("HD_SMOOTH", "HD Smooth", "720p • 60 FPS", VideoResolution.P720, 60, 5500),
+    FULL_HD("FULL_HD", "Full HD", "1080p • 30 FPS", VideoResolution.P1080, 30, 5500),
+    FULL_HD_SMOOTH("FULL_HD_SMOOTH", "Full HD Smooth", "1080p • 60 FPS", VideoResolution.P1080, 60, 7500, requiresHighCapability = true),
     QHD("QHD", "1440p QHD", "1440p • 30 FPS", VideoResolution.P1440, 30, 14000, requiresHighCapability = true),
     QHD_SMOOTH("QHD_SMOOTH", "1440p Smooth", "1440p • 60 FPS", VideoResolution.P1440, 60, 18000, requiresHighCapability = true),
     UHD_4K("UHD_4K", "4K UHD", "4K • 30 FPS", VideoResolution.P2160, 30, 24000, requiresHighCapability = true),
     UHD_4K_SMOOTH("UHD_4K_SMOOTH", "4K 60 FPS", "4K • 60 FPS", VideoResolution.P2160, 60, 35000, requiresHighCapability = true),
-    CUSTOM("CUSTOM", "Custom", "Manual config", VideoResolution.P720, 30, 4500);
+    CUSTOM("CUSTOM", "Custom", "Manual config", VideoResolution.P720, 30, 3800);
 
     companion object {
         fun fromName(raw: String?): StreamPreset =
@@ -250,7 +250,7 @@ enum class LiveBroadcastMode(
 data class ModeStreamPreset(
     val resolution: VideoResolution = VideoResolution.P720,
     val fps: Int = 30,
-    val bitrateKbps: Int = 4500
+    val bitrateKbps: Int = 3800
 )
 
 // --- SETTINGS CONFIGURATION ---
@@ -269,7 +269,7 @@ data class StreamSettings(
     val preset: StreamPreset = StreamPreset.HD,
     val resolution: VideoResolution = VideoResolution.P720,
     val fps: Int = 30,
-    val bitrateKbps: Int = 4500, // 1000..15000
+    val bitrateKbps: Int = 3800, // 1000..15000
     val adaptiveBitrate: Boolean = true,
     val encoder: EncoderPreference = EncoderPreference.HARDWARE,
     val orientation: StreamOrientation = StreamOrientation.LANDSCAPE,
@@ -286,8 +286,8 @@ data class StreamSettings(
     val chatNotifications: Boolean = true,
     val lowDataMode: Boolean = false,
     val broadcastMode: LiveBroadcastMode = LiveBroadcastMode.LANDSCAPE_16_9,
-    val landscapePreset: ModeStreamPreset = ModeStreamPreset(VideoResolution.P720, 30, 4500),
-    val shortsPreset: ModeStreamPreset = ModeStreamPreset(VideoResolution.P720, 30, 4500),
+    val landscapePreset: ModeStreamPreset = ModeStreamPreset(VideoResolution.P720, 30, 3800),
+    val shortsPreset: ModeStreamPreset = ModeStreamPreset(VideoResolution.P720, 30, 3800),
     val dualPreset: ModeStreamPreset = ModeStreamPreset(VideoResolution.P720, 30, 3500),
     val shortsRtmpUrl: String = "",
     val shortsStreamKey: String = ""

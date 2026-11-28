@@ -286,6 +286,37 @@ object ZroAudioEngine {
         }
     }
 
+    /**
+     * Ordered microphone AudioSource fallback cascade that avoids `VOICE_COMMUNICATION`
+     * so Android does not mute the stream mic when BGMI's in-game squad voice chat is active.
+     */
+    fun preferredMicAudioSources(): IntArray = intArrayOf(
+        MediaRecorder.AudioSource.VOICE_RECOGNITION,
+        MediaRecorder.AudioSource.CAMCORDER,
+        MediaRecorder.AudioSource.MIC
+    )
+
+    @SuppressLint("MissingPermission")
+    private fun createBgmiSafeMicAudioRecord(bufferSizeBytes: Int): AudioRecord? {
+        for (source in preferredMicAudioSources()) {
+            val candidate = runCatching {
+                AudioRecord(
+                    source,
+                    SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufferSizeBytes
+                )
+            }.getOrNull() ?: continue
+            if (candidate.state == AudioRecord.STATE_INITIALIZED) {
+                Log.i(TAG, "Mic AudioRecord initialized with BGMI-safe audio source=$source")
+                return candidate
+            }
+            runCatching { candidate.release() }
+        }
+        return null
+    }
+
     @SuppressLint("MissingPermission")
     private fun ensureCaptureRunning(context: Context, mediaProjection: MediaProjection?) {
         if (mediaProjection != null && gameAudioRecord == null) {
@@ -301,16 +332,12 @@ object ZroAudioEngine {
                     AudioFormat.ENCODING_PCM_16BIT
                 ).coerceAtLeast(FRAME_SAMPLES * 4)
 
-                val record = AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                    SAMPLE_RATE,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    minBuf * 2
-                )
-                if (record.state != AudioRecord.STATE_INITIALIZED) {
-                    Log.e(TAG, "AudioRecord failed to initialize")
-                    record.release()
+                // BGMI Dual Capture: VOICE_RECOGNITION (fallback CAMCORDER) prevents Android from
+                // muting our stream microphone while BGMI's in-game team mic is active.
+                // Never request exclusive AUDIOFOCUS_GAIN.
+                val record = createBgmiSafeMicAudioRecord(minBuf * 2)
+                if (record == null) {
+                    Log.e(TAG, "AudioRecord failed to initialize across VOICE_RECOGNITION/CAMCORDER/MIC")
                     isCapturing.set(false)
                     return@launch
                 }
@@ -559,7 +586,13 @@ object ZroAudioEngine {
     fun applyOutputRoute(context: Context, route: AudioOutputRoute) {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
         try {
-            am.mode = AudioManager.MODE_IN_COMMUNICATION
+            // Do NOT force MODE_IN_COMMUNICATION or exclusive AUDIOFOCUS_GAIN during normal BGMI
+            // live streaming — only switch mode when an explicit Zro Voice Room is active.
+            if (isVoiceRoomActive.get()) {
+                am.mode = AudioManager.MODE_IN_COMMUNICATION
+            } else {
+                return
+            }
             when (route) {
                 AudioOutputRoute.SPEAKER -> {
                     am.isSpeakerphoneOn = true

@@ -2,6 +2,7 @@ package com.example
 
 import android.Manifest
 import android.app.Activity
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -105,6 +106,7 @@ import com.example.studio.WebLayerManager
 import com.example.telemetry.DeviceTelemetryMonitor
 import com.example.ui.components.FullScreen16x9PreviewDialog
 import com.example.ui.components.QrScannerDialog
+import com.example.ui.components.StudioImageLoaderProvider
 import com.example.ui.screens.CameraSettingsScreen
 import com.example.ui.screens.ChatControlScreen
 import com.example.ui.screens.DualPhoneStudioScreen
@@ -170,6 +172,14 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleDeepLinkIntent(intent)
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        // Clear non-essential UI bitmap/image caches while BGMI is active without disturbing streaming service
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
+            StudioImageLoaderProvider.clearMemoryCache()
+        }
     }
 
     private fun handleDeepLinkIntent(intent: Intent?) {
@@ -238,12 +248,19 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
         }
     )
 
+    var isActivityForeground by remember { mutableStateOf(true) }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, viewModel) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START -> viewModel.onAppForegroundChanged(true)
-                Lifecycle.Event.ON_STOP -> viewModel.onAppForegroundChanged(false)
+                Lifecycle.Event.ON_START -> {
+                    isActivityForeground = true
+                    viewModel.onAppForegroundChanged(true)
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    isActivityForeground = false
+                    viewModel.onAppForegroundChanged(false)
+                }
                 else -> Unit
             }
         }
@@ -765,7 +782,9 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
         )
     }
 
-    val reducedMotion = settings.performance.reduceAnimationsDuringGameplay || settings.performance.lowRamMode
+    val reducedMotion = settings.performance.reduceAnimationsDuringGameplay ||
+        settings.performance.lowRamMode ||
+        !isActivityForeground
     val connectedChatMessages = (chatState as? YouTubeChatState.Connected)?.messages.orEmpty()
     val activeSubpage = subpageStack.lastOrNull()
 

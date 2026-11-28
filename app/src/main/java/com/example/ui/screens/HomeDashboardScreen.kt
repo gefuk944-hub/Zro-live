@@ -60,6 +60,9 @@ import com.example.data.model.StreamRuntimeTelemetry
 import com.example.data.model.StreamSessionDoc
 import com.example.data.model.VoiceRoomDoc
 import com.example.data.model.ZroAppSettings
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.streaming.StreamStateManager
 import com.example.streaming.ZroStreamCoordinator
 import com.example.studio.DualLinkState
 import com.example.studio.DualPhoneTelemetry
@@ -132,6 +135,12 @@ fun HomeDashboardScreen(
         streamTelemetry.state == StreamLifecycleState.CONNECTED ||
         streamTelemetry.state == StreamLifecycleState.SENDING_VIDEO
     val reducedMotion = settings.performance.reduceAnimationsDuringGameplay || settings.performance.lowRamMode
+    val liveTimerState by StreamStateManager.state.collectAsStateWithLifecycle()
+    val liveTimerText = if (liveTimerState.isStreaming || isActiveSession) {
+        liveTimerState.formattedDuration
+    } else {
+        ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec)
+    }
 
     val phoneConnected = dualTelemetry.linkState == DualLinkState.CONNECTED
 
@@ -191,7 +200,7 @@ fun HomeDashboardScreen(
                         brbActive = workspace.brbActive,
                         reducedMotion = reducedMotion,
                         lifecycleState = streamTelemetry.state,
-                        durationText = if (isLive || isPaused) ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec) else ""
+                        durationText = if (isLive || isPaused) liveTimerText else ""
                     )
                 }
             }
@@ -424,7 +433,6 @@ fun HomeDashboardScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        val liveTimerText = ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec)
                         Text(
                             text = when {
                                 isPaused -> "STOP LIVE (PAUSED • $liveTimerText)"

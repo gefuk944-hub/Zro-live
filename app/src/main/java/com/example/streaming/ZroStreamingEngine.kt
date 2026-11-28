@@ -47,6 +47,83 @@ class ZroStreamingEngine(
     companion object {
         private const val TAG = "ZroStreamingEngine"
         const val ENGINE_THREAD_NAME = "ZroLiveEngineThread"
+        const val DEFAULT_KEYFRAME_INTERVAL_SEC = 2
+        const val BGMI_PING_GUARD_LATENCY_MS = 120L
+        const val ABR_RECOVERY_LATENCY_MS = 80L
+        const val MIN_ABR_FLOOR_720P_KBPS = 1800
+        const val MIN_ABR_FLOOR_1080P_KBPS = 2500
+
+        /**
+         * Aligns encoder & VirtualDisplay dimensions to strict multiples of 16 pixels
+         * (e.g., 1280x720 -> 1280x720, 1920x1080 -> 1920x1088) to avoid macroblock blur
+         * and stride artifacts across Qualcomm, MediaTek, and Exynos hardware AVC encoders.
+         */
+        fun alignTo16(dimension: Int): Int {
+            val safe = dimension.coerceAtLeast(16)
+            return ((safe + 8) / 16) * 16
+        }
+
+        /**
+         * Returns optimal low DPI for MediaProjection VirtualDisplay (`240` for 720p, `320` for 1080p+)
+         * so game HUDs and text stay sharp without wasting GPU fill-rate on excessive phone DPI.
+         */
+        fun resolveVirtualDisplayDpi(width: Int, height: Int): Int =
+            if (maxOf(width, height) >= 1920) 320 else 240
+
+        /**
+         * Recommended crisp default bitrates:
+         *  - 720p30: 3800 kbps
+         *  - 720p60 / 1080p30: 5500 kbps
+         *  - 1080p60: 7500 kbps
+         */
+        fun recommendedBitrateKbps(width: Int, height: Int, fps: Int): Int {
+            val longEdge = maxOf(width, height)
+            val highFps = fps >= 50
+            return when {
+                longEdge >= 1920 && highFps -> 7500
+                longEdge >= 1920 -> 5500
+                longEdge >= 1280 && highFps -> 5500
+                longEdge >= 1280 -> 3800
+                longEdge >= 854 -> 2400
+                else -> 1500
+            }
+        }
+
+        /**
+         * Computes the 1-second BGMI Ping Guard ABR step:
+         * - When RTMP socket write latency exceeds 120ms, lowers bitrate by 25% (floor 1800 kbps at 720p).
+         * - When network stays healthy (< 80ms for >= 4 ticks), gradually restores toward target.
+         * Returns `Pair(nextBitrateKbps, abrActive)`.
+         */
+        fun computePingGuardBitrateKbps(
+            currentBitrateKbps: Int,
+            targetBitrateKbps: Int,
+            writeLatencyMs: Long,
+            width: Int,
+            height: Int,
+            consecutiveHealthyTicks: Int
+        ): Pair<Int, Boolean> {
+            val longEdge = maxOf(width, height)
+            val floor = when {
+                longEdge >= 1920 -> MIN_ABR_FLOOR_1080P_KBPS
+                longEdge >= 1280 -> MIN_ABR_FLOOR_720P_KBPS
+                else -> 1000
+            }.coerceAtMost(targetBitrateKbps)
+
+            if (writeLatencyMs > BGMI_PING_GUARD_LATENCY_MS) {
+                val steppedDown = (currentBitrateKbps * 0.75f).toInt().coerceAtLeast(floor)
+                return steppedDown to (steppedDown < targetBitrateKbps)
+            }
+            if (writeLatencyMs <= ABR_RECOVERY_LATENCY_MS &&
+                consecutiveHealthyTicks >= 4 &&
+                currentBitrateKbps < targetBitrateKbps
+            ) {
+                val delta = maxOf(250, (targetBitrateKbps - currentBitrateKbps) / 3)
+                val restored = (currentBitrateKbps + delta).coerceAtMost(targetBitrateKbps)
+                return restored to (restored < targetBitrateKbps)
+            }
+            return currentBitrateKbps to (currentBitrateKbps < targetBitrateKbps)
+        }
 
         /**
          * Pure jittered exponential backoff calculation for RTMP auto-reconnection.
@@ -368,8 +445,11 @@ class ZroStreamingEngine(
     }
 
     /**
-     * Initializes an H.264/AVC [MediaCodec] encoder with CBR -> VBR -> default fallback cascade
-     * and repeat-previous-frame keepalive so static gameplay frames never stall YouTube Live.
+     * Initializes an H.264/AVC [MediaCodec] encoder configured for crisp mobile gaming streams:
+     * - Resolution aligned to 16 pixels
+     * - `KEY_I_FRAME_INTERVAL = 2`
+     * - Prefer `BITRATE_MODE_VBR` with `BITRATE_MODE_CBR` fallback
+     * - Prefer `AVCProfileHigh` -> `AVCProfileMain` -> `AVCProfileBaseline`
      */
     fun createVideoEncoder(
         width: Int,
@@ -378,17 +458,38 @@ class ZroStreamingEngine(
         bitrateKbps: Int,
         preferHardware: Boolean = true
     ): VideoEncoderHandle {
-        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+        val alignedW = alignTo16(width)
+        val alignedH = alignTo16(height)
+        val safeFps = fps.coerceIn(15, 60)
+        val safeBitrateBps = bitrateKbps.coerceAtLeast(1000) * 1000
+
+        fun buildBaseFormat(
+            bitrateMode: Int?,
+            avcProfile: Int?,
+            avcLevel: Int?
+        ): MediaFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, alignedW, alignedH).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, bitrateKbps * 1000)
-            setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+            setInteger(MediaFormat.KEY_BIT_RATE, safeBitrateBps)
+            setInteger(MediaFormat.KEY_FRAME_RATE, safeFps)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, DEFAULT_KEYFRAME_INTERVAL_SEC)
+            if (bitrateMode != null) {
+                setInteger(MediaFormat.KEY_BITRATE_MODE, bitrateMode)
+            }
+            if (avcProfile != null && avcLevel != null) {
+                setInteger(MediaFormat.KEY_PROFILE, avcProfile)
+                setInteger(MediaFormat.KEY_LEVEL, avcLevel)
+            }
             setInteger(MediaFormat.KEY_PRIORITY, 0)
             setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
             }
+        }
+
+        val targetLevel = if (maxOf(alignedW, alignedH) >= 1920 || safeFps >= 50) {
+            MediaCodecInfo.CodecProfileLevel.AVCLevel41
+        } else {
+            MediaCodecInfo.CodecProfileLevel.AVCLevel31
         }
 
         val hwName = if (preferHardware) selectHardwareAvcEncoderName() else null
@@ -400,30 +501,38 @@ class ZroStreamingEngine(
             MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         }
 
-        val configured = try {
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            true
-        } catch (e: Exception) {
-            Log.w(TAG, "CBR configure rejected, retrying VBR: ${e.message}")
+        // Preference cascade: VBR + High -> VBR + Main -> VBR + Baseline -> CBR + Main -> CBR + Baseline -> default
+        val attempts: List<Triple<Int?, Int?, Int?>> = listOf(
+            Triple(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh, targetLevel),
+            Triple(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR, MediaCodecInfo.CodecProfileLevel.AVCProfileMain, targetLevel),
+            Triple(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline, targetLevel),
+            Triple(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR, MediaCodecInfo.CodecProfileLevel.AVCProfileMain, targetLevel),
+            Triple(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline, targetLevel),
+            Triple(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR, null, null),
+            Triple(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR, null, null)
+        )
+
+        var configured = false
+        for ((mode, profile, level) in attempts) {
             try {
-                format.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
-                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                true
-            } catch (vbrErr: Exception) {
-                Log.w(TAG, "Hardware VBR configure failed, falling back to default AVC encoder: ${vbrErr.message}")
-                runCatching { codec.release() }
-                codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-                val fallbackFmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                    setInteger(MediaFormat.KEY_BIT_RATE, bitrateKbps * 1000)
-                    setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-                    setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
-                }
-                codec.configure(fallbackFmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                true
+                val fmt = buildBaseFormat(mode, profile, level)
+                codec.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                configured = true
+                break
+            } catch (_: Exception) {
+                runCatching { codec.reset() }
             }
         }
+
+        if (!configured) {
+            Log.w(TAG, "Hardware AVC configure failed all profile attempts, falling back to default AVC encoder")
+            runCatching { codec.release() }
+            codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            val fallbackFmt = buildBaseFormat(bitrateMode = null, avcProfile = null, avcLevel = null)
+            codec.configure(fallbackFmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            configured = true
+        }
+
         if (!configured) {
             runCatching { codec.release() }
             throw IllegalStateException("Could not configure H.264 video encoder on this device.")

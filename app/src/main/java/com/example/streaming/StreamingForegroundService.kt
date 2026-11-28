@@ -33,8 +33,11 @@ import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.PowerManager
+import android.os.SystemClock
+import android.net.wifi.WifiManager
 import android.content.ComponentCallbacks2
 import com.example.audio.ZroAudioEngine
+import com.example.ui.components.StudioImageLoaderProvider
 import com.example.data.SettingsStore
 import com.example.data.model.CaptureMode
 import com.example.data.model.LiveBroadcastMode
@@ -119,15 +122,15 @@ class StreamingForegroundService : Service() {
         }
 
         /**
-         * Preserves exact YouTube 16:9 / 9:16 broadcast resolutions (1920x1080, 1280x720, 640x360)
-         * while guaranteeing even 2px alignment required by H.264 YUV420 hardware encoders.
+         * Aligns YouTube 16:9 / 9:16 broadcast dimensions to strict 16-pixel multiples
+         * (e.g., 1280x720 -> 1280x720, 1920x1080 -> 1920x1088) for sharp hardware AVC encoding.
          */
         fun resolveAlignedDimensions(rawW: Int, rawH: Int, portrait: Boolean): Pair<Int, Int> {
             val w = if (portrait) minOf(rawW, rawH) else maxOf(rawW, rawH)
             val h = if (portrait) maxOf(rawW, rawH) else minOf(rawW, rawH)
-            val alignedW = (w / 2) * 2
-            val alignedH = (h / 2) * 2
-            return alignedW.coerceAtLeast(320) to alignedH.coerceAtLeast(180)
+            val alignedW = ZroStreamingEngine.alignTo16(w).coerceAtLeast(320)
+            val alignedH = ZroStreamingEngine.alignTo16(h).coerceAtLeast(192)
+            return alignedW to alignedH
         }
 
         /**
@@ -175,6 +178,12 @@ class StreamingForegroundService : Service() {
     private lateinit var settingsStore: SettingsStore
     private lateinit var liveCompositor: StudioLiveCompositor
     private var streamWakeLock: PowerManager.WakeLock? = null
+    private var streamWifiLock: WifiManager.WifiLock? = null
+
+    // Pure GPU Zero-Copy OpenGL ES compositor (VirtualDisplay -> SurfaceTexture OES -> MediaCodec InputSurface)
+    private var glCompositor: GlLiveStreamCompositor? = null
+    private var glRenderThread: HandlerThread? = null
+    @Volatile private var glLoopRunning = false
 
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
@@ -206,6 +215,7 @@ class StreamingForegroundService : Service() {
     private var audioDrainJob: Job? = null
     private var silentAudioFallbackJob: Job? = null
     private var monitorJob: Job? = null
+    private var liveTimerJob: Job? = null
     private var compositorPumpJob: Job? = null
     private var dualMirrorObserverJob: Job? = null
 
@@ -219,14 +229,16 @@ class StreamingForegroundService : Service() {
     private val framesInLastSecond = AtomicInteger(0)
     private val peakBitrateKbps = AtomicInteger(0)
 
-    private var activeBitrateKbps = 4500
-    private var selectedTargetBitrateKbps = 4500
+    private var activeBitrateKbps = 3800
+    private var selectedTargetBitrateKbps = 3800
     private var activeCaptureMode = CaptureMode.FULL_SCREEN
     @Volatile private var activeVideoSource = LiveVideoSource.LOCAL_FULL_SCREEN
     private var activeIsReconnect = false
     private var activeRtmpUrlUsed = ""
     private var activePlatformLabel = "RTMP Live"
     private var streamStartEpochMs = 0L
+    private var streamStartElapsedRealtime = 0L
+    private var streamClockOriginNs = 0L
     private var activeSessionId: String? = null
     private var activeSessionTitle = "Mobile Gaming Live"
     private var activeSessionVisibility = "PUBLIC"
@@ -273,14 +285,27 @@ class StreamingForegroundService : Service() {
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
+        // Clear non-essential UI bitmap/image caches during BGMI matches while keeping GPU compositor & encoders active
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE) {
+            StudioImageLoaderProvider.clearMemoryCache()
+            if (::liveCompositor.isInitialized) {
+                liveCompositor.trimMemory()
+            }
+            glCompositor?.trimNonEssentialCaches()
+        }
         if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND && isStreaming.get()) {
-            if (activeBitrateKbps > 1500) {
-                val reduced = (activeBitrateKbps * 0.85f).toInt().coerceAtLeast(1500)
+            val floor = if (maxOf(activeStreamWidth, activeStreamHeight) >= 1280) {
+                ZroStreamingEngine.MIN_ABR_FLOOR_720P_KBPS
+            } else {
+                1200
+            }
+            if (activeBitrateKbps > floor) {
+                val reduced = (activeBitrateKbps * 0.85f).toInt().coerceAtLeast(floor)
                 applyDynamicVideoBitrate(reduced)
                 CrashRecoveryStore.recordEvent(
                     applicationContext,
                     "MEMORY",
-                    "Trim memory level $level — stepped bitrate to ${reduced} kbps for stability."
+                    "Trim memory level $level — cleared UI bitmap caches & stepped bitrate to ${reduced} kbps."
                 )
             }
         }
@@ -324,6 +349,7 @@ class StreamingForegroundService : Service() {
                 if (isStreaming.get()) {
                     val nowPaused = !isPaused.get()
                     isPaused.set(nowPaused)
+                    StreamStateManager.setPaused(nowPaused)
                     ZroStreamCoordinator.updateTelemetry {
                         it.copy(state = if (nowPaused) StreamLifecycleState.PAUSED else StreamLifecycleState.LIVE)
                     }
@@ -353,7 +379,8 @@ class StreamingForegroundService : Service() {
                 }
             }
         }
-        return START_NOT_STICKY
+        // Anti-kill foreground persistence while BGMI is in foreground
+        return START_STICKY
     }
 
     private fun promoteForeground(includeMediaProjection: Boolean) {
@@ -768,19 +795,18 @@ class StreamingForegroundService : Service() {
                 cachedAsc = fallbackAsc
                 publisher.sendAacSequenceHeader(fallbackAsc)
 
-                // Acquire partial wake lock while broadcast runs in background so Android keeps encoder active
+                // Acquire CPU partial wake lock + high-performance Wi-Fi lock for anti-kill BGMI stability
                 acquireBroadcastWakeLock()
 
-                // Step 4: Initialize Video Encoder & attach real OBS StudioLiveCompositor pipeline!
+                // Step 4: Initialize Hardware H.264 Video Encoder & Single Monotonic A/V Clock
                 selectedTargetBitrateKbps = activeBitrateKbps
                 baseSessionFps = activeSessionFps
                 thermalFpsThrottledFlag = false
+                streamClockOriginNs = System.nanoTime()
                 val encoderName = setupVideoEncoder(width, height, activeSessionFps, activeBitrateKbps)
                 releaseVirtualDisplayOnly()
-                if (projection != null) {
-                    // Single unified ImageReader captures screen once for OBS Preview, Live Compositor & Dual-Phone mirror (saves GPU/heat)
-                    startLocalScreenFrameCapture(projection, width, height)
-                }
+                // Stop any preview-only CPU ImageReader so live encoding uses pure GPU zero-copy VirtualDisplay -> OES
+                stopLocalScreenFrameCapture()
 
                 // Step 4B: If Dual Live (16:9 + 9:16), initialize separate secondary portrait H.264 encoder & RTMP publisher
                 isDualLiveActive.set(false)
@@ -857,6 +883,15 @@ class StreamingForegroundService : Service() {
                 }
 
                 isStreaming.set(true)
+                // Anchor authoritative monotonic Foreground Service timer immediately on RTMP start
+                streamStartEpochMs = System.currentTimeMillis()
+                streamStartElapsedRealtime = SystemClock.elapsedRealtime()
+                StreamStateManager.markStreamStarted(
+                    startElapsedRealtime = streamStartElapsedRealtime,
+                    targetBitrateKbps = selectedTargetBitrateKbps
+                )
+                startLiveTimerLoop()
+
                 ZroStreamCoordinator.updateTelemetry {
                     it.copy(
                         state = StreamLifecycleState.SENDING_VIDEO,
@@ -866,14 +901,15 @@ class StreamingForegroundService : Service() {
                         statusDetail = if (isDualLiveActive.get()) {
                             "Sending Dual Live (16:9 + 9:16 Shorts) H.264 & AAC…"
                         } else {
-                            "Sending H.264 video & AAC audio packets…"
+                            "Sending GPU Zero-Copy H.264 video & AAC audio…"
                         }
                     )
                 }
                 refreshNotification()
 
-                // Start real-time OBS StudioLiveCompositor loop feeding videoInputSurface (+ secondary 9:16 surface in Dual Live)
-                startStudioCompositorLoop()
+                // Start pure GPU Zero-Copy OpenGL compositor (VirtualDisplay -> SurfaceTexture OES -> MediaCodec InputSurface)
+                // Falls back to StudioLiveCompositor hardware canvas only if EGL is unavailable or Dual Live secondary surface needs canvas
+                startStudioCompositorLoop(projection, width, height, lockLandscape16x9 = !settings.broadcastMode.isVertical)
 
                 // Request an immediate IDR keyframe and begin draining encoded H.264 + AAC frames
                 requestVideoKeyFrame()
@@ -1064,27 +1100,141 @@ class StreamingForegroundService : Service() {
     }
 
     /**
-     * Real-time OBS Canvas -> H.264 Input Surface compositor loop.
-     * Every scene switch (Screen 1-4) and every OBS layer edit reflects on the very next broadcast frame
-     * for 16:9 Live, Shorts 9:16 Live, and Dual Live simultaneously!
+     * Dedicated 500ms monotonic live timer running strictly inside [StreamingForegroundService].
+     * Publishes `HH:MM:SS` to [StreamStateManager] (Start Live, Remote Control, Floating Overlay,
+     * and Persistent Notification) so the timer never freezes at `00:00:02` when switching to BGMI.
      */
-    private fun startStudioCompositorLoop() {
+    private fun startLiveTimerLoop() {
+        liveTimerJob?.cancel()
+        liveTimerJob = serviceScope.launch {
+            var tickCount = 0
+            while (isActive && isStreaming.get()) {
+                val snap = StreamStateManager.tick(SystemClock.elapsedRealtime())
+                ZroStreamCoordinator.updateTelemetry { prev ->
+                    if (prev.durationSec == snap.elapsedSeconds) prev else prev.copy(durationSec = snap.elapsedSeconds)
+                }
+                tickCount++
+                // Update persistent notification smoothly every 1s (every 2x 500ms ticks)
+                if (tickCount % 2 == 0) {
+                    refreshNotification()
+                }
+                delay(StreamStateManager.TIMER_TICK_INTERVAL_MS)
+            }
+        }
+    }
+
+    /**
+     * Pure GPU Zero-Copy Broadcast Compositor Loop:
+     *   `VirtualDisplay` -> `SurfaceTexture (OES)` -> `GlLiveStreamCompositor` -> `MediaCodec.createInputSurface()`
+     *
+     * Strictly paced to `activeSessionFps` (30 FPS / 33.3ms default) with zero per-frame allocations
+     * and monotonic `System.nanoTime()` presentation timestamps synced with [ZroAudioEngine].
+     * Removes CPU `ImageReader` / `Bitmap.compress()` from the live encoding path.
+     */
+    private fun startStudioCompositorLoop(
+        projection: MediaProjection? = mediaProjection,
+        width: Int = activeStreamWidth,
+        height: Int = activeStreamHeight,
+        lockLandscape16x9: Boolean = width >= height
+    ) {
         stopStudioCompositorLoop()
         val primarySurface = videoInputSurface ?: return
+
+        val thread = HandlerThread("ZroGlCompositorThread").apply {
+            priority = Thread.NORM_PRIORITY + 1
+            start()
+        }
+        glRenderThread = thread
+        val glHandler = Handler(thread.looper)
+        glLoopRunning = true
+
+        glHandler.post {
+            val compositor = GlLiveStreamCompositor(
+                context = applicationContext,
+                outputWidth = width,
+                outputHeight = height,
+                targetFps = activeSessionFps.coerceIn(15, 60),
+                lockLandscape16x9 = lockLandscape16x9
+            )
+            val glReady = compositor.initialize(primarySurface, glHandler)
+            if (glReady) {
+                glCompositor = compositor
+                val vdSurface = compositor.virtualDisplaySurface
+                if (projection != null && vdSurface != null) {
+                    streamingEngine.postOnEngineThread {
+                        if (isStreaming.get()) {
+                            createOrUpdateVirtualDisplay(projection, width, height, vdSurface)
+                        }
+                    }
+                }
+                var nextFrameDeadlineNs = System.nanoTime()
+                val renderTick = object : Runnable {
+                    override fun run() {
+                        if (!glLoopRunning || !isStreaming.get()) {
+                            compositor.release()
+                            if (glCompositor === compositor) glCompositor = null
+                            return
+                        }
+                        val workspace = ZroStreamCoordinator.activeStudioWorkspace.value
+                        val isStaticScene = isPrivacyShieldActive.get() ||
+                            workspace.brbActive ||
+                            workspace.activeSceneSlot != SceneSlot.GAMEPLAY_LIVE
+                        val targetFps = if (isStaticScene) {
+                            minOf(activeSessionFps, 12).coerceAtLeast(10)
+                        } else {
+                            activeSessionFps.coerceIn(15, 60)
+                        }
+                        val frameIntervalNs = 1_000_000_000L / targetFps
+
+                        if (!isPaused.get()) {
+                            val remoteFrame = if (activeVideoSource == LiveVideoSource.REMOTE_SECOND_PHONE) {
+                                DualPhoneEngine.shared.mirroredFrame.value
+                            } else {
+                                null
+                            }
+                            val nowNs = System.nanoTime()
+                            compositor.onDrawFrame(
+                                presentationTimeNs = nowNs,
+                                workspace = workspace,
+                                privacyShieldActive = isPrivacyShieldActive.get(),
+                                remoteGameplayBitmap = remoteFrame
+                            )
+                        }
+
+                        nextFrameDeadlineNs += frameIntervalNs
+                        val nowAfter = System.nanoTime()
+                        if (nextFrameDeadlineNs < nowAfter - frameIntervalNs) {
+                            nextFrameDeadlineNs = nowAfter + frameIntervalNs
+                        }
+                        val delayMs = ((nextFrameDeadlineNs - nowAfter) / 1_000_000L).coerceIn(1L, 100L)
+                        glHandler.postDelayed(this, delayMs)
+                    }
+                }
+                glHandler.post(renderTick)
+            } else {
+                compositor.release()
+                // Headless / non-EGL fallback (e.g., Robolectric tests or unsupported GPU driver)
+                if (projection != null && localCaptureVirtualDisplay == null) {
+                    startLocalScreenFrameCapture(projection, width, height)
+                }
+                startHardwareCanvasFallbackLoop(primarySurface)
+            }
+        }
+
+        // Secondary 9:16 Shorts surface pump when Dual Live is active
+        if (isDualLiveActive.get() && secondaryVideoInputSurface != null) {
+            startSecondaryDualCanvasLoop()
+        }
+    }
+
+    private fun startHardwareCanvasFallbackLoop(primarySurface: Surface) {
+        compositorPumpJob?.cancel()
         compositorPumpJob = serviceScope.launch {
             while (isActive && isStreaming.get()) {
                 val frameStartMs = System.currentTimeMillis()
                 val workspace = ZroStreamCoordinator.activeStudioWorkspace.value
-                // Save CPU/GPU & phone heat on static scenes (Starting Soon / BRB / Ending / Privacy Shield)
-                val isStaticScene = isPrivacyShieldActive.get() ||
-                    workspace.brbActive ||
-                    workspace.activeSceneSlot != SceneSlot.GAMEPLAY_LIVE
-                val effectiveFps = if (isStaticScene) {
-                    minOf(activeSessionFps, 12).coerceAtLeast(10)
-                } else {
-                    activeSessionFps.coerceIn(15, 90)
-                }
-                val targetIntervalMs = (1000L / effectiveFps).coerceAtLeast(11L)
+                val effectiveFps = activeSessionFps.coerceIn(15, 60)
+                val targetIntervalMs = (1000L / effectiveFps).coerceAtLeast(16L)
 
                 if (!isPaused.get()) {
                     val meters = ZroAudioEngine.meterState.value
@@ -1096,8 +1246,6 @@ class StreamingForegroundService : Service() {
                     } else {
                         localFrame ?: remoteFrame
                     }
-
-                    // 1. Render Primary Stream Surface (16:9 Live or Shorts 9:16 Live)
                     try {
                         if (!primarySurface.isValid) break
                         val canvas = primarySurface.lockHardwareCanvas()
@@ -1117,43 +1265,70 @@ class StreamingForegroundService : Service() {
                     } catch (_: Exception) {
                         delay(24L)
                     }
+                }
+                val elapsed = System.currentTimeMillis() - frameStartMs
+                delay((targetIntervalMs - elapsed).coerceAtLeast(4L))
+            }
+        }
+    }
 
-                    // 2. Render Secondary 9:16 Shorts Surface when Dual Live is active
-                    val secSurface = secondaryVideoInputSurface
-                    if (isDualLiveActive.get() && secSurface != null && secSurface.isValid) {
+    private fun startSecondaryDualCanvasLoop() {
+        val secSurface = secondaryVideoInputSurface ?: return
+        compositorPumpJob = serviceScope.launch {
+            while (isActive && isStreaming.get() && isDualLiveActive.get()) {
+                val frameStartMs = System.currentTimeMillis()
+                val targetIntervalMs = (1000L / minOf(activeSessionFps, 30).coerceAtLeast(15))
+                if (!isPaused.get() && secSurface.isValid) {
+                    val workspace = ZroStreamCoordinator.activeStudioWorkspace.value
+                    val gameplayFrame = DualPhoneEngine.shared.mirroredFrame.value
+                        ?: ZroStreamCoordinator.localCapturedFrame.value
+                    try {
+                        val secCanvas = secSurface.lockHardwareCanvas()
                         try {
-                            val secCanvas = secSurface.lockHardwareCanvas()
-                            try {
-                                liveCompositor.renderFrame(
-                                    canvas = secCanvas,
-                                    workspace = workspace,
-                                    gameplayBitmap = gameplayFrame,
-                                    audioMeters = meters,
-                                    chatMessages = chat,
-                                    privacyShieldActive = isPrivacyShieldActive.get(),
-                                    forceVerticalSceneOverride = true
-                                )
-                            } finally {
-                                secSurface.unlockCanvasAndPost(secCanvas)
-                            }
-                        } catch (_: Exception) {
-                            // Secondary surface busy or closing
+                            liveCompositor.renderFrame(
+                                canvas = secCanvas,
+                                workspace = workspace,
+                                gameplayBitmap = gameplayFrame,
+                                audioMeters = ZroAudioEngine.meterState.value,
+                                chatMessages = ZroStreamCoordinator.liveChatMessages.value,
+                                privacyShieldActive = isPrivacyShieldActive.get(),
+                                forceVerticalSceneOverride = true
+                            )
+                        } finally {
+                            secSurface.unlockCanvasAndPost(secCanvas)
                         }
+                    } catch (_: Exception) {
+                        delay(24L)
                     }
                 }
-
                 val elapsed = System.currentTimeMillis() - frameStartMs
-                val sleepMs = (targetIntervalMs - elapsed).coerceAtLeast(4L)
-                delay(sleepMs)
+                delay((targetIntervalMs - elapsed).coerceAtLeast(4L))
             }
         }
     }
 
     private fun stopStudioCompositorLoop() {
+        glLoopRunning = false
         compositorPumpJob?.cancel()
         compositorPumpJob = null
+        val thread = glRenderThread
+        glRenderThread = null
+        val comp = glCompositor
+        glCompositor = null
+        if (thread != null && thread.isAlive) {
+            runCatching {
+                Handler(thread.looper).post {
+                    runCatching { comp?.release() }
+                    runCatching { thread.quitSafely() }
+                }
+            }
+        } else {
+            runCatching { comp?.release() }
+            runCatching { thread?.quitSafely() }
+        }
     }
 
+    @Suppress("DEPRECATION")
     private fun acquireBroadcastWakeLock() {
         runCatching {
             if (streamWakeLock == null) {
@@ -1166,12 +1341,34 @@ class StreamingForegroundService : Service() {
                 streamWakeLock?.acquire(6 * 60 * 60 * 1000L) // Max 6h safety timeout
             }
         }
+        runCatching {
+            if (streamWifiLock == null) {
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                val lockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                streamWifiLock = runCatching {
+                    wm?.createWifiLock(lockMode, "ZroLive:BroadcastWifiLock")
+                }.getOrNull() ?: wm?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "ZroLive:BroadcastWifiLock")
+                streamWifiLock?.setReferenceCounted(false)
+            }
+            if (streamWifiLock?.isHeld != true) {
+                streamWifiLock?.acquire()
+            }
+        }
     }
 
     private fun releaseBroadcastWakeLock() {
         runCatching {
             if (streamWakeLock?.isHeld == true) {
                 streamWakeLock?.release()
+            }
+        }
+        runCatching {
+            if (streamWifiLock?.isHeld == true) {
+                streamWifiLock?.release()
             }
         }
     }
@@ -1333,28 +1530,21 @@ class StreamingForegroundService : Service() {
     }
 
     private fun createOrUpdateVirtualDisplay(projection: MediaProjection, width: Int, height: Int, surface: Surface?) {
+        val alignedW = ZroStreamingEngine.alignTo16(width)
+        val alignedH = ZroStreamingEngine.alignTo16(height)
         virtualDisplay = streamingEngine.createOrUpdateVirtualDisplay(
             projection = projection,
             name = "ZroLiveCapture",
-            width = width,
-            height = height,
-            densityDpi = resolveDensityDpi(),
+            width = alignedW,
+            height = alignedH,
+            densityDpi = ZroStreamingEngine.resolveVirtualDisplayDpi(alignedW, alignedH),
             surface = surface,
             existing = virtualDisplay
         )
     }
 
-    private fun resolveDensityDpi(): Int {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            resources.displayMetrics.densityDpi
-        } else {
-            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            val metrics = DisplayMetrics()
-            @Suppress("DEPRECATION")
-            wm.defaultDisplay.getMetrics(metrics)
-            metrics.densityDpi
-        }
-    }
+    private fun resolveDensityDpi(): Int =
+        ZroStreamingEngine.resolveVirtualDisplayDpi(activeStreamWidth, activeStreamHeight)
 
     private fun setupAudioEncoder(stereo: Boolean) {
         audioEncoder = streamingEngine.createAudioEncoder(
@@ -1435,13 +1625,20 @@ class StreamingForegroundService : Service() {
                                     encodedVideoFrames.incrementAndGet()
                                     if (sent) {
                                         framesInLastSecond.incrementAndGet()
-                                        // Step 6 & 7: Confirm LIVE and start live timer ONLY after real video frames transmit!
+                                        // Confirm LIVE state once first real H.264 frame queues cleanly (timer is already anchored monotonically)
                                         if (isLiveConfirmed.compareAndSet(false, true)) {
-                                            streamStartEpochMs = System.currentTimeMillis()
+                                            if (streamStartElapsedRealtime <= 0L) {
+                                                streamStartEpochMs = System.currentTimeMillis()
+                                                streamStartElapsedRealtime = SystemClock.elapsedRealtime()
+                                                StreamStateManager.markStreamStarted(
+                                                    startElapsedRealtime = streamStartElapsedRealtime,
+                                                    targetBitrateKbps = selectedTargetBitrateKbps
+                                                )
+                                            }
                                             ZroStreamCoordinator.updateTelemetry { prev ->
                                                 prev.copy(
                                                     state = StreamLifecycleState.LIVE,
-                                                    statusDetail = "Live — transmitting H.264 video & AAC audio"
+                                                    statusDetail = "Live — GPU Zero-Copy H.264 video & AAC audio"
                                                 )
                                             }
                                             refreshNotification()
@@ -1494,18 +1691,29 @@ class StreamingForegroundService : Service() {
         }
     }
 
+    /**
+     * Computes RTMP timestamp (ms) anchored to the single monotonic clock (`System.nanoTime() / 1000L`)
+     * shared identically by both Video (`EGLExt.eglPresentationTimeANDROID`) and Audio (`ZroAudioEngine`)
+     * for drift-free A/V sync across multi-hour BGMI sessions.
+     */
     private fun computeRelativeVideoTimestampMs(ptsUs: Long): Int {
+        val originUs = if (streamClockOriginNs > 0L) streamClockOriginNs / 1000L else -1L
         if (ptsUs > 0L) {
+            if (originUs > 0L && kotlin.math.abs(ptsUs - originUs) < 3_600_000_000L) {
+                return ((ptsUs - originUs) / 1000L).coerceAtLeast(0L).toInt()
+            }
             if (firstVideoPtsUs < 0L) firstVideoPtsUs = ptsUs
             return ((ptsUs - firstVideoPtsUs) / 1000L).coerceAtLeast(0L).toInt()
         }
-        val base = if (streamStartEpochMs > 0L) streamStartEpochMs else System.currentTimeMillis()
-        return (System.currentTimeMillis() - base).coerceAtLeast(0L).toInt()
+        return StreamStateManager.state.value.elapsedMillis.coerceAtLeast(0L).toInt()
     }
 
     private fun computeRelativeAudioTimestampMs(ptsUs: Long): Int {
+        val originUs = if (streamClockOriginNs > 0L) streamClockOriginNs / 1000L else -1L
         if (ptsUs > 0L) {
-            // Anchor audio timeline cleanly to video start when both share monotonic clock
+            if (originUs > 0L && kotlin.math.abs(ptsUs - originUs) < 3_600_000_000L) {
+                return ((ptsUs - originUs) / 1000L).coerceAtLeast(0L).toInt()
+            }
             if (firstAudioPtsUs < 0L) {
                 firstAudioPtsUs = if (firstVideoPtsUs > 0L && kotlin.math.abs(ptsUs - firstVideoPtsUs) < 5_000_000L) {
                     firstVideoPtsUs
@@ -1515,8 +1723,7 @@ class StreamingForegroundService : Service() {
             }
             return ((ptsUs - firstAudioPtsUs) / 1000L).coerceAtLeast(0L).toInt()
         }
-        val base = if (streamStartEpochMs > 0L) streamStartEpochMs else System.currentTimeMillis()
-        return (System.currentTimeMillis() - base).coerceAtLeast(0L).toInt()
+        return StreamStateManager.state.value.elapsedMillis.coerceAtLeast(0L).toInt()
     }
 
     private fun startAudioDrainLoop() {
@@ -1580,6 +1787,7 @@ class StreamingForegroundService : Service() {
             var tick = 0
             var lastDropped = 0L
             var ticksWithoutVideoSignal = 0
+            var consecutiveHealthyLatencyTicks = 0
             while (isActive && isStreaming.get()) {
                 delay(1000L)
                 tick++
@@ -1587,18 +1795,46 @@ class StreamingForegroundService : Service() {
                 val pub = rtmpPublisher
                 pub?.pollServerControlMessages()
 
-                val elapsedSec = if (isLiveConfirmed.get() && streamStartEpochMs > 0L) {
-                    (System.currentTimeMillis() - streamStartEpochMs) / 1000L
-                } else {
-                    0L
-                }
+                // Read authoritative monotonic timer from StreamStateManager (never freezes)
+                val elapsedSec = StreamStateManager.state.value.elapsedSeconds
                 val bytes = pub?.consumeBytesSentSinceLast() ?: 0L
                 val totalBytes = pub?.totalBytesSent ?: 0L
                 val kbps = ((bytes * 8L) / 1000L).toInt()
                 if (kbps > peakBitrateKbps.get()) peakBitrateKbps.set(kbps)
                 val fpsNow = framesInLastSecond.getAndSet(0)
-                val dropped = droppedVideoFrames.get()
+                val dropped = droppedVideoFrames.get() + (pub?.queueDroppedPFrames ?: 0L)
                 val total = encodedVideoFrames.get()
+
+                // 1-Second BGMI Ping Guard ABR: monitor RTMP socket write latency every 1s
+                val writeLatencyMs = pub?.consumeMaxWriteLatencyMs() ?: 0L
+                val streamCfgNow = ZroStreamCoordinator.currentStreamSettings
+                if (writeLatencyMs <= ZroStreamingEngine.ABR_RECOVERY_LATENCY_MS) {
+                    consecutiveHealthyLatencyTicks++
+                } else {
+                    consecutiveHealthyLatencyTicks = 0
+                }
+                if (streamCfgNow.adaptiveBitrate && !isPaused.get()) {
+                    val (nextBitrate, abrActive) = ZroStreamingEngine.computePingGuardBitrateKbps(
+                        currentBitrateKbps = activeBitrateKbps,
+                        targetBitrateKbps = selectedTargetBitrateKbps,
+                        writeLatencyMs = writeLatencyMs,
+                        width = activeStreamWidth,
+                        height = activeStreamHeight,
+                        consecutiveHealthyTicks = consecutiveHealthyLatencyTicks
+                    )
+                    if (nextBitrate != activeBitrateKbps) {
+                        applyDynamicVideoBitrate(nextBitrate)
+                        if (nextBitrate < activeBitrateKbps) {
+                            consecutiveHealthyLatencyTicks = 0
+                        }
+                    }
+                    StreamStateManager.updateNetworkMetrics(
+                        socketWriteLatencyMs = writeLatencyMs,
+                        activeBitrateKbps = activeBitrateKbps,
+                        targetBitrateKbps = selectedTargetBitrateKbps,
+                        abrActive = abrActive
+                    )
+                }
 
                 // If encoder is connected but produces no video frames within 4s, request a sync frame
                 if (!isLiveConfirmed.get() && !isPaused.get() && !isPrivacyShieldActive.get()) {
@@ -2021,16 +2257,21 @@ class StreamingForegroundService : Service() {
         isPaused.set(false)
         isPrivacyShieldActive.set(false)
 
-        val finalDuration = if (streamStartEpochMs > 0L) (System.currentTimeMillis() - streamStartEpochMs) / 1000L else 0L
-        val finalDropped = droppedVideoFrames.get()
+        val finalDuration = StreamStateManager.state.value.elapsedSeconds.takeIf { it > 0L }
+            ?: if (streamStartElapsedRealtime > 0L) (SystemClock.elapsedRealtime() - streamStartElapsedRealtime) / 1000L else 0L
+        val finalDropped = droppedVideoFrames.get() + (rtmpPublisher?.queueDroppedPFrames ?: 0L)
         val finalPeak = peakBitrateKbps.get()
         val finishedSessionId = activeSessionId
         val finishedUrl = activeRtmpUrlUsed
         val finishedPlatform = activePlatformLabel
         activeSessionId = null
         streamStartEpochMs = 0L
+        streamStartElapsedRealtime = 0L
+        streamClockOriginNs = 0L
 
         isDualLiveActive.set(false)
+        liveTimerJob?.cancel(); liveTimerJob = null
+        StreamStateManager.resetToStopped()
         videoDrainJob?.cancel(); videoDrainJob = null
         secondaryVideoDrainJob?.cancel(); secondaryVideoDrainJob = null
         audioDrainJob?.cancel(); audioDrainJob = null

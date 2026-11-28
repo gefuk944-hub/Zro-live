@@ -39,9 +39,129 @@ class RtmpPublisher {
         private const val CLIENT_CHUNK_SIZE = 4096
         private const val DEFAULT_SERVER_CHUNK_SIZE = 128
         private const val HANDSHAKE_SIZE = 1536
-        private const val CONGESTION_WRITE_MS = 220L
+        private const val CONGESTION_WRITE_MS = 120L
         private const val SOCKET_CONNECT_TIMEOUT_MS = 8_000
         private const val HANDSHAKE_READ_TIMEOUT_MS = 6_000
+
+        /** BGMI Ping Guard: bounded TCP send buffer (96 KB, within 64–128 KB) prevents upload bufferbloat. */
+        const val RTMP_SEND_BUFFER_BYTES = 96 * 1024
+
+        /** Bounded RTMP send queue capacity (~35 frames / ~1.2–1.5s at 30 FPS). */
+        const val MAX_SEND_QUEUE_FRAMES = 35
+
+        /** Maximum age before stale droppable P-frames are evicted under congestion. */
+        const val MAX_FRAME_QUEUE_AGE_MS = 1_500L
+
+        /**
+         * Queued RTMP media packet for bounded non-blocking dispatch.
+         */
+        data class QueuedRtmpPacket(
+            val csid: Int,
+            val timestampMs: Int,
+            val typeId: Int,
+            val streamId: Int,
+            val payload: ByteArray,
+            val isVideo: Boolean,
+            val isKeyFrame: Boolean,
+            val isDroppablePFrame: Boolean,
+            val enqueuedElapsedMs: Long
+        )
+
+        /**
+         * Bounded thread-safe RTMP frame queue (~35 frames / 1.5s max age) that drops stale
+         * non-keyframe P-frames under network congestion while preserving audio, metadata,
+         * sequence headers, and IDR keyframes.
+         */
+        class BoundedRtmpSendQueue(
+            val maxFrames: Int = MAX_SEND_QUEUE_FRAMES,
+            val maxAgeMs: Long = MAX_FRAME_QUEUE_AGE_MS
+        ) {
+            private val lock = Object()
+            private val deque = ArrayDeque<QueuedRtmpPacket>(maxFrames + 4)
+            private var closed = false
+            private var droppedPFrames = 0L
+
+            val droppedPFramesCount: Long
+                get() = synchronized(lock) { droppedPFrames }
+
+            val size: Int
+                get() = synchronized(lock) { deque.size }
+
+            fun reset() = synchronized(lock) {
+                deque.clear()
+                closed = false
+                droppedPFrames = 0L
+                lock.notifyAll()
+            }
+
+            fun close() = synchronized(lock) {
+                closed = true
+                deque.clear()
+                lock.notifyAll()
+            }
+
+            /**
+             * Enqueues [packet], evicting stale or excess non-keyframe P-frames when congested.
+             * Returns `true` if queued, `false` if this droppable P-frame was shed immediately.
+             */
+            fun enqueue(packet: QueuedRtmpPacket, nowMs: Long = packet.enqueuedElapsedMs): Boolean = synchronized(lock) {
+                if (closed) return false
+
+                // 1. Evict stale droppable P-frames older than maxAgeMs (~1.5s)
+                if (deque.isNotEmpty()) {
+                    val iter = deque.iterator()
+                    while (iter.hasNext()) {
+                        val existing = iter.next()
+                        if (existing.isDroppablePFrame && (nowMs - existing.enqueuedElapsedMs) > maxAgeMs) {
+                            iter.remove()
+                            droppedPFrames++
+                        }
+                    }
+                }
+
+                // 2. If queue is at capacity, drop oldest droppable P-frame first
+                if (deque.size >= maxFrames) {
+                    var evicted = false
+                    val iter = deque.iterator()
+                    while (iter.hasNext()) {
+                        val existing = iter.next()
+                        if (existing.isDroppablePFrame) {
+                            iter.remove()
+                            droppedPFrames++
+                            evicted = true
+                            break
+                        }
+                    }
+                    if (!evicted) {
+                        if (packet.isDroppablePFrame) {
+                            droppedPFrames++
+                            return false
+                        }
+                        // Critical packet (keyframe / audio / header): make room by dropping oldest video frame if any
+                        val vidIter = deque.iterator()
+                        while (vidIter.hasNext()) {
+                            val existing = vidIter.next()
+                            if (existing.isVideo) {
+                                vidIter.remove()
+                                droppedPFrames++
+                                break
+                            }
+                        }
+                    }
+                }
+
+                deque.addLast(packet)
+                lock.notify()
+                true
+            }
+
+            fun poll(waitTimeoutMs: Long = 100L): QueuedRtmpPacket? = synchronized(lock) {
+                if (deque.isEmpty() && !closed) {
+                    runCatching { lock.wait(waitTimeoutMs) }
+                }
+                if (closed || deque.isEmpty()) null else deque.removeFirst()
+            }
+        }
 
         const val YOUTUBE_PRIMARY_RTMP = "rtmp://a.rtmp.youtube.com/live2"
         const val YOUTUBE_BACKUP_RTMP = "rtmp://b.rtmp.youtube.com/live2"
@@ -337,6 +457,13 @@ class RtmpPublisher {
     private var audioScratch = ByteArray(16 * 1024)
     private var congestedUntilNextKey = false
 
+    // BGMI Ping Guard: bounded async send queue + 1-second socket write latency window
+    private val sendQueue = BoundedRtmpSendQueue(MAX_SEND_QUEUE_FRAMES, MAX_FRAME_QUEUE_AGE_MS)
+    @Volatile
+    private var writerThread: Thread? = null
+    private val latestWriteLatencyMsCounter = AtomicLong(0L)
+    private val maxWriteLatencyWindowMsCounter = AtomicLong(0L)
+
     val isConnected: Boolean
         get() = connected.get()
 
@@ -351,6 +478,21 @@ class RtmpPublisher {
 
     val connectedServerUrl: String
         get() = activeServerUrl
+
+    val latestWriteLatencyMs: Long
+        get() = latestWriteLatencyMsCounter.get()
+
+    val queuedFrameCount: Int
+        get() = sendQueue.size
+
+    val queueDroppedPFrames: Long
+        get() = sendQueue.droppedPFramesCount
+
+    /**
+     * Returns the peak RTMP socket write latency (ms) observed since the previous call
+     * and resets the window for the next 1-second BGMI Ping Guard ABR check.
+     */
+    fun consumeMaxWriteLatencyMs(): Long = maxWriteLatencyWindowMsCounter.getAndSet(0L)
 
     fun consumeBytesSentSinceLast(): Long = bytesSentWindow.getAndSet(0L)
 
@@ -553,7 +695,10 @@ class RtmpPublisher {
             bytesSentWindow.set(0L)
             videoFramesConfirmedCounter.set(0L)
             audioFramesConfirmedCounter.set(0L)
+            latestWriteLatencyMsCounter.set(0L)
+            maxWriteLatencyWindowMsCounter.set(0L)
             connected.set(true)
+            startWriterThreadLocked()
             Result.success(
                 ConnectSuccess(
                     serverUrl = cleanBase,
@@ -729,25 +874,28 @@ class RtmpPublisher {
             val safeTsMs = maxOf(lastVideoTsMs, timestampMs.coerceAtLeast(0))
             lastVideoTsMs = safeTsMs
 
-            val startNs = System.nanoTime()
-            val ok = writeRtmpMessageLocked(
-                csid = 6,
-                timestampMs = safeTsMs,
-                typeId = 0x09,
-                streamId = publishedStreamId,
-                payload = videoScratch,
-                payloadLength = totalLen,
-                outOverride = null
+            val packetBytes = videoScratch.copyOf(totalLen)
+            val nowMs = android.os.SystemClock.elapsedRealtime()
+            val queued = sendQueue.enqueue(
+                QueuedRtmpPacket(
+                    csid = 6,
+                    timestampMs = safeTsMs,
+                    typeId = 0x09,
+                    streamId = publishedStreamId,
+                    payload = packetBytes,
+                    isVideo = true,
+                    isKeyFrame = effectiveKey,
+                    isDroppablePFrame = !effectiveKey,
+                    enqueuedElapsedMs = nowMs
+                ),
+                nowMs = nowMs
             )
-            val writeMs = (System.nanoTime() - startNs) / 1_000_000L
-            if (ok) {
-                if (effectiveKey) firstKeyframeSent = true
-                videoFramesConfirmedCounter.incrementAndGet()
-                if (writeMs > CONGESTION_WRITE_MS) {
-                    congestedUntilNextKey = true
-                }
+            if (!queued) {
+                congestedUntilNextKey = true
+                return false
             }
-            return ok
+            if (effectiveKey) firstKeyframeSent = true
+            return true
         }
     }
 
@@ -797,17 +945,22 @@ class RtmpPublisher {
             val safeTsMs = maxOf(lastAudioTsMs, timestampMs.coerceAtLeast(0))
             lastAudioTsMs = safeTsMs
 
-            val ok = writeRtmpMessageLocked(
-                csid = 4,
-                timestampMs = safeTsMs,
-                typeId = 0x08,
-                streamId = publishedStreamId,
-                payload = audioScratch,
-                payloadLength = totalLen,
-                outOverride = null
+            val packetBytes = audioScratch.copyOf(totalLen)
+            val nowMs = android.os.SystemClock.elapsedRealtime()
+            return sendQueue.enqueue(
+                QueuedRtmpPacket(
+                    csid = 4,
+                    timestampMs = safeTsMs,
+                    typeId = 0x08,
+                    streamId = publishedStreamId,
+                    payload = packetBytes,
+                    isVideo = false,
+                    isKeyFrame = false,
+                    isDroppablePFrame = false,
+                    enqueuedElapsedMs = nowMs
+                ),
+                nowMs = nowMs
             )
-            if (ok) audioFramesConfirmedCounter.incrementAndGet()
-            return ok
         }
     }
 
@@ -844,8 +997,63 @@ class RtmpPublisher {
         }
     }
 
+    private fun startWriterThreadLocked() {
+        stopWriterThread()
+        sendQueue.reset()
+        val t = Thread({
+            while (connected.get()) {
+                val pkt = sendQueue.poll(100L) ?: continue
+                if (!connected.get()) break
+                val startNs = System.nanoTime()
+                val ok = synchronized(sendLock) {
+                    writeRtmpMessageLocked(
+                        csid = pkt.csid,
+                        timestampMs = pkt.timestampMs,
+                        typeId = pkt.typeId,
+                        streamId = pkt.streamId,
+                        payload = pkt.payload,
+                        payloadLength = pkt.payload.size,
+                        outOverride = null
+                    )
+                }
+                val writeMs = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(0L)
+                latestWriteLatencyMsCounter.set(writeMs)
+                var prevMax = maxWriteLatencyWindowMsCounter.get()
+                while (writeMs > prevMax && !maxWriteLatencyWindowMsCounter.compareAndSet(prevMax, writeMs)) {
+                    prevMax = maxWriteLatencyWindowMsCounter.get()
+                }
+                if (ok) {
+                    if (pkt.isVideo) {
+                        videoFramesConfirmedCounter.incrementAndGet()
+                        if (writeMs > CONGESTION_WRITE_MS) {
+                            synchronized(sendLock) { congestedUntilNextKey = true }
+                        }
+                    } else if (pkt.typeId == 0x08) {
+                        audioFramesConfirmedCounter.incrementAndGet()
+                    }
+                }
+            }
+        }, "ZroRtmpSender").apply {
+            isDaemon = true
+            priority = Thread.NORM_PRIORITY + 1
+            start()
+        }
+        writerThread = t
+    }
+
+    private fun stopWriterThread() {
+        sendQueue.close()
+        val t = writerThread
+        writerThread = null
+        if (t != null && t !== Thread.currentThread()) {
+            runCatching { t.interrupt() }
+            runCatching { t.join(350L) }
+        }
+    }
+
     fun close() {
         connected.set(false)
+        stopWriterThread()
         congestedUntilNextKey = false
         avcHeaderSent = false
         aacHeaderSent = false
@@ -885,7 +1093,7 @@ class RtmpPublisher {
         // receives the exact target DNS hostname for SNI and SAN certificate verification.
         val plainSocket = Socket()
         plainSocket.tcpNoDelay = true
-        plainSocket.sendBufferSize = 256 * 1024
+        plainSocket.sendBufferSize = RTMP_SEND_BUFFER_BYTES
         plainSocket.soTimeout = HANDSHAKE_READ_TIMEOUT_MS
         plainSocket.connect(InetSocketAddress(ep.host, ep.port), SOCKET_CONNECT_TIMEOUT_MS)
 
@@ -903,7 +1111,7 @@ class RtmpPublisher {
 
         return try {
             sslSocket.tcpNoDelay = true
-            sslSocket.sendBufferSize = 256 * 1024
+            sslSocket.sendBufferSize = RTMP_SEND_BUFFER_BYTES
             sslSocket.soTimeout = HANDSHAKE_READ_TIMEOUT_MS
 
             val sslParams: SSLParameters = sslSocket.sslParameters

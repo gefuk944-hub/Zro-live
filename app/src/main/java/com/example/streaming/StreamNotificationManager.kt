@@ -135,7 +135,12 @@ class StreamNotificationManager(private val context: Context) {
 
         val isStreaming = telemetry.state.isActive
         val isPaused = telemetry.state == StreamLifecycleState.PAUSED
-        val timer = ZroStreamCoordinator.formatDuration(telemetry.durationSec)
+        val liveTimerState = StreamStateManager.state.value
+        val timer = if (liveTimerState.isStreaming || isStreaming) {
+            liveTimerState.formattedDuration
+        } else {
+            ZroStreamCoordinator.formatDuration(telemetry.durationSec)
+        }
         val tempLabel = formatTelemetryTemp(telemetry)
         val activeSlot = ZroStreamCoordinator.activeStudioWorkspace.value.activeSceneSlot
         val activeSceneLabel = when (activeSlot) {

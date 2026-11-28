@@ -774,6 +774,14 @@ class StudioLiveCompositor(private val context: Context) {
         return bmp
     }
 
+    /**
+     * Releases non-essential UI bitmap caches during `onTrimMemory()` without tearing down encoders.
+     */
+    fun trimMemory() {
+        bitmapCache.evictAll()
+        failedKeys.clear()
+    }
+
     fun release() {
         bitmapCache.evictAll()
         failedKeys.clear()

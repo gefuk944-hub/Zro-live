@@ -115,6 +115,14 @@ object StudioImageLoaderProvider {
                 .also { cachedLoader = it }
         }
     }
+
+    /**
+     * Clears Coil's in-memory UI bitmap cache during `onTrimMemory()` while BGMI is running,
+     * keeping disk cache and streaming encoders untouched.
+     */
+    fun clearMemoryCache() {
+        runCatching { cachedLoader?.memoryCache?.clear() }
+    }
 }
 
 /**

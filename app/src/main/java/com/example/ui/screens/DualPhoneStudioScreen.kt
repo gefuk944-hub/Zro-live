@@ -112,6 +112,8 @@ import com.example.data.model.YouTubeChatMessage
 import com.example.dualphone.DualPhoneProtocol
 import com.example.dualphone.DualRemoteCommand
 import com.example.dualphone.WifiDirectState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.streaming.StreamStateManager
 import com.example.streaming.ZroStreamCoordinator
 import com.example.studio.CropEdge
 import com.example.studio.DualConnectionMethod
@@ -1570,7 +1572,12 @@ private fun RemoteDeckButton(
         RemoteControlTileId.OPEN_STUDIO -> Icons.Rounded.Tune
     }
 
-    val timerText = ZroStreamCoordinator.formatDuration(liveDurationSec)
+    val liveTimerState by StreamStateManager.state.collectAsStateWithLifecycle()
+    val timerText = if (liveTimerState.isStreaming || isActiveStream) {
+        liveTimerState.formattedDuration
+    } else {
+        ZroStreamCoordinator.formatDuration(liveDurationSec)
+    }
     val displayLabel = when (tileId) {
         RemoteControlTileId.START_LIVE -> if (isLive) "LIVE $timerText" else "START LIVE"
         RemoteControlTileId.STOP_LIVE -> if (isActiveStream) "STOP $timerText" else "STOP LIVE"

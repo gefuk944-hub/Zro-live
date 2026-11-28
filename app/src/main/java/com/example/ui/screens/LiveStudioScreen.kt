@@ -94,6 +94,8 @@ import com.example.data.model.StreamSettings
 import com.example.data.model.StreamVisibility
 import com.example.data.model.VideoResolution
 import com.example.data.model.YouTubeChatState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.streaming.StreamStateManager
 import com.example.streaming.ZroStreamCoordinator
 import com.example.telemetry.ActiveLiveSessionSnapshot
 import com.example.telemetry.CrashLogEntry
@@ -171,6 +173,12 @@ fun LiveStudioScreen(
     onApplySuggestedWeakBitrate: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val liveTimerState by StreamStateManager.state.collectAsStateWithLifecycle()
+    val liveTimerFormatted = if (liveTimerState.isStreaming || streamTelemetry.state.isActive) {
+        liveTimerState.formattedDuration
+    } else {
+        ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec)
+    }
     var showEndStreamDialog by remember { mutableStateOf(false) }
 
     if (showEndStreamDialog) {
@@ -180,7 +188,7 @@ fun LiveStudioScreen(
             title = { Text("End Live Stream?", color = Color.White) },
             text = {
                 Text(
-                    "Your YouTube Live broadcast (${ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec)}) and screen capture will stop immediately and all encoder resources will be released.",
+                    "Your YouTube Live broadcast ($liveTimerFormatted) and screen capture will stop immediately and all encoder resources will be released.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             },
@@ -446,6 +454,12 @@ private fun BroadcastTabContent(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        val headerTimerState by StreamStateManager.state.collectAsStateWithLifecycle()
+                        val headerTimerText = if (headerTimerState.isStreaming || isLive || isPaused) {
+                            headerTimerState.formattedDuration
+                        } else {
+                            ""
+                        }
                         LiveStatusBadge(
                             isLive = isLive,
                             isPaused = isPaused,
@@ -453,7 +467,7 @@ private fun BroadcastTabContent(
                             privacyShield = streamTelemetry.privacyShieldActive,
                             reducedMotion = reducedMotion,
                             lifecycleState = streamTelemetry.state,
-                            durationText = if (isLive || isPaused) ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec) else ""
+                            durationText = if (isLive || isPaused) headerTimerText else ""
                         )
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -979,7 +993,12 @@ private fun BroadcastTabContent(
                         Text(if (isPaused) "Resume" else "Pause", color = Color.White)
                     }
 
-                    val liveTimer = ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec)
+                    val liveTimerStateBtn by StreamStateManager.state.collectAsStateWithLifecycle()
+                    val liveTimer = if (liveTimerStateBtn.isStreaming || isLive || isPaused) {
+                        liveTimerStateBtn.formattedDuration
+                    } else {
+                        ZroStreamCoordinator.formatDuration(streamTelemetry.durationSec)
+                    }
                     BrandGradientButton(
                         text = if (isLive || isPaused) "End • $liveTimer" else "End Stream",
                         icon = Icons.Rounded.Stop,
