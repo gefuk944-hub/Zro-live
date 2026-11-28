@@ -206,6 +206,8 @@ object StudioPersistence {
         put("origWidth", l.origWidth.toDouble())
         put("origHeight", l.origHeight.toDouble())
         put("webViewportPreset", l.webViewportPreset.name)
+        put("webScrollX", l.webScrollX)
+        put("webScrollY", l.webScrollY)
         put("chromaEnabled", l.graphicAdjustment.chromaKey.enabled)
         put("chromaColorHex", l.graphicAdjustment.chromaKey.keyColorHex)
         put("chromaSimilarity", l.graphicAdjustment.chromaKey.similarity.toDouble())
@@ -275,6 +277,8 @@ object StudioPersistence {
         origWidth = o.optDouble("origWidth", 0.0).toFloat().coerceIn(0f, 1f),
         origHeight = o.optDouble("origHeight", 0.0).toFloat().coerceIn(0f, 1f),
         webViewportPreset = WebViewportPreset.fromName(o.optString("webViewportPreset")),
+        webScrollX = o.optInt("webScrollX", 0).coerceAtLeast(0),
+        webScrollY = o.optInt("webScrollY", 0).coerceAtLeast(0),
         graphicAdjustment = GraphicAdjustmentJson.fromJson(
             o.optJSONObject("graphicAdjustment"),
             fallbackOpacity = o.optDouble("opacity", 1.0).toFloat().coerceIn(0.05f, 1.0f)

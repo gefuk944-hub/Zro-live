@@ -1038,6 +1038,9 @@ private fun ZroMainShell(settingsStore: SettingsStore) {
                                 replaceLayerMediaPicker.launch(
                                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
                                 )
+                            },
+                            onUpdateWebScroll = { id, sx, sy, persist ->
+                                viewModel.updateLayerWebScroll(id, sx, sy, persist)
                             }
                         )
 

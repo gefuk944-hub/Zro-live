@@ -108,6 +108,7 @@ import com.example.studio.SceneLayer
 import com.example.studio.SceneSlot
 import com.example.studio.SceneTransitionType
 import com.example.studio.StudioWorkspaceState
+import com.example.studio.WebLayerManager
 import com.example.studio.WebViewportPreset
 import androidx.compose.material.icons.rounded.Refresh
 import com.example.ui.components.BrowserUrlValidator
@@ -218,6 +219,7 @@ fun ObsSceneStudioScreen(
     onSwitchBroadcastMode: (LiveBroadcastMode) -> Unit = {},
     onReorderLayerTopToBottom: (Int, Int) -> Unit = { _, _ -> },
     onReplaceLayerSource: (SceneLayer) -> Unit = {},
+    onUpdateWebScroll: (String, Int, Int, Boolean) -> Unit = { _, _, _, _ -> },
     localCapturedFrame: Bitmap? = null
 ) {
     val activeScene = workspace.activeScene
@@ -234,16 +236,25 @@ fun ObsSceneStudioScreen(
     var showAddSourceDialog by remember { mutableStateOf(false) }
     val layerRowHeightPx = with(LocalDensity.current) { 78.dp.toPx() }
 
+    // Explicitly capture & lock WebView scrollX/scrollY before leaving Interact Web mode (zero URL reload)
+    fun exitWebInteractAndLockScroll() {
+        val activeId = webInteractLayerId ?: return
+        val (sx, sy) = WebLayerManager.captureAndLockScrollPosition(activeId)
+        onUpdateWebScroll(activeId, sx, sy, true)
+        webInteractLayerId = null
+    }
+
     // Automatically hide selection border & blue handles when leaving Studio editor
     DisposableEffect(Unit) {
         onDispose {
+            exitWebInteractAndLockScroll()
             onSelectLayer(null)
         }
     }
 
     LaunchedEffect(workspace.selectedLayerId) {
         if (workspace.selectedLayerId != webInteractLayerId) {
-            webInteractLayerId = null
+            exitWebInteractAndLockScroll()
         }
     }
 
@@ -522,7 +533,10 @@ fun ObsSceneStudioScreen(
                         )
                     }
                     Surface(
-                        onClick = onSaveLayoutExplicit,
+                        onClick = {
+                            exitWebInteractAndLockScroll()
+                            onSaveLayoutExplicit()
+                        },
                         shape = RoundedCornerShape(6.dp),
                         color = ZroCobalt,
                         modifier = Modifier.testTag("studio_save_layout_btn")
@@ -604,9 +618,10 @@ fun ObsSceneStudioScreen(
                 interactive = true,
                 cropModeActive = cropModeActive,
                 webInteractLayerId = webInteractLayerId,
+                onUpdateWebScroll = { id, sx, sy -> onUpdateWebScroll(id, sx, sy, false) },
                 onSelectLayer = { id ->
                     if (id == null) {
-                        webInteractLayerId = null
+                        exitWebInteractAndLockScroll()
                         cropModeActive = false
                         onDragFinished()
                     } else if (dockTab == StudioDockTab.SOURCES || dockTab == StudioDockTab.CUSTOMIZE) {
@@ -664,7 +679,7 @@ fun ObsSceneStudioScreen(
                                     .clickable {
                                         if (cropModeActive) onDragFinished()
                                         cropModeActive = false
-                                        webInteractLayerId = null
+                                        exitWebInteractAndLockScroll()
                                     }
                                     .padding(horizontal = 6.dp, vertical = 3.dp)
                                     .testTag("studio_mode_pill_resize")
@@ -684,7 +699,7 @@ fun ObsSceneStudioScreen(
                                     )
                                     .clickable {
                                         cropModeActive = true
-                                        webInteractLayerId = null
+                                        exitWebInteractAndLockScroll()
                                     }
                                     .padding(horizontal = 6.dp, vertical = 3.dp)
                                     .testTag("studio_mode_pill_crop")
@@ -702,6 +717,7 @@ fun ObsSceneStudioScreen(
                         val chromaOn = selectedLayer.graphicAdjustment.chromaKey.enabled
                         Surface(
                             onClick = {
+                                exitWebInteractAndLockScroll()
                                 onDragFinished()
                                 dockTab = StudioDockTab.GRAPHICS
                                 graphicCategory = GraphicCategoryTab.CHROMA_KEY
@@ -726,9 +742,13 @@ fun ObsSceneStudioScreen(
                     if (selectedLayer.type == LayerSourceType.BROWSER_WEB) {
                         Surface(
                             onClick = {
-                                onDragFinished()
-                                if (!isWebInteracting) cropModeActive = false
-                                webInteractLayerId = if (isWebInteracting) null else selectedLayer.id
+                                if (isWebInteracting) {
+                                    exitWebInteractAndLockScroll()
+                                } else {
+                                    onDragFinished()
+                                    cropModeActive = false
+                                    webInteractLayerId = selectedLayer.id
+                                }
                             },
                             shape = RoundedCornerShape(5.dp),
                             color = if (isWebInteracting) ZroEmerald.copy(alpha = 0.24f) else ZroCobalt.copy(alpha = 0.22f),
@@ -757,7 +777,7 @@ fun ObsSceneStudioScreen(
                     }
                     Surface(
                         onClick = {
-                            webInteractLayerId = null
+                            exitWebInteractAndLockScroll()
                             cropModeActive = false
                             onDragFinished()
                             onSelectLayer(null)
@@ -1914,7 +1934,12 @@ fun ObsSceneStudioScreen(
                                                 val interactingNow = webInteractLayerId == selectedLayer.id
                                                 OutlinedButton(
                                                     onClick = {
-                                                        webInteractLayerId = if (interactingNow) null else selectedLayer.id
+                                                        if (interactingNow) {
+                                                            exitWebInteractAndLockScroll()
+                                                        } else {
+                                                            cropModeActive = false
+                                                            webInteractLayerId = selectedLayer.id
+                                                        }
                                                     },
                                                     enabled = selectedLayer.webUrl.isNotBlank(),
                                                     shape = RoundedCornerShape(6.dp),

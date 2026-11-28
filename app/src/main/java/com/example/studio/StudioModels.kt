@@ -284,7 +284,9 @@ data class SceneLayer(
     val origWidth: Float = 0f,
     val origHeight: Float = 0f,
     val webReloadNonce: Int = 0,
-    val webViewportPreset: WebViewportPreset = WebViewportPreset.P1080
+    val webViewportPreset: WebViewportPreset = WebViewportPreset.P1080,
+    val webScrollX: Int = 0,
+    val webScrollY: Int = 0
 )
 
 data class StudioScene(

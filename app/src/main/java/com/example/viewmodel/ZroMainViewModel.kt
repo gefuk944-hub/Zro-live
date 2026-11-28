@@ -1657,10 +1657,32 @@ class ZroMainViewModel(
         dragSnapshotPushed = false
         val dt = dualTelemetry.value
         val mode = activeBroadcastMode()
-        val stamped = _studioState.value.copy(
+        // Snapshot the latest live WebView scroll positions for all Browser Source layers before saving
+        val curState = _studioState.value
+        val syncedScenes = curState.scenes.mapValues { (_, scene) ->
+            scene.copy(
+                layers = scene.layers.map { layer ->
+                    if (layer.type == LayerSourceType.BROWSER_WEB ||
+                        (layer.type == LayerSourceType.SUBSCRIBER_COUNTER && layer.subUseExternalWidget)
+                    ) {
+                        val liveScroll = WebLayerManager.getCurrentScrollPosition(layer.id)
+                        if (liveScroll != null) {
+                            WebLayerManager.applyLockedScrollPosition(layer.id, liveScroll.first, liveScroll.second)
+                            layer.copy(webScrollX = liveScroll.first, webScrollY = liveScroll.second)
+                        } else {
+                            layer
+                        }
+                    } else {
+                        layer
+                    }
+                }
+            )
+        }
+        val stamped = curState.copy(
+            scenes = syncedScenes,
             savedLayoutTimestampMs = System.currentTimeMillis(),
-            lastAuthorizedDeviceName = dt.connectedDeviceName.ifBlank { _studioState.value.lastAuthorizedDeviceName },
-            lastAuthorizedDeviceIp = dt.peerIp.ifBlank { _studioState.value.lastAuthorizedDeviceIp }
+            lastAuthorizedDeviceName = dt.connectedDeviceName.ifBlank { curState.lastAuthorizedDeviceName },
+            lastAuthorizedDeviceIp = dt.peerIp.ifBlank { curState.lastAuthorizedDeviceIp }
         )
         _studioState.value = stamped
         ZroStreamCoordinator.updateStudioWorkspace(stamped)
@@ -2131,6 +2153,22 @@ class ZroMainViewModel(
             return
         }
         commitStudioState(StudioWorkspaceReducer.updateLayer(cur, layerId, transform))
+    }
+
+    /**
+     * Continuously tracks and locks Browser Source scroll coordinates (`webScrollX`, `webScrollY`)
+     * without spamming the undo stack, persisting immediately when leaving Interact Web / tapping Done / Save.
+     */
+    fun updateLayerWebScroll(layerId: String, scrollX: Int, scrollY: Int, persist: Boolean = false) {
+        val sx = scrollX.coerceAtLeast(0)
+        val sy = scrollY.coerceAtLeast(0)
+        val cur = _studioState.value
+        val target = cur.activeScene.layers.firstOrNull { it.id == layerId } ?: return
+        if (target.webScrollX == sx && target.webScrollY == sy && !persist) return
+        val next = StudioWorkspaceReducer.updateLayer(cur, layerId) { layer ->
+            layer.copy(webScrollX = sx, webScrollY = sy)
+        }
+        commitStudioState(next, recordUndo = false, persist = persist)
     }
 
     fun alignLayerCenter(layerId: String) {

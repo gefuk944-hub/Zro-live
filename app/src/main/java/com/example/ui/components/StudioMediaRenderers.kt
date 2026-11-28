@@ -47,6 +47,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -536,6 +537,9 @@ fun StudioWebSourceView(
     cropTop: Float = 0f,
     cropRight: Float = 0f,
     cropBottom: Float = 0f,
+    webScrollX: Int = 0,
+    webScrollY: Int = 0,
+    onWebScrollChanged: ((Int, Int) -> Unit)? = null,
     chromaKey: LayerChromaKeySettings = LayerChromaKeySettings.DEFAULT,
     opacity: Float = 1.0f,
     modifier: Modifier = Modifier
@@ -551,7 +555,7 @@ fun StudioWebSourceView(
     var keyedWebFrame by remember(layerId) { mutableStateOf<Bitmap?>(null) }
     var frameTick by remember(layerId) { mutableIntStateOf(0) }
 
-    // Keep latest crop/chroma parameters accessible inside touch & capture loops without restarting effects
+    // Keep latest crop/chroma/scroll callbacks accessible inside touch & capture loops without restarting effects
     val latestCrop = remember { FloatArray(4) }
     latestCrop[0] = cropLeft
     latestCrop[1] = cropTop
@@ -559,6 +563,7 @@ fun StudioWebSourceView(
     latestCrop[3] = cropBottom
     val latestChroma = remember { arrayOf(chromaKey) }
     latestChroma[0] = chromaKey
+    val latestOnWebScrollChanged by rememberUpdatedState(onWebScrollChanged)
 
     if (validatedUrl == null) {
         Box(
@@ -594,7 +599,9 @@ fun StudioWebSourceView(
             layerId = layerId,
             validatedUrl = validatedUrl,
             viewport = viewportPreset,
-            reloadNonce = reloadNonce
+            reloadNonce = reloadNonce,
+            initialScrollX = webScrollX,
+            initialScrollY = webScrollY
         )
         // Always guarantee the pooled WebView stays in the fixed-viewport host container (never narrow MATCH_PARENT!)
         WebLayerManager.reattachToHostContainer(layerId)
@@ -602,6 +609,29 @@ fun StudioWebSourceView(
         if (initial != null && !initial.isRecycled) {
             rawWebFrame = initial
             frameTick++
+        }
+    }
+
+    // Bind WebView OnTouchListener + OnScrollChangeListener strictly when Interact Web mode is active,
+    // and capture+lock exact (scrollX, scrollY) immediately when leaving Interact Web mode.
+    DisposableEffect(layerId, allowPageInteraction) {
+        WebLayerManager.setInteractWebMode(
+            layerId = layerId,
+            enabled = allowPageInteraction,
+            onScrollChanged = { sx, sy -> latestOnWebScrollChanged?.invoke(sx, sy) }
+        )
+        onDispose {
+            if (allowPageInteraction) {
+                val (sx, sy) = WebLayerManager.captureAndLockScrollPosition(layerId)
+                latestOnWebScrollChanged?.invoke(sx, sy)
+            }
+        }
+    }
+
+    // Keep persisted scroll position locked whenever re-bound, saved, or updated outside Interact Web mode
+    LaunchedEffect(layerId, webScrollX, webScrollY) {
+        if (!allowPageInteraction) {
+            WebLayerManager.applyLockedScrollPosition(layerId, webScrollX, webScrollY)
         }
     }
 
@@ -703,10 +733,15 @@ fun StudioWebSourceView(
                         isClickable = true
                         isFocusable = true
                         setOnTouchListener { v, event ->
-                            if (event.action == android.view.MotionEvent.ACTION_DOWN ||
-                                event.action == android.view.MotionEvent.ACTION_MOVE
-                            ) {
-                                v.parent?.requestDisallowInterceptTouchEvent(true)
+                            when (event.actionMasked) {
+                                android.view.MotionEvent.ACTION_DOWN,
+                                android.view.MotionEvent.ACTION_MOVE -> {
+                                    v.parent?.requestDisallowInterceptTouchEvent(true)
+                                }
+                                android.view.MotionEvent.ACTION_UP,
+                                android.view.MotionEvent.ACTION_CANCEL -> {
+                                    v.parent?.requestDisallowInterceptTouchEvent(false)
+                                }
                             }
                             WebLayerManager.dispatchMappedTouchEvent(
                                 layerId = layerId,

@@ -164,6 +164,7 @@ fun StudioCanvasPreview(
     onReconnectPeer: (() -> Unit)? = null,
     beforePreviewLayerId: String? = null,
     webInteractLayerId: String? = null,
+    onUpdateWebScroll: ((String, Int, Int) -> Unit)? = null,
     localCapturedFrame: Bitmap? = null,
     modifier: Modifier = Modifier
 ) {
@@ -295,7 +296,10 @@ fun StudioCanvasPreview(
                             onReconnectPeer = onReconnectPeer,
                             bypassGraphicAdjustment = beforePreviewLayerId == layer.id,
                             cropModeActive = cropModeActive && workspace.selectedLayerId == layer.id,
-                            allowWebPageInteraction = webInteractLayerId == layer.id && layer.type == LayerSourceType.BROWSER_WEB
+                            allowWebPageInteraction = webInteractLayerId == layer.id && layer.type == LayerSourceType.BROWSER_WEB,
+                            onWebScrollChanged = onUpdateWebScroll?.let { cb ->
+                                { sx, sy -> cb(layer.id, sx, sy) }
+                            }
                         )
                     }
                 }
@@ -478,7 +482,8 @@ private fun StudioLayerNode(
     onReconnectPeer: (() -> Unit)?,
     bypassGraphicAdjustment: Boolean = false,
     cropModeActive: Boolean = false,
-    allowWebPageInteraction: Boolean = false
+    allowWebPageInteraction: Boolean = false,
+    onWebScrollChanged: ((Int, Int) -> Unit)? = null
 ) {
     val density = LocalDensity.current
     val xPx = (layer.x * canvasWidthPx).roundToInt()
@@ -645,6 +650,7 @@ private fun StudioLayerNode(
                         bypassGraphicAdjustment = bypassGraphicAdjustment,
                         interactiveEditing = interactive,
                         allowWebPageInteraction = allowWebPageInteraction,
+                        onWebScrollChanged = onWebScrollChanged,
                         onReconnectPeer = onReconnectPeer
                     )
                 }
@@ -1001,6 +1007,7 @@ private fun LayerContentVisual(
     bypassGraphicAdjustment: Boolean = false,
     interactiveEditing: Boolean = true,
     allowWebPageInteraction: Boolean = false,
+    onWebScrollChanged: ((Int, Int) -> Unit)? = null,
     onReconnectPeer: (() -> Unit)?
 ) {
     val bgColor = if (layer.transparentBackground) Color.Transparent else Color(layer.backgroundColorHex)
@@ -1369,6 +1376,9 @@ private fun LayerContentVisual(
                 cropTop = layer.cropTop,
                 cropRight = layer.cropRight,
                 cropBottom = layer.cropBottom,
+                webScrollX = layer.webScrollX,
+                webScrollY = layer.webScrollY,
+                onWebScrollChanged = onWebScrollChanged,
                 chromaKey = if (bypassGraphicAdjustment || !layer.graphicAdjustment.enabled) {
                     com.example.studio.LayerChromaKeySettings.DEFAULT
                 } else {
@@ -1392,6 +1402,9 @@ private fun LayerContentVisual(
                     cropTop = layer.cropTop,
                     cropRight = layer.cropRight,
                     cropBottom = layer.cropBottom,
+                    webScrollX = layer.webScrollX,
+                    webScrollY = layer.webScrollY,
+                    onWebScrollChanged = onWebScrollChanged,
                     chromaKey = if (bypassGraphicAdjustment || !layer.graphicAdjustment.enabled) {
                         com.example.studio.LayerChromaKeySettings.DEFAULT
                     } else {

@@ -128,6 +128,10 @@ object WebLayerManager {
     private const val CAPTURE_MAX_WIDTH_STANDARD = 960
     private const val CAPTURE_MAX_WIDTH_LOW_RAM = 640
 
+    const val OVERSCROLL_DISABLE_JS =
+        "document.documentElement.style.overscrollBehavior = 'none'; " +
+            "if (document.body) { document.body.style.overscrollBehavior = 'none'; }"
+
     private val WV_USER_AGENT_REGEX = Regex(";\\s*wv\\b", RegexOption.IGNORE_CASE)
 
     @Volatile
@@ -180,6 +184,8 @@ object WebLayerManager {
     /**
      * Forwards a touch gesture from the unified stage canvas directly to the single fixed-viewport
      * pooled [WebView] without detaching, resizing, or changing its 1920x1080 layout.
+     * On [MotionEvent.ACTION_UP], stops momentum fling drift (`flingScroll(0, 0)`) so the webpage
+     * stops at the exact pixel where the user lifts their finger.
      */
     fun dispatchMappedTouchEvent(
         layerId: String,
@@ -205,14 +211,204 @@ object WebLayerManager {
                 cropRight = cropRight,
                 cropBottom = cropBottom
             )
+            val action = event.actionMasked
             val cloned = MotionEvent.obtain(event)
-            try {
+            val handled = try {
                 cloned.setLocation(mappedX, mappedY)
                 wv.dispatchTouchEvent(cloned)
             } finally {
                 cloned.recycle()
             }
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                // Stop residual momentum drift so the page stays at the exact finger-lift pixel
+                wv.flingScroll(0, 0)
+                val sx = wv.scrollX.coerceAtLeast(0)
+                val sy = wv.scrollY.coerceAtLeast(0)
+                if (entry.isInteractWebMode) {
+                    entry.lockedScrollX = sx
+                    entry.lockedScrollY = sy
+                    entry.onScrollChangedCallback?.invoke(sx, sy)
+                }
+                wv.post {
+                    runCatching {
+                        if (entry.webView === wv) {
+                            wv.flingScroll(0, 0)
+                            if (entry.isInteractWebMode) {
+                                val settledX = wv.scrollX.coerceAtLeast(0)
+                                val settledY = wv.scrollY.coerceAtLeast(0)
+                                entry.lockedScrollX = settledX
+                                entry.lockedScrollY = settledY
+                                entry.onScrollChangedCallback?.invoke(settledX, settledY)
+                            }
+                            captureLayerFrameOnMainThread(layerId)
+                        }
+                    }
+                }
+            }
+            handled
         }.getOrDefault(false)
+    }
+
+    /**
+     * Enables or disables "Interact Web" mode on the pooled [WebView] for [layerId]:
+     * - When `enabled == true`: attaches an [View.OnTouchListener] isolating touches from parent
+     *   ScrollViews (`requestDisallowInterceptTouchEvent(true)` on DOWN/MOVE, `false` on UP/CANCEL)
+     *   and stopping momentum fling on `ACTION_UP`, plus attaches [View.setOnScrollChangeListener]
+     *   to continuously sync `(scrollX, scrollY)` into layer state.
+     * - When `enabled == false`: detaches both listeners so canvas drag/resize never scrolls the page,
+     *   stops any fling, and locks the WebView at `(lockedScrollX, lockedScrollY)`.
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    fun setInteractWebMode(
+        layerId: String,
+        enabled: Boolean,
+        onScrollChanged: ((Int, Int) -> Unit)? = null
+    ) {
+        val entry = entries.computeIfAbsent(layerId) { PooledWebEntry(layerId = layerId, webView = null) }
+        entry.isInteractWebMode = enabled
+        entry.onScrollChangedCallback = if (enabled) onScrollChanged else null
+        val apply: () -> Unit = {
+            entry.webView?.let { wv ->
+                configureWebViewInteractionListeners(wv, entry, enabled)
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            apply()
+        } else {
+            mainHandler.post(apply)
+        }
+    }
+
+    /**
+     * Explicitly captures `(webView.scrollX, webView.scrollY)` before leaving `Interact Web` mode,
+     * locks the WebView at those exact coordinates without reloading, and returns `(scrollX, scrollY)`.
+     */
+    fun captureAndLockScrollPosition(layerId: String): Pair<Int, Int> {
+        val entry = entries[layerId] ?: return 0 to 0
+        val wv = entry.webView
+        val sx = (wv?.scrollX ?: entry.lockedScrollX).coerceAtLeast(0)
+        val sy = (wv?.scrollY ?: entry.lockedScrollY).coerceAtLeast(0)
+        entry.lockedScrollX = sx
+        entry.lockedScrollY = sy
+        entry.isInteractWebMode = false
+        entry.onScrollChangedCallback = null
+        val lockOnMain: () -> Unit = {
+            entry.webView?.let { web ->
+                runCatching {
+                    web.flingScroll(0, 0)
+                    configureWebViewInteractionListeners(web, entry, enabled = false)
+                    web.scrollTo(sx, sy)
+                }
+                captureLayerFrameOnMainThread(layerId)
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            lockOnMain()
+        } else {
+            mainHandler.post(lockOnMain)
+        }
+        return sx to sy
+    }
+
+    /**
+     * Reads the current live `(scrollX, scrollY)` for a pooled web layer (used by Save button)
+     * without interrupting active interaction.
+     */
+    fun getCurrentScrollPosition(layerId: String): Pair<Int, Int>? {
+        val entry = entries[layerId] ?: return null
+        val wv = entry.webView
+        val sx = (wv?.scrollX ?: entry.lockedScrollX).coerceAtLeast(0)
+        val sy = (wv?.scrollY ?: entry.lockedScrollY).coerceAtLeast(0)
+        return sx to sy
+    }
+
+    /**
+     * Locks and applies persisted `(scrollX, scrollY)` onto the pooled [WebView] whenever the layer
+     * is re-bound, saved, switched to Crop/Edit Layout, or rendered in the live stream view.
+     */
+    fun applyLockedScrollPosition(layerId: String, scrollX: Int, scrollY: Int) {
+        val entry = entries.computeIfAbsent(layerId) { PooledWebEntry(layerId = layerId, webView = null) }
+        val sx = scrollX.coerceAtLeast(0)
+        val sy = scrollY.coerceAtLeast(0)
+        entry.lockedScrollX = sx
+        entry.lockedScrollY = sy
+        if (entry.isInteractWebMode) return
+        val apply: () -> Unit = {
+            entry.webView?.let { wv ->
+                if (!entry.isInteractWebMode) {
+                    runCatching {
+                        if (wv.scrollX != sx || wv.scrollY != sy) {
+                            wv.scrollTo(sx, sy)
+                        }
+                    }
+                }
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            apply()
+        } else {
+            mainHandler.post(apply)
+        }
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun configureWebViewInteractionListeners(
+        wv: WebView,
+        entry: PooledWebEntry,
+        enabled: Boolean
+    ) {
+        runCatching {
+            wv.overScrollMode = View.OVER_SCROLL_NEVER
+            wv.isVerticalScrollBarEnabled = false
+            wv.isHorizontalScrollBarEnabled = false
+            if (enabled) {
+                wv.setOnTouchListener { v, event ->
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                            v.parent?.requestDisallowInterceptTouchEvent(true)
+                        }
+                        MotionEvent.ACTION_UP -> {
+                            v.parent?.requestDisallowInterceptTouchEvent(false)
+                            v.post {
+                                runCatching {
+                                    (v as? WebView)?.let { web ->
+                                        web.flingScroll(0, 0)
+                                        if (entry.isInteractWebMode) {
+                                            val sx = web.scrollX.coerceAtLeast(0)
+                                            val sy = web.scrollY.coerceAtLeast(0)
+                                            entry.lockedScrollX = sx
+                                            entry.lockedScrollY = sy
+                                            entry.onScrollChangedCallback?.invoke(sx, sy)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        MotionEvent.ACTION_CANCEL -> {
+                            v.parent?.requestDisallowInterceptTouchEvent(false)
+                            v.post { runCatching { (v as? WebView)?.flingScroll(0, 0) } }
+                        }
+                    }
+                    false
+                }
+                wv.setOnScrollChangeListener { _, scrollX, scrollY, _, _ ->
+                    if (entry.isInteractWebMode) {
+                        val sx = scrollX.coerceAtLeast(0)
+                        val sy = scrollY.coerceAtLeast(0)
+                        entry.lockedScrollX = sx
+                        entry.lockedScrollY = sy
+                        entry.onScrollChangedCallback?.invoke(sx, sy)
+                    }
+                }
+            } else {
+                wv.flingScroll(0, 0)
+                wv.setOnTouchListener(null)
+                wv.setOnScrollChangeListener(null)
+                if (wv.scrollX != entry.lockedScrollX || wv.scrollY != entry.lockedScrollY) {
+                    wv.scrollTo(entry.lockedScrollX, entry.lockedScrollY)
+                }
+            }
+        }
     }
 
     fun getFrameRevision(layerId: String): Long = entries[layerId]?.stateFlow?.value?.frameRevision ?: 0L
@@ -224,6 +420,10 @@ object WebLayerManager {
         var loadedNonce: Int = -1,
         var viewport: WebViewportPreset = WebViewportPreset.P1080,
         var interactiveAttached: Boolean = false,
+        var isInteractWebMode: Boolean = false,
+        var lockedScrollX: Int = 0,
+        var lockedScrollY: Int = 0,
+        var onScrollChangedCallback: ((Int, Int) -> Unit)? = null,
         var captureBitmap: Bitmap? = null,
         var captureCanvas: Canvas? = null,
         val stateFlow: MutableStateFlow<WebLayerRuntimeState> = MutableStateFlow(WebLayerRuntimeState(layerId))
@@ -439,17 +639,24 @@ object WebLayerManager {
         layerId: String,
         validatedUrl: String,
         viewport: WebViewportPreset,
-        reloadNonce: Int
+        reloadNonce: Int,
+        initialScrollX: Int = 0,
+        initialScrollY: Int = 0
     ): WebView? {
         val normalizedUrl = normalizeUrl(validatedUrl) ?: return null
         val appCtx = context.applicationContext
         val entry = entries.computeIfAbsent(layerId) { PooledWebEntry(layerId = layerId, webView = null) }
+        if (!entry.isInteractWebMode) {
+            entry.lockedScrollX = initialScrollX.coerceAtLeast(0)
+            entry.lockedScrollY = initialScrollY.coerceAtLeast(0)
+        }
 
         val existing = entry.webView
         val webView = existing ?: createConfiguredWebView(appCtx, entry).also { created ->
             entry.webView = created
             entry.viewport = viewport
             if (created != null) {
+                configureWebViewInteractionListeners(created, entry, entry.isInteractWebMode)
                 if (!entry.interactiveAttached) {
                     ensureAttachedToHostContainer(created, viewport)
                 } else {
@@ -512,6 +719,13 @@ object WebLayerManager {
                 viewportPreset = viewport,
                 reloadNonce = reloadNonce
             )
+            if (!entry.isInteractWebMode) {
+                runCatching {
+                    if (webView.scrollX != entry.lockedScrollX || webView.scrollY != entry.lockedScrollY) {
+                        webView.scrollTo(entry.lockedScrollX, entry.lockedScrollY)
+                    }
+                }
+            }
         }
 
         return webView
@@ -561,6 +775,11 @@ object WebLayerManager {
             }
             if (wv.width <= 0 || wv.height <= 0) return null
 
+            // When not actively scrolling in Interact Web mode, keep scroll locked at persisted offset
+            if (!entry.isInteractWebMode && (wv.scrollX != entry.lockedScrollX || wv.scrollY != entry.lockedScrollY)) {
+                wv.scrollTo(entry.lockedScrollX, entry.lockedScrollY)
+            }
+
             val maxWidth = if (isLowEndDevice(wv.context)) CAPTURE_MAX_WIDTH_LOW_RAM else CAPTURE_MAX_WIDTH_STANDARD
             val scale = (maxWidth.toFloat() / viewport.widthPx.toFloat()).coerceAtMost(1.0f)
             val bmpW = (viewport.widthPx * scale).toInt().coerceAtLeast(64)
@@ -581,6 +800,9 @@ object WebLayerManager {
                 try {
                     bmp.eraseColor(Color.TRANSPARENT)
                     canvas.scale(scale, scale)
+                    // Translate by (-scrollX, -scrollY) just like ViewGroup.drawChild so scrolled
+                    // WebView content renders at the exact viewport origin inside the captured bitmap.
+                    canvas.translate(-wv.scrollX.toFloat(), -wv.scrollY.toFloat())
                     wv.draw(canvas)
                 } finally {
                     canvas.restoreToCount(save)
@@ -621,9 +843,12 @@ object WebLayerManager {
                     layerId = layer.id,
                     validatedUrl = normalizedUrl,
                     viewport = layer.webViewportPreset,
-                    reloadNonce = layer.webReloadNonce
+                    reloadNonce = layer.webReloadNonce,
+                    initialScrollX = layer.webScrollX,
+                    initialScrollY = layer.webScrollY
                 )
                 if (wv != null) {
+                    applyLockedScrollPosition(layer.id, layer.webScrollX, layer.webScrollY)
                     captureLayerFrameOnMainThread(layer.id)
                 }
             }
@@ -723,6 +948,7 @@ object WebLayerManager {
                     // Strip `; wv` so stream widgets, overlays, and embedded players load cleanly
                     userAgentString = sanitizeUserAgent(userAgentString)
                 }
+                overScrollMode = View.OVER_SCROLL_NEVER
                 isVerticalScrollBarEnabled = false
                 isHorizontalScrollBarEnabled = false
                 runCatching {
@@ -763,6 +989,24 @@ object WebLayerManager {
                             isLoading = false,
                             loadProgress = 100
                         )
+                        // Disable rubber-band overscroll & pull-to-refresh inside the webpage DOM
+                        runCatching {
+                            view?.evaluateJavascript(
+                                "(function(){try{$OVERSCROLL_DISABLE_JS}catch(e){}})();",
+                                null
+                            )
+                        }
+                        if (view != null && !entry.isInteractWebMode) {
+                            runCatching { view.scrollTo(entry.lockedScrollX, entry.lockedScrollY) }
+                            view.postDelayed({
+                                runCatching {
+                                    if (!entry.isInteractWebMode && entry.webView === view) {
+                                        view.scrollTo(entry.lockedScrollX, entry.lockedScrollY)
+                                        captureLayerFrameOnMainThread(entry.layerId)
+                                    }
+                                }
+                            }, 150L)
+                        }
                         captureLayerFrameOnMainThread(entry.layerId)
                     }
 
@@ -839,7 +1083,9 @@ object WebLayerManager {
                                     layerId = entry.layerId,
                                     validatedUrl = savedUrl,
                                     viewport = savedViewport,
-                                    reloadNonce = savedNonce
+                                    reloadNonce = savedNonce,
+                                    initialScrollX = entry.lockedScrollX,
+                                    initialScrollY = entry.lockedScrollY
                                 )
                             }
                         }
@@ -879,7 +1125,10 @@ object WebLayerManager {
                 }
             }
         }
-        applyFixedViewportLayout(webView, viewport)
+        // Only run measure/layout when dimensions actually differ so scrolling never gets jolted
+        if (webView.width != w || webView.height != h || webView.measuredWidth != w || webView.measuredHeight != h) {
+            applyFixedViewportLayout(webView, viewport)
+        }
     }
 
     /**

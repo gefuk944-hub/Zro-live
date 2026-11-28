@@ -527,4 +527,106 @@ class ZroStudioEngineUpgradeTest {
         assertEquals(expectedLayer.cropBottom, restored.cropBottom, 0.001f)
         assertEquals("https://socialcounts.org/youtube-live-subscriber-count", restored.webUrl)
     }
+
+    @Test
+    fun `browser source disables overscroll isolates interact web touches and locks persisted webScrollX and webScrollY`() = runBlocking {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val store = SettingsStore(ctx)
+        val host = FixedViewportWebHostContainer(ctx)
+        WebLayerManager.attachHostContainer(host)
+
+        val wv = WebLayerManager.obtainWebView(
+            context = ctx,
+            layerId = "web_scroll_lock_test",
+            validatedUrl = "https://socialcounts.org/youtube-live-subscriber-count",
+            viewport = WebViewportPreset.P1080,
+            reloadNonce = 0,
+            initialScrollX = 0,
+            initialScrollY = 0
+        )
+        assertNotNull(wv)
+        // 1. Overscroll and vertical scroll bar disabled immediately
+        assertEquals(View.OVER_SCROLL_NEVER, wv!!.overScrollMode)
+        assertFalse(wv.isVerticalScrollBarEnabled)
+        assertTrue(WebLayerManager.OVERSCROLL_DISABLE_JS.contains("overscrollBehavior = 'none'"))
+
+        // 2. Interact Web mode attaches scroll listener & touch isolation and captures scroll position
+        var reportedX = -1
+        var reportedY = -1
+        WebLayerManager.setInteractWebMode(
+            layerId = "web_scroll_lock_test",
+            enabled = true,
+            onScrollChanged = { sx, sy ->
+                reportedX = sx
+                reportedY = sy
+            }
+        )
+        wv.scrollTo(42, 380)
+        assertEquals(42, wv.scrollX)
+        assertEquals(380, wv.scrollY)
+
+        // Dispatch ACTION_DOWN -> ACTION_MOVE -> ACTION_UP through mapped touch pipeline (must not crash or reset scroll)
+        val now = android.os.SystemClock.uptimeMillis()
+        val down = android.view.MotionEvent.obtain(now, now, android.view.MotionEvent.ACTION_DOWN, 100f, 100f, 0)
+        val move = android.view.MotionEvent.obtain(now, now + 16, android.view.MotionEvent.ACTION_MOVE, 100f, 140f, 0)
+        val up = android.view.MotionEvent.obtain(now, now + 32, android.view.MotionEvent.ACTION_UP, 100f, 140f, 0)
+        try {
+            WebLayerManager.dispatchMappedTouchEvent("web_scroll_lock_test", down, 400f, 200f, 0f, 0f, 0f, 0f)
+            WebLayerManager.dispatchMappedTouchEvent("web_scroll_lock_test", move, 400f, 200f, 0f, 0f, 0f, 0f)
+            WebLayerManager.dispatchMappedTouchEvent("web_scroll_lock_test", up, 400f, 200f, 0f, 0f, 0f, 0f)
+        } finally {
+            down.recycle()
+            move.recycle()
+            up.recycle()
+        }
+
+        // 3. Exiting Interact Web captures & locks exact scroll coordinates without reloading URL
+        val (lockedX, lockedY) = WebLayerManager.captureAndLockScrollPosition("web_scroll_lock_test")
+        assertEquals(42, lockedX)
+        assertEquals(380, lockedY)
+        assertEquals(42, reportedX)
+        assertEquals(380, reportedY)
+
+        // Even if something externally tries to reset WebView scroll to 0, re-applying locked scroll restores 42, 380
+        wv.scrollTo(0, 0)
+        WebLayerManager.applyLockedScrollPosition("web_scroll_lock_test", lockedX, lockedY)
+        assertEquals(42, wv.scrollX)
+        assertEquals(380, wv.scrollY)
+
+        // Re-obtaining the same URL never reloads and keeps scroll locked at 42, 380
+        WebLayerManager.obtainWebView(
+            context = ctx,
+            layerId = "web_scroll_lock_test",
+            validatedUrl = "https://socialcounts.org/youtube-live-subscriber-count",
+            viewport = WebViewportPreset.P1080,
+            reloadNonce = 0,
+            initialScrollX = lockedX,
+            initialScrollY = lockedY
+        )
+        assertEquals(42, wv.scrollX)
+        assertEquals(380, wv.scrollY)
+
+        // 4. Persisting SceneLayer webScrollX & webScrollY via DataStore round-trips exact pixel scroll
+        val scrolledLayer = SceneLayer(
+            id = "web_scroll_lock_test",
+            name = "SocialCounts Locked",
+            type = LayerSourceType.BROWSER_WEB,
+            webUrl = "https://socialcounts.org/youtube-live-subscriber-count",
+            webScrollX = lockedX,
+            webScrollY = lockedY
+        )
+        val base = StudioWorkspaceState()
+        val savedWorkspace = base.copy(
+            scenes = base.scenes + (base.activeSceneSlot to base.activeScene.copy(
+                layers = base.activeScene.layers + scrolledLayer
+            ))
+        )
+        store.saveStudioWorkspace(savedWorkspace, LiveBroadcastMode.LANDSCAPE_16_9)
+        val restored = store.loadStudioWorkspaceForMode(LiveBroadcastMode.LANDSCAPE_16_9)
+            .activeScene.layers.first { it.id == "web_scroll_lock_test" }
+        assertEquals(42, restored.webScrollX)
+        assertEquals(380, restored.webScrollY)
+
+        WebLayerManager.detachHostContainer(host)
+    }
 }
