@@ -605,12 +605,14 @@ fun ObsSceneStudioScreen(
                 cropModeActive = cropModeActive,
                 webInteractLayerId = webInteractLayerId,
                 onSelectLayer = { id ->
-                    onSelectLayer(id)
                     if (id == null) {
                         webInteractLayerId = null
+                        cropModeActive = false
+                        onDragFinished()
                     } else if (dockTab == StudioDockTab.SOURCES || dockTab == StudioDockTab.CUSTOMIZE) {
                         dockTab = StudioDockTab.TRANSFORM
                     }
+                    onSelectLayer(id)
                 },
                 onMoveLayerBy = onMoveLayerBy,
                 onMoveLayerTo = onMoveLayerTo,
@@ -660,6 +662,7 @@ fun ObsSceneStudioScreen(
                                         RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp)
                                     )
                                     .clickable {
+                                        if (cropModeActive) onDragFinished()
                                         cropModeActive = false
                                         webInteractLayerId = null
                                     }
@@ -699,6 +702,7 @@ fun ObsSceneStudioScreen(
                         val chromaOn = selectedLayer.graphicAdjustment.chromaKey.enabled
                         Surface(
                             onClick = {
+                                onDragFinished()
                                 dockTab = StudioDockTab.GRAPHICS
                                 graphicCategory = GraphicCategoryTab.CHROMA_KEY
                             },
@@ -722,6 +726,8 @@ fun ObsSceneStudioScreen(
                     if (selectedLayer.type == LayerSourceType.BROWSER_WEB) {
                         Surface(
                             onClick = {
+                                onDragFinished()
+                                if (!isWebInteracting) cropModeActive = false
                                 webInteractLayerId = if (isWebInteracting) null else selectedLayer.id
                             },
                             shape = RoundedCornerShape(5.dp),
@@ -753,6 +759,7 @@ fun ObsSceneStudioScreen(
                         onClick = {
                             webInteractLayerId = null
                             cropModeActive = false
+                            onDragFinished()
                             onSelectLayer(null)
                         },
                         shape = RoundedCornerShape(5.dp),

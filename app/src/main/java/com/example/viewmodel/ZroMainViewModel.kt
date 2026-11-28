@@ -5,7 +5,9 @@ import android.content.Intent
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
+import android.widget.Toast
 import androidx.lifecycle.ViewModel
+import java.util.concurrent.atomic.AtomicBoolean
 import androidx.lifecycle.viewModelScope
 import com.example.audio.ZroAudioEngine
 import com.example.chat.YouTubeLiveChatClient
@@ -333,6 +335,7 @@ class ZroMainViewModel(
 
     @Volatile private var pendingReuseSessionId: String? = null
     private var wasSecondPhoneConnected: Boolean = false
+    private val userEditedStudioBeforeHydrate = AtomicBoolean(false)
 
     init {
         connectivityMonitor.startMonitoring()
@@ -344,11 +347,13 @@ class ZroMainViewModel(
         }
 
         // Hydrate persisted Studio workspace for the active broadcast mode (16:9 Live, Shorts Live, or Dual Live)
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val initialMode = settingsStore.settingsFlow.first().stream.broadcastMode
             val loaded = settingsStore.loadStudioWorkspaceForMode(initialMode)
-            _studioState.value = loaded
-            ZroStreamCoordinator.updateStudioWorkspace(loaded)
+            if (!userEditedStudioBeforeHydrate.get()) {
+                _studioState.value = loaded
+                ZroStreamCoordinator.updateStudioWorkspace(loaded)
+            }
         }
 
         // Sync scene switches triggered from Persistent Notification or Floating Overlay (Screen 1-4)
@@ -1605,6 +1610,7 @@ class ZroMainViewModel(
         persist: Boolean = true,
         recordUndo: Boolean = true
     ) {
+        userEditedStudioBeforeHydrate.set(true)
         val prev = _studioState.value
         if (recordUndo && newState != prev) {
             pushUndoSnapshot(prev)
@@ -1613,7 +1619,12 @@ class ZroMainViewModel(
         ZroStreamCoordinator.updateStudioWorkspace(newState)
         if (persist) {
             val mode = activeBroadcastMode()
-            viewModelScope.launch(Dispatchers.IO) { settingsStore.saveStudioWorkspace(newState, mode) }
+            viewModelScope.launch(Dispatchers.IO) {
+                settingsStore.saveStudioWorkspace(newState, mode)
+                if (newState.autoRestoreLastLayout) {
+                    settingsStore.saveAuthorizedDeviceLayout(newState, mode)
+                }
+            }
         }
     }
 
@@ -1637,11 +1648,13 @@ class ZroMainViewModel(
         _studioState.value = next
         ZroStreamCoordinator.updateStudioWorkspace(next)
         val mode = activeBroadcastMode()
-        viewModelScope.launch { settingsStore.saveStudioWorkspace(next, mode) }
+        viewModelScope.launch(Dispatchers.IO) { settingsStore.saveStudioWorkspace(next, mode) }
         showMessage("Redid Studio change")
     }
 
     fun saveScreenLayoutExplicitly() {
+        userEditedStudioBeforeHydrate.set(true)
+        dragSnapshotPushed = false
         val dt = dualTelemetry.value
         val mode = activeBroadcastMode()
         val stamped = _studioState.value.copy(
@@ -1651,10 +1664,15 @@ class ZroMainViewModel(
         )
         _studioState.value = stamped
         ZroStreamCoordinator.updateStudioWorkspace(stamped)
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
+            settingsStore.saveStudioWorkspace(stamped, mode)
             settingsStore.saveAuthorizedDeviceLayout(stamped, mode)
             settingsStore.savePreviousStudioBackup(stamped, mode)
-            showMessage("Saved ${mode.label} layout & all 4 scenes.")
+            CrashRecoveryStore.saveEmergencyWorkspaceBackup(appContext, stamped)
+            withContext(Dispatchers.Main) {
+                runCatching { Toast.makeText(appContext, "Saved", Toast.LENGTH_SHORT).show() }
+                showMessage("Saved")
+            }
         }
     }
 
@@ -1830,7 +1848,12 @@ class ZroMainViewModel(
     }
 
     fun selectLayer(layerId: String?) {
-        commitStudioState(StudioWorkspaceReducer.selectLayer(_studioState.value, layerId), persist = false)
+        val pendingPersist = dragSnapshotPushed
+        val next = StudioWorkspaceReducer.selectLayer(_studioState.value, layerId)
+        commitStudioState(next, persist = pendingPersist, recordUndo = false)
+        if (pendingPersist) {
+            dragSnapshotPushed = false
+        }
     }
 
     fun toggleLayerLock(layerId: String) {

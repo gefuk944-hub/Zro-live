@@ -1,6 +1,7 @@
 package com.example.studio
 
 import android.annotation.SuppressLint
+import android.app.ActivityManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -25,6 +26,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import com.example.streaming.GlChromaShaderSpec
 import com.example.telemetry.CrashRecoveryStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -123,9 +125,97 @@ object WebLayerManager {
     private const val TAG = "WebLayerManager"
 
     // Offscreen capture scale factor keeps GPU upload & H.264 compositing crisp while staying fast (<2ms/frame)
-    private const val CAPTURE_MAX_WIDTH = 960
+    private const val CAPTURE_MAX_WIDTH_STANDARD = 960
+    private const val CAPTURE_MAX_WIDTH_LOW_RAM = 640
 
     private val WV_USER_AGENT_REGEX = Regex(";\\s*wv\\b", RegexOption.IGNORE_CASE)
+
+    @Volatile
+    private var cachedLowEndDevice: Boolean? = null
+
+    /**
+     * Detects budget / low-RAM Android devices (ActivityManager.isLowRamDevice or <= 3 GB total RAM)
+     * so capture texture sizes and background polling intervals scale down cleanly for smooth live streaming.
+     */
+    fun isLowEndDevice(context: Context): Boolean {
+        cachedLowEndDevice?.let { return it }
+        val result = runCatching {
+            val am = context.applicationContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                ?: return@runCatching false
+            if (am.isLowRamDevice) return@runCatching true
+            val memInfo = ActivityManager.MemoryInfo()
+            am.getMemoryInfo(memInfo)
+            memInfo.totalMem in 1L..(3L * 1024L * 1024L * 1024L)
+        }.getOrDefault(false)
+        cachedLowEndDevice = result
+        return result
+    }
+
+    /**
+     * Pure coordinate mapper converting a touch `(touchX, touchY)` inside the cropped visual box
+     * (`viewWidth x viewHeight`) into the exact pixel coordinate inside the fixed virtual viewport
+     * (`viewport.widthPx x viewport.heightPx`), preserving crop bounds with zero WebView resizing.
+     */
+    fun mapTouchToFixedViewport(
+        touchX: Float,
+        touchY: Float,
+        viewWidth: Float,
+        viewHeight: Float,
+        viewport: WebViewportPreset,
+        cropLeft: Float,
+        cropTop: Float,
+        cropRight: Float,
+        cropBottom: Float
+    ): Pair<Float, Float> {
+        val safeW = viewWidth.coerceAtLeast(1f)
+        val safeH = viewHeight.coerceAtLeast(1f)
+        val normX = (touchX / safeW).coerceIn(0f, 1f)
+        val normY = (touchY / safeH).coerceIn(0f, 1f)
+        val uv = GlChromaShaderSpec.computeCropUvBounds(cropLeft, cropTop, cropRight, cropBottom)
+        val targetX = (uv.uMin + normX * uv.visibleWidthFraction) * viewport.widthPx.toFloat()
+        val targetY = (uv.vMin + normY * uv.visibleHeightFraction) * viewport.heightPx.toFloat()
+        return targetX.coerceIn(0f, viewport.widthPx.toFloat()) to targetY.coerceIn(0f, viewport.heightPx.toFloat())
+    }
+
+    /**
+     * Forwards a touch gesture from the unified stage canvas directly to the single fixed-viewport
+     * pooled [WebView] without detaching, resizing, or changing its 1920x1080 layout.
+     */
+    fun dispatchMappedTouchEvent(
+        layerId: String,
+        event: MotionEvent,
+        viewWidth: Float,
+        viewHeight: Float,
+        cropLeft: Float,
+        cropTop: Float,
+        cropRight: Float,
+        cropBottom: Float
+    ): Boolean {
+        val entry = entries[layerId] ?: return false
+        val wv = entry.webView ?: return false
+        return runCatching {
+            val (mappedX, mappedY) = mapTouchToFixedViewport(
+                touchX = event.x,
+                touchY = event.y,
+                viewWidth = viewWidth,
+                viewHeight = viewHeight,
+                viewport = entry.viewport,
+                cropLeft = cropLeft,
+                cropTop = cropTop,
+                cropRight = cropRight,
+                cropBottom = cropBottom
+            )
+            val cloned = MotionEvent.obtain(event)
+            try {
+                cloned.setLocation(mappedX, mappedY)
+                wv.dispatchTouchEvent(cloned)
+            } finally {
+                cloned.recycle()
+            }
+        }.getOrDefault(false)
+    }
+
+    fun getFrameRevision(layerId: String): Long = entries[layerId]?.stateFlow?.value?.frameRevision ?: 0L
 
     private class PooledWebEntry(
         val layerId: String,
@@ -471,7 +561,8 @@ object WebLayerManager {
             }
             if (wv.width <= 0 || wv.height <= 0) return null
 
-            val scale = (CAPTURE_MAX_WIDTH.toFloat() / viewport.widthPx.toFloat()).coerceAtMost(1.0f)
+            val maxWidth = if (isLowEndDevice(wv.context)) CAPTURE_MAX_WIDTH_LOW_RAM else CAPTURE_MAX_WIDTH_STANDARD
+            val scale = (maxWidth.toFloat() / viewport.widthPx.toFloat()).coerceAtMost(1.0f)
             val bmpW = (viewport.widthPx * scale).toInt().coerceAtLeast(64)
             val bmpH = (viewport.heightPx * scale).toInt().coerceAtLeast(64)
 

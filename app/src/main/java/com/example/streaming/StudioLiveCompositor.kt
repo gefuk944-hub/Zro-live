@@ -57,6 +57,14 @@ class StudioLiveCompositor(private val context: Context) {
     private val bitmapCache = object : LruCache<String, Bitmap>(16) {}
     private val failedKeys = HashSet<String>()
     private val lastWebRefreshMs = HashMap<String, Long>()
+    private val lowEndDevice: Boolean = WebLayerManager.isLowEndDevice(context)
+
+    private data class CachedKeyedWebFrame(
+        val revision: Long,
+        val chromaHash: Int,
+        val bitmap: Bitmap
+    )
+    private val cachedKeyedWebFrames = HashMap<String, CachedKeyedWebFrame>()
 
     /**
      * Renders the current [workspace] active scene onto [canvas] at full broadcast resolution.
@@ -603,10 +611,12 @@ class StudioLiveCompositor(private val context: Context) {
 
     private fun drawWebLayer(canvas: Canvas, bounds: RectF, layer: SceneLayer) {
         if (layer.webUrl.isBlank()) return
-        // Keep the pooled fixed-viewport WebView refreshing in background at ~10fps during live streaming
+        // Adaptive background refresh cadence (~5 FPS on low-end phones, ~8 FPS on normal phones)
+        // to preserve CPU/RAM headroom for H.264 hardware encoding and gameplay capture.
         val now = android.os.SystemClock.elapsedRealtime()
+        val refreshIntervalMs = if (lowEndDevice) 200L else 125L
         val last = lastWebRefreshMs[layer.id] ?: 0L
-        if (now - last >= 100L) {
+        if (now - last >= refreshIntervalMs) {
             lastWebRefreshMs[layer.id] = now
             WebLayerManager.requestBackgroundFrameRefresh(context, layer)
         }
@@ -615,7 +625,27 @@ class StudioLiveCompositor(private val context: Context) {
         if (rawFrame != null && !rawFrame.isRecycled && rawFrame.width > 0 && rawFrame.height > 0) {
             val chroma = layer.graphicAdjustment.chromaKey
             val drawBmp = if (layer.graphicAdjustment.enabled && chroma.enabled) {
-                runCatching { ChromaKeyProcessor.applyChromaKey(rawFrame, chroma) }.getOrDefault(rawFrame)
+                val rev = WebLayerManager.getFrameRevision(layer.id)
+                val chromaHash = chroma.hashCode()
+                val existing = cachedKeyedWebFrames[layer.id]
+                if (existing != null &&
+                    existing.revision == rev &&
+                    existing.chromaHash == chromaHash &&
+                    !existing.bitmap.isRecycled
+                ) {
+                    existing.bitmap
+                } else {
+                    val fresh = runCatching { ChromaKeyProcessor.applyChromaKey(rawFrame, chroma) }.getOrNull()
+                    if (fresh != null && !fresh.isRecycled) {
+                        if (existing != null && existing.bitmap !== fresh && !existing.bitmap.isRecycled) {
+                            existing.bitmap.recycle()
+                        }
+                        cachedKeyedWebFrames[layer.id] = CachedKeyedWebFrame(rev, chromaHash, fresh)
+                        fresh
+                    } else {
+                        rawFrame
+                    }
+                }
             } else {
                 rawFrame
             }
@@ -631,9 +661,6 @@ class StudioLiveCompositor(private val context: Context) {
             val b = (uv.vMax * drawBmp.height).toInt().coerceIn(t + 1, drawBmp.height)
             srcRect.set(l, t, r, b)
             canvas.drawBitmap(drawBmp, srcRect, bounds, bitmapPaint)
-            if (drawBmp !== rawFrame && !drawBmp.isRecycled) {
-                drawBmp.recycle()
-            }
             return
         }
 
@@ -750,5 +777,10 @@ class StudioLiveCompositor(private val context: Context) {
     fun release() {
         bitmapCache.evictAll()
         failedKeys.clear()
+        cachedKeyedWebFrames.values.forEach { entry ->
+            if (!entry.bitmap.isRecycled) entry.bitmap.recycle()
+        }
+        cachedKeyedWebFrames.clear()
+        lastWebRefreshMs.clear()
     }
 }

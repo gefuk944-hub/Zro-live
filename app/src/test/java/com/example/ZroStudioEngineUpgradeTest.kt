@@ -13,6 +13,8 @@ import androidx.test.core.app.ApplicationProvider
 import android.view.View
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
+import com.example.data.SettingsStore
+import com.example.data.model.LiveBroadcastMode
 import com.example.streaming.GlChromaShaderSpec
 import com.example.studio.ChromaKeyPreset
 import com.example.studio.ChromaKeyProcessor
@@ -29,6 +31,7 @@ import com.example.studio.StudioWorkspaceState
 import com.example.studio.WebLayerManager
 import com.example.studio.WebViewportPreset
 import com.example.telemetry.CrashRecoveryStore
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -413,5 +416,115 @@ class ZroStudioEngineUpgradeTest {
         assertEquals(View.VISIBLE, wv.visibility)
 
         WebLayerManager.detachHostContainer(host)
+    }
+
+    @Test
+    fun `unified single layer browser source maps cropped interact touches to fixed 1920x1080 viewport without detaching or resizing`() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val host = FixedViewportWebHostContainer(ctx)
+        WebLayerManager.attachHostContainer(host)
+
+        val wv = WebLayerManager.obtainWebView(
+            context = ctx,
+            layerId = "web_unified_single_layer",
+            validatedUrl = "https://socialcounts.org/youtube-live-subscriber-count",
+            viewport = WebViewportPreset.P1080,
+            reloadNonce = 0
+        )
+        assertNotNull(wv)
+        host.measure(
+            View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
+        )
+        host.layout(0, 0, 1080, 1920)
+
+        // Cropped region: left=25%, right=25% (visible X: 480..1440), top=20%, bottom=30% (visible Y: 216..756)
+        val (centerX, centerY) = WebLayerManager.mapTouchToFixedViewport(
+            touchX = 200f,
+            touchY = 100f,
+            viewWidth = 400f,
+            viewHeight = 200f,
+            viewport = WebViewportPreset.P1080,
+            cropLeft = 0.25f,
+            cropTop = 0.20f,
+            cropRight = 0.25f,
+            cropBottom = 0.30f
+        )
+        assertEquals(960f, centerX, 1.5f)
+        assertEquals(486f, centerY, 1.5f)
+
+        val (topLeftX, topLeftY) = WebLayerManager.mapTouchToFixedViewport(
+            touchX = 0f,
+            touchY = 0f,
+            viewWidth = 400f,
+            viewHeight = 200f,
+            viewport = WebViewportPreset.P1080,
+            cropLeft = 0.25f,
+            cropTop = 0.20f,
+            cropRight = 0.25f,
+            cropBottom = 0.30f
+        )
+        assertEquals(480f, topLeftX, 1.5f)
+        assertEquals(216f, topLeftY, 1.5f)
+
+        // WebView stays attached at fixed 1920x1080 inside the single host container (never resized to mobile width)
+        assertTrue(wv!!.parent === host)
+        assertEquals(1920, wv.measuredWidth)
+        assertEquals(1080, wv.measuredHeight)
+
+        WebLayerManager.detachHostContainer(host)
+    }
+
+    @Test
+    fun `crop edge edits and explicit save persist exact crop bounds position and url across datastore reloads`() = runBlocking {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val store = SettingsStore(ctx)
+        val webLayer = SceneLayer(
+            id = "web_socialcounts_persist",
+            name = "Socialcounts Widget",
+            type = LayerSourceType.BROWSER_WEB,
+            x = 0.14f,
+            y = 0.18f,
+            width = 0.62f,
+            height = 0.44f,
+            webUrl = "https://socialcounts.org/youtube-live-subscriber-count",
+            webViewportPreset = WebViewportPreset.P1080
+        )
+        var workspace = StudioWorkspaceState()
+        workspace = workspace.copy(
+            scenes = workspace.scenes + (workspace.activeSceneSlot to workspace.activeScene.copy(
+                layers = workspace.activeScene.layers + webLayer
+            )),
+            selectedLayerId = webLayer.id
+        )
+
+        // Simulate dragging orange crop handles inward on all four edges (screen-space deltas)
+        workspace = StudioWorkspaceReducer.cropLayerEdge(workspace, webLayer.id, CropEdge.LEFT, 0.18f)
+        workspace = StudioWorkspaceReducer.cropLayerEdge(workspace, webLayer.id, CropEdge.RIGHT, -0.22f)
+        workspace = StudioWorkspaceReducer.cropLayerEdge(workspace, webLayer.id, CropEdge.TOP, 0.12f)
+        workspace = StudioWorkspaceReducer.cropLayerEdge(workspace, webLayer.id, CropEdge.BOTTOM, -0.15f)
+
+        // Deselect layer ("Done") must preserve exact crop bounds
+        val afterDone = workspace.copy(selectedLayerId = null)
+        val expectedLayer = afterDone.activeScene.layers.first { it.id == webLayer.id }
+        assertTrue(expectedLayer.cropLeft > 0.10f)
+        assertTrue(expectedLayer.cropRight > 0.10f)
+        assertTrue(expectedLayer.cropTop > 0.05f)
+        assertTrue(expectedLayer.cropBottom > 0.05f)
+
+        // Persist via DataStore and reload as if reopening the app
+        store.saveStudioWorkspace(afterDone, LiveBroadcastMode.LANDSCAPE_16_9)
+        val reloaded = store.loadStudioWorkspaceForMode(LiveBroadcastMode.LANDSCAPE_16_9)
+        val restored = reloaded.activeScene.layers.first { it.id == webLayer.id }
+
+        assertEquals(expectedLayer.x, restored.x, 0.001f)
+        assertEquals(expectedLayer.y, restored.y, 0.001f)
+        assertEquals(expectedLayer.width, restored.width, 0.001f)
+        assertEquals(expectedLayer.height, restored.height, 0.001f)
+        assertEquals(expectedLayer.cropLeft, restored.cropLeft, 0.001f)
+        assertEquals(expectedLayer.cropTop, restored.cropTop, 0.001f)
+        assertEquals(expectedLayer.cropRight, restored.cropRight, 0.001f)
+        assertEquals(expectedLayer.cropBottom, restored.cropBottom, 0.001f)
+        assertEquals("https://socialcounts.org/youtube-live-subscriber-count", restored.webUrl)
     }
 }

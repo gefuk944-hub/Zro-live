@@ -511,17 +511,17 @@ fun CameraXChromaFacecamView(
 }
 
 /**
- * Persistent, Fixed-Viewport OBS-Style Browser / Website Source with 60fps Non-Destructive
- * GPU UV Cropping (`uCropRect`) and Real-Time OpenGL ES Chroma Key Shader support.
+ * Unified, Persistent, Fixed-Viewport OBS-Style Browser / Website Source.
  *
- * - Retains active WebView instances in [WebLayerManager] across tab switches, settings navigation,
- *   UI refreshes, app minimize, and background streaming — ZERO accidental reloads!
- * - Renders WebView at its fixed virtual canvas preset (`1920x1080`, `1280x720`, or `800x800`) and
- *   NEVER resizes internal WebView layout during crop drags, eliminating vertical page reflow.
- * - Drives [GlTextureSurfaceRenderer] (`uCropRect` + `uChromaEnabled` + `uKeyColor` + `uSimilarity`
- *   + `uSmoothness` + `uSpillReduction`) for live preview, with an automatic Compose Canvas fallback
- *   when hardware GL is unavailable.
- * - Seamlessly attaches the exact same pooled WebView when [allowPageInteraction] is toggled ON.
+ * - Uses ONE single `WebView` permanently locked to its fixed virtual viewport (`1920x1080` default)
+ *   inside [WebLayerManager]'s visible host container across `Edit Layout`, `Crop`, `Interact Web`,
+ *   `Done`, and live preview — eliminating responsive mobile-card layout switching completely.
+ * - Applies non-destructive normalized crop bounds (`cropLeft`, `cropTop`, `cropRight`, `cropBottom`)
+ *   permanently in the Canvas draw pass (`srcOffset`/`srcSize`) at 60fps with ZERO Bitmap allocations
+ *   or EGL context contention during crop drags.
+ * - In `Interact Web` mode, forwards touches directly to the exact cropped sub-rectangle of the
+ *   single `1920x1080` WebView so the webpage layout and crop remain 100% locked.
+ * - Adapts frame refresh cadence and capture texture dimensions automatically on low-RAM devices.
  */
 @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
 @Composable
@@ -545,14 +545,13 @@ fun StudioWebSourceView(
     val runtimeState by remember(layerId) {
         WebLayerManager.observeLayerState(layerId)
     }.collectAsStateWithLifecycle()
+    val lowEndDevice = remember(context) { WebLayerManager.isLowEndDevice(context) }
 
-    var glAvailable by remember(layerId) { mutableStateOf(true) }
-    var softwareFrame by remember(layerId) { mutableStateOf<Bitmap?>(null) }
-    val glRendererHolder = remember(layerId) { arrayOfNulls<GlTextureSurfaceRenderer>(1) }
-    val surfaceSizeHolder = remember(layerId) { intArrayOf(0, 0) }
-    val glTextureViewHolder = remember(layerId) { arrayOfNulls<TextureView>(1) }
+    var rawWebFrame by remember(layerId) { mutableStateOf<Bitmap?>(WebLayerManager.getLatestFrame(layerId)) }
+    var keyedWebFrame by remember(layerId) { mutableStateOf<Bitmap?>(null) }
+    var frameTick by remember(layerId) { mutableIntStateOf(0) }
 
-    // Keep latest crop/chroma parameters available inside frame refresh loop without restarting effects
+    // Keep latest crop/chroma parameters accessible inside touch & capture loops without restarting effects
     val latestCrop = remember { FloatArray(4) }
     latestCrop[0] = cropLeft
     latestCrop[1] = cropTop
@@ -560,8 +559,6 @@ fun StudioWebSourceView(
     latestCrop[3] = cropBottom
     val latestChroma = remember { arrayOf(chromaKey) }
     latestChroma[0] = chromaKey
-    val latestOpacity = remember { floatArrayOf(opacity) }
-    latestOpacity[0] = opacity
 
     if (validatedUrl == null) {
         Box(
@@ -590,7 +587,7 @@ fun StudioWebSourceView(
         return
     }
 
-    // Acquire or update the pooled fixed-viewport WebView (never reloads unless URL or reloadNonce changed!)
+    // Acquire or reuse the single pooled fixed-viewport WebView (NEVER reloads unless URL or reloadNonce changed!)
     LaunchedEffect(layerId, validatedUrl, viewportPreset, reloadNonce) {
         WebLayerManager.obtainWebView(
             context = context,
@@ -599,229 +596,140 @@ fun StudioWebSourceView(
             viewport = viewportPreset,
             reloadNonce = reloadNonce
         )
-    }
-
-    // Immediate GPU uniform redraw whenever crop bounds or Chroma Key sliders move (zero WebView relayout!)
-    LaunchedEffect(cropLeft, cropTop, cropRight, cropBottom, chromaKey, opacity, allowPageInteraction) {
-        if (allowPageInteraction) return@LaunchedEffect
-        val frame = WebLayerManager.getLatestFrame(layerId) ?: WebLayerManager.captureLayerFrameOnMainThread(layerId)
-        val tv = glTextureViewHolder[0]
-        val renderer = glRendererHolder[0]
-        if (glAvailable && renderer != null && tv != null && tv.isAttachedToWindow && tv.isAvailable &&
-            surfaceSizeHolder[0] > 0 && surfaceSizeHolder[1] > 0
-        ) {
-            renderer.renderBitmapFrame(
-                bitmap = frame,
-                viewportWidth = surfaceSizeHolder[0],
-                viewportHeight = surfaceSizeHolder[1],
-                cropLeft = cropLeft,
-                cropTop = cropTop,
-                cropRight = cropRight,
-                cropBottom = cropBottom,
-                opacity = opacity,
-                chroma = chromaKey
-            )
-        } else if (frame != null && !frame.isRecycled) {
-            softwareFrame = if (chromaKey.enabled) {
-                withContext(Dispatchers.Default) {
-                    runCatching { ChromaKeyProcessor.applyChromaKey(frame, chromaKey) }.getOrDefault(frame)
-                }
-            } else {
-                frame
-            }
+        // Always guarantee the pooled WebView stays in the fixed-viewport host container (never narrow MATCH_PARENT!)
+        WebLayerManager.reattachToHostContainer(layerId)
+        val initial = WebLayerManager.captureLayerFrameOnMainThread(layerId)
+        if (initial != null && !initial.isRecycled) {
+            rawWebFrame = initial
+            frameTick++
         }
     }
 
-    // Periodic frame refresh loop (~20 FPS) pumping animated webpage content into GPU shader / software preview
-    LaunchedEffect(layerId, validatedUrl, allowPageInteraction) {
-        if (allowPageInteraction) return@LaunchedEffect
+    // Re-key immediately when Chroma Key settings change (off Main thread, zero UI jank!)
+    LaunchedEffect(layerId, chromaKey, rawWebFrame, frameTick) {
+        val frame = rawWebFrame
+        if (!chromaKey.enabled || frame == null || frame.isRecycled) {
+            keyedWebFrame = null
+            return@LaunchedEffect
+        }
+        val keyed = withContext(Dispatchers.Default) {
+            runCatching {
+                ChromaKeyProcessor.applyChromaKeyCached(
+                    sourceKey = "web_${layerId}_${WebLayerManager.getFrameRevision(layerId)}",
+                    source = frame,
+                    settings = chromaKey
+                )
+            }.getOrNull()
+        }
+        if (keyed != null && !keyed.isRecycled) {
+            keyedWebFrame = keyed
+        }
+    }
+
+    // Adaptive periodic frame refresh loop keeping live website animations/counters updating cleanly
+    // across Edit Layout, Crop, Interact Web, Done, and live preview without overloading low-end devices.
+    LaunchedEffect(layerId, validatedUrl, allowPageInteraction, lowEndDevice) {
+        val intervalMs = when {
+            allowPageInteraction -> if (lowEndDevice) 75L else 48L
+            lowEndDevice -> 125L
+            else -> 72L
+        }
         while (isActive) {
             val frame = WebLayerManager.captureLayerFrameOnMainThread(layerId)
-            val tv = glTextureViewHolder[0]
-            val renderer = glRendererHolder[0]
-            val renderedGl = if (glAvailable && renderer != null && tv != null && tv.isAttachedToWindow &&
-                tv.isAvailable && surfaceSizeHolder[0] > 0 && surfaceSizeHolder[1] > 0
-            ) {
-                renderer.renderBitmapFrame(
-                    bitmap = frame,
-                    viewportWidth = surfaceSizeHolder[0],
-                    viewportHeight = surfaceSizeHolder[1],
-                    cropLeft = latestCrop[0],
-                    cropTop = latestCrop[1],
-                    cropRight = latestCrop[2],
-                    cropBottom = latestCrop[3],
-                    opacity = latestOpacity[0],
-                    chroma = latestChroma[0]
-                )
-            } else {
-                false
+            if (frame != null && !frame.isRecycled) {
+                rawWebFrame = frame
+                frameTick++
             }
-            if (!renderedGl && frame != null && !frame.isRecycled) {
-                val ck = latestChroma[0]
-                softwareFrame = if (ck.enabled) {
-                    withContext(Dispatchers.Default) {
-                        runCatching { ChromaKeyProcessor.applyChromaKey(frame, ck) }.getOrDefault(frame)
-                    }
-                } else {
-                    frame
-                }
-            }
-            delay(50L)
-        }
-    }
-
-    // Release ONLY the GL preview TextureView surface on dispose — NEVER destroy the pooled WebView!
-    DisposableEffect(layerId) {
-        onDispose {
-            runCatching {
-                glRendererHolder[0]?.release()
-                glRendererHolder[0] = null
-                glTextureViewHolder[0] = null
-            }
+            delay(intervalMs)
         }
     }
 
     Box(modifier = modifier.testTag("studio_web_source_container")) {
+        // ONE SINGLE UNIFIED STAGE CANVAS LAYER across ALL modes (Edit Layout, Crop, Interact Web, Done, Preview).
+        // Non-destructive UV crop (`cropLeft`, `cropTop`, `cropRight`, `cropBottom`) is applied permanently on every draw.
+        val displayBmp = if (chromaKey.enabled && keyedWebFrame != null && !keyedWebFrame!!.isRecycled) {
+            keyedWebFrame
+        } else {
+            rawWebFrame
+        }
+        if (displayBmp != null && !displayBmp.isRecycled && displayBmp.width > 0 && displayBmp.height > 0) {
+            val imgBmp = remember(displayBmp, frameTick) { displayBmp.asImageBitmap() }
+            Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("studio_web_unified_canvas_$layerId")
+            ) {
+                val uv = GlChromaShaderSpec.computeCropUvBounds(cropLeft, cropTop, cropRight, cropBottom)
+                val srcL = (uv.uMin * imgBmp.width).toInt().coerceIn(0, imgBmp.width - 1)
+                val srcT = (uv.vMin * imgBmp.height).toInt().coerceIn(0, imgBmp.height - 1)
+                val srcW = ((uv.uMax - uv.uMin) * imgBmp.width).toInt().coerceIn(1, imgBmp.width - srcL)
+                val srcH = ((uv.vMax - uv.vMin) * imgBmp.height).toInt().coerceIn(1, imgBmp.height - srcT)
+                drawImage(
+                    image = imgBmp,
+                    srcOffset = androidx.compose.ui.unit.IntOffset(srcL, srcT),
+                    srcSize = androidx.compose.ui.unit.IntSize(srcW, srcH),
+                    dstSize = androidx.compose.ui.unit.IntSize(
+                        size.width.toInt().coerceAtLeast(1),
+                        size.height.toInt().coerceAtLeast(1)
+                    ),
+                    alpha = opacity.coerceIn(0f, 1f)
+                )
+            }
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x990B0D10)),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(
+                    color = ZroCobalt,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
+
         if (allowPageInteraction) {
-            // Interactive mode: attach the exact SAME pooled WebView (zero reload!) for scrolling/clicking
+            // Transparent touch proxy forwarding taps/scrolls into the exact cropped region of the fixed 1920x1080 WebView
+            // without ever resizing or switching layout!
             AndroidView(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("studio_web_touch_proxy_$layerId"),
                 factory = { ctx ->
-                    val pooled = WebLayerManager.obtainWebView(
-                        context = ctx,
-                        layerId = layerId,
-                        validatedUrl = validatedUrl,
-                        viewport = viewportPreset,
-                        reloadNonce = reloadNonce
-                    )
-                    if (pooled != null) {
-                        WebLayerManager.prepareForInteractiveAttachment(layerId)
-                    }
-                    android.widget.FrameLayout(ctx).apply {
+                    android.view.View(ctx).apply {
                         setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                        if (pooled != null) {
-                            pooled.isClickable = true
-                            pooled.isFocusable = true
-                            pooled.isFocusableInTouchMode = true
-                            pooled.isVerticalScrollBarEnabled = true
-                            pooled.isHorizontalScrollBarEnabled = true
-                            pooled.setOnTouchListener { v, event ->
-                                if (event.action == android.view.MotionEvent.ACTION_DOWN ||
-                                    event.action == android.view.MotionEvent.ACTION_MOVE
-                                ) {
-                                    v.parent?.requestDisallowInterceptTouchEvent(true)
-                                }
-                                false
+                        isClickable = true
+                        isFocusable = true
+                        setOnTouchListener { v, event ->
+                            if (event.action == android.view.MotionEvent.ACTION_DOWN ||
+                                event.action == android.view.MotionEvent.ACTION_MOVE
+                            ) {
+                                v.parent?.requestDisallowInterceptTouchEvent(true)
                             }
-                            addView(
-                                pooled,
-                                android.widget.FrameLayout.LayoutParams(
-                                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                                    android.view.ViewGroup.LayoutParams.MATCH_PARENT
-                                )
+                            WebLayerManager.dispatchMappedTouchEvent(
+                                layerId = layerId,
+                                event = event,
+                                viewWidth = v.width.toFloat(),
+                                viewHeight = v.height.toFloat(),
+                                cropLeft = latestCrop[0],
+                                cropTop = latestCrop[1],
+                                cropRight = latestCrop[2],
+                                cropBottom = latestCrop[3]
                             )
+                            true
                         }
-                    }
-                },
-                onRelease = { container ->
-                    // Return the exact same WebView back to the persistent visible host container (never detached or reloaded!)
-                    runCatching {
-                        container.removeAllViews()
-                        WebLayerManager.reattachToHostContainer(layerId)
                     }
                 }
             )
-        } else {
-            // Live OpenGL ES 2.0 GPU UV-Cropped + Chroma-Keyed TextureView surface (60fps, zero reflow!)
-            if (glAvailable) {
-                AndroidView(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .testTag("studio_web_gl_surface_$layerId"),
-                    factory = { ctx ->
-                        TextureView(ctx).apply {
-                            isOpaque = false
-                            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                                override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
-                                    surfaceSizeHolder[0] = w
-                                    surfaceSizeHolder[1] = h
-                                    val renderer = GlTextureSurfaceRenderer()
-                                    if (renderer.initialize(st)) {
-                                        glRendererHolder[0] = renderer
-                                        val frame = WebLayerManager.getLatestFrame(layerId)
-                                            ?: WebLayerManager.captureLayerFrameOnMainThread(layerId)
-                                        renderer.renderBitmapFrame(
-                                            bitmap = frame,
-                                            viewportWidth = w,
-                                            viewportHeight = h,
-                                            cropLeft = latestCrop[0],
-                                            cropTop = latestCrop[1],
-                                            cropRight = latestCrop[2],
-                                            cropBottom = latestCrop[3],
-                                            opacity = latestOpacity[0],
-                                            chroma = latestChroma[0]
-                                        )
-                                    } else {
-                                        glAvailable = false
-                                    }
-                                }
-
-                                override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {
-                                    surfaceSizeHolder[0] = w
-                                    surfaceSizeHolder[1] = h
-                                }
-
-                                override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
-                                    runCatching {
-                                        glRendererHolder[0]?.release()
-                                        glRendererHolder[0] = null
-                                    }
-                                    return true
-                                }
-
-                                override fun onSurfaceTextureUpdated(st: SurfaceTexture) = Unit
-                            }
-                            glTextureViewHolder[0] = this
-                        }
-                    }
-                )
-            }
-
-            // Software Compose Canvas fallback (zero bitmap cropping allocation; draws cropped srcRect directly)
-            val fallbackBmp = softwareFrame
-            if (!glAvailable && fallbackBmp != null && !fallbackBmp.isRecycled && fallbackBmp.width > 0 && fallbackBmp.height > 0) {
-                val imgBmp = remember(fallbackBmp) { fallbackBmp.asImageBitmap() }
-                Canvas(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .testTag("studio_web_canvas_fallback_$layerId")
-                ) {
-                    val uv = GlChromaShaderSpec.computeCropUvBounds(cropLeft, cropTop, cropRight, cropBottom)
-                    val srcL = (uv.uMin * imgBmp.width).toInt().coerceIn(0, imgBmp.width - 1)
-                    val srcT = (uv.vMin * imgBmp.height).toInt().coerceIn(0, imgBmp.height - 1)
-                    val srcW = ((uv.uMax - uv.uMin) * imgBmp.width).toInt().coerceIn(1, imgBmp.width - srcL)
-                    val srcH = ((uv.vMax - uv.vMin) * imgBmp.height).toInt().coerceIn(1, imgBmp.height - srcT)
-                    drawImage(
-                        image = imgBmp,
-                        srcOffset = androidx.compose.ui.unit.IntOffset(srcL, srcT),
-                        srcSize = androidx.compose.ui.unit.IntSize(srcW, srcH),
-                        dstSize = androidx.compose.ui.unit.IntSize(
-                            size.width.toInt().coerceAtLeast(1),
-                            size.height.toInt().coerceAtLeast(1)
-                        ),
-                        alpha = opacity.coerceIn(0f, 1f)
-                    )
-                }
-            }
-
+        } else if (interactiveEditing) {
             // Edit-mode touch shield so canvas drag/resize/crop handles receive every gesture cleanly
-            if (interactiveEditing) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .testTag("studio_web_source_edit_shield")
-                )
-            }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("studio_web_source_edit_shield")
+            )
         }
 
         if (runtimeState.isLoading) {

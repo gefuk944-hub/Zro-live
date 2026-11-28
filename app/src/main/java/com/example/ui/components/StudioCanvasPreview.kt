@@ -952,18 +952,19 @@ private fun EdgeCropHandle(
 ) {
     val latestDelta by rememberUpdatedState(onCropDelta)
     val latestEnd by rememberUpdatedState(onEnd)
+    val latestSpanPx by rememberUpdatedState(layerSpanPx)
 
     Box(
         modifier = modifier
             .size(width = if (isHorizontal) 34.dp else 22.dp, height = if (isHorizontal) 22.dp else 34.dp)
-            .pointerInput(edge, layerSpanPx) {
+            .pointerInput(edge) {
                 detectDragGestures(
                     onDragEnd = { latestEnd() },
                     onDragCancel = { latestEnd() },
                     onDrag = { change, dragAmount ->
                         change.consume()
                         val deltaPx = if (isHorizontal) dragAmount.y else dragAmount.x
-                        latestDelta(deltaPx / layerSpanPx.coerceAtLeast(1f))
+                        latestDelta(deltaPx / latestSpanPx.coerceAtLeast(1f))
                     }
                 )
             }
@@ -1379,12 +1380,24 @@ private fun LayerContentVisual(
         }
 
         LayerSourceType.SUBSCRIBER_COUNTER -> {
-            if (layer.subUseExternalWidget && layer.subWidgetUrl.startsWith("https://")) {
+            if (layer.subUseExternalWidget && layer.subWidgetUrl.isNotBlank()) {
                 StudioWebSourceView(
                     url = layer.subWidgetUrl,
                     reloadNonce = layer.webReloadNonce,
                     interactiveEditing = interactiveEditing,
                     allowPageInteraction = allowWebPageInteraction,
+                    layerId = layer.id,
+                    viewportPreset = layer.webViewportPreset,
+                    cropLeft = layer.cropLeft,
+                    cropTop = layer.cropTop,
+                    cropRight = layer.cropRight,
+                    cropBottom = layer.cropBottom,
+                    chromaKey = if (bypassGraphicAdjustment || !layer.graphicAdjustment.enabled) {
+                        com.example.studio.LayerChromaKeySettings.DEFAULT
+                    } else {
+                        layer.graphicAdjustment.chromaKey
+                    },
+                    opacity = if (bypassGraphicAdjustment) 1.0f else layer.opacity,
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
