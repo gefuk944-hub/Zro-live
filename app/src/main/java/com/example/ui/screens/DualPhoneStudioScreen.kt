@@ -1,11 +1,17 @@
 package com.example.ui.screens
 
 import android.graphics.Bitmap
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -85,7 +91,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
@@ -361,16 +370,14 @@ fun DualPhoneStudioScreen(
         ) {
             DualStudioSection.entries.forEach { sec ->
                 val selected = activeSection == sec
-                Surface(
+                RemoteTactileSurface(
+                    onClick = { activeSection = sec },
                     shape = RoundedCornerShape(6.dp),
                     color = if (selected) ZroCobalt.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceContainer,
-                    border = BorderStroke(
-                        1.dp,
-                        if (selected) ZroCobalt else MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)
-                    ),
+                    borderColor = if (selected) ZroCobalt else MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
+                    highlightBorderColor = ZroCobalt,
                     modifier = Modifier
                         .weight(1f)
-                        .clickable { activeSection = sec }
                         .testTag("dual_tab_${sec.name.lowercase()}")
                 ) {
                     Text(
@@ -493,11 +500,12 @@ fun DualPhoneStudioScreen(
                                     horizontalArrangement = Arrangement.spacedBy(5.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Surface(
+                                    RemoteTactileSurface(
                                         onClick = onOpenSceneEditor,
                                         shape = RoundedCornerShape(6.dp),
                                         color = ZroCobalt.copy(alpha = 0.24f),
-                                        border = BorderStroke(1.dp, ZroCobalt),
+                                        borderColor = ZroCobalt,
+                                        highlightBorderColor = Color.White,
                                         modifier = Modifier.testTag("remote_layers_btn")
                                     ) {
                                         Row(
@@ -520,11 +528,12 @@ fun DualPhoneStudioScreen(
                                             )
                                         }
                                     }
-                                    Surface(
+                                    RemoteTactileSurface(
                                         onClick = onOpenFullScreenPreview,
                                         shape = RoundedCornerShape(6.dp),
                                         color = MaterialTheme.colorScheme.surfaceContainer,
-                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.65f)),
+                                        borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.65f),
+                                        highlightBorderColor = ZroCobalt,
                                         modifier = Modifier.testTag("remote_fullscreen_preview_btn")
                                     ) {
                                         Row(
@@ -541,11 +550,12 @@ fun DualPhoneStudioScreen(
                                             Text("16:9", fontSize = 9.sp, lineHeight = 12.sp, color = Color.White)
                                         }
                                     }
-                                    Surface(
+                                    RemoteTactileSurface(
                                         onClick = onOpenCameraSettings,
                                         shape = RoundedCornerShape(6.dp),
                                         color = MaterialTheme.colorScheme.surfaceContainer,
-                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.65f))
+                                        borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.65f),
+                                        highlightBorderColor = ZroCobalt
                                     ) {
                                         Text(
                                             text = "Cam",
@@ -566,18 +576,16 @@ fun DualPhoneStudioScreen(
                                 SceneSlot.entries.forEach { slot ->
                                     val selected = workspace.activeSceneSlot == slot
                                     val sceneName = workspace.scenes[slot]?.name ?: slot.defaultName
-                                    Surface(
+                                    RemoteTactileSurface(
+                                        onClick = {
+                                            onDispatchRemote(DualRemoteCommand(DualPhoneProtocol.CMD_SWITCH_SCENE, stringArg = slot.name))
+                                        },
                                         shape = RoundedCornerShape(5.dp),
                                         color = if (selected) ZroCobalt.copy(alpha = 0.24f) else MaterialTheme.colorScheme.surfaceContainer,
-                                        border = BorderStroke(
-                                            1.dp,
-                                            if (selected) ZroCobalt else MaterialTheme.colorScheme.outline.copy(alpha = 0.55f)
-                                        ),
+                                        borderColor = if (selected) ZroCobalt else MaterialTheme.colorScheme.outline.copy(alpha = 0.55f),
+                                        highlightBorderColor = Color.White,
                                         modifier = Modifier
                                             .weight(1f)
-                                            .clickable {
-                                                onDispatchRemote(DualRemoteCommand(DualPhoneProtocol.CMD_SWITCH_SCENE, stringArg = slot.name))
-                                            }
                                             .testTag("remote_preview_scene_${slot.name.lowercase()}")
                                     ) {
                                         Text(
@@ -625,17 +633,16 @@ fun DualPhoneStudioScreen(
                                 horizontalArrangement = Arrangement.spacedBy(5.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .testTag("remote_edit_layers_toggle")
-                                        .background(
-                                            if (editLayersInRemote) ZroCobalt.copy(alpha = 0.24f) else MaterialTheme.colorScheme.surfaceContainer,
-                                            RoundedCornerShape(5.dp)
-                                        )
-                                        .clickable { editLayersInRemote = !editLayersInRemote }
-                                        .padding(horizontal = 7.dp, vertical = 4.dp)
+                                RemoteTactileSurface(
+                                    onClick = { editLayersInRemote = !editLayersInRemote },
+                                    shape = RoundedCornerShape(5.dp),
+                                    color = if (editLayersInRemote) ZroCobalt.copy(alpha = 0.24f) else MaterialTheme.colorScheme.surfaceContainer,
+                                    borderColor = if (editLayersInRemote) ZroCobalt.copy(alpha = 0.7f) else MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+                                    highlightBorderColor = ZroCobalt,
+                                    modifier = Modifier.testTag("remote_edit_layers_toggle")
                                 ) {
                                     Row(
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(3.dp)
                                     ) {
@@ -643,17 +650,16 @@ fun DualPhoneStudioScreen(
                                         Text(if (editLayersInRemote) "Edit: ON" else "Edit: OFF", fontSize = 9.sp, lineHeight = 12.sp, color = Color.White)
                                     }
                                 }
-                                Box(
-                                    modifier = Modifier
-                                        .testTag("remote_crop_mode_toggle")
-                                        .background(
-                                            if (cropModeInRemote && editLayersInRemote) ZroAmber.copy(alpha = 0.24f) else MaterialTheme.colorScheme.surfaceContainer,
-                                            RoundedCornerShape(5.dp)
-                                        )
-                                        .clickable { if (editLayersInRemote) cropModeInRemote = !cropModeInRemote }
-                                        .padding(horizontal = 7.dp, vertical = 4.dp)
+                                RemoteTactileSurface(
+                                    onClick = { if (editLayersInRemote) cropModeInRemote = !cropModeInRemote },
+                                    shape = RoundedCornerShape(5.dp),
+                                    color = if (cropModeInRemote && editLayersInRemote) ZroAmber.copy(alpha = 0.24f) else MaterialTheme.colorScheme.surfaceContainer,
+                                    borderColor = if (cropModeInRemote && editLayersInRemote) ZroAmber.copy(alpha = 0.7f) else MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+                                    highlightBorderColor = ZroAmber,
+                                    modifier = Modifier.testTag("remote_crop_mode_toggle")
                                 ) {
                                     Row(
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(3.dp)
                                     ) {
@@ -661,15 +667,18 @@ fun DualPhoneStudioScreen(
                                         Text(if (cropModeInRemote) "Crop ON" else "Crop", fontSize = 9.sp, lineHeight = 12.sp, color = Color.White)
                                     }
                                 }
-                                Box(
+                                RemoteTactileSurface(
+                                    onClick = { showRenameCaptureDialog = true },
+                                    shape = RoundedCornerShape(5.dp),
+                                    color = MaterialTheme.colorScheme.surfaceContainer,
+                                    borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+                                    highlightBorderColor = ZroCobalt,
                                     modifier = Modifier
                                         .testTag("remote_rename_capture_btn")
                                         .widthIn(max = 126.dp)
-                                        .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(5.dp))
-                                        .clickable { showRenameCaptureDialog = true }
-                                        .padding(horizontal = 7.dp, vertical = 4.dp)
                                 ) {
                                     Row(
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(3.dp)
                                     ) {
@@ -704,45 +713,57 @@ fun DualPhoneStudioScreen(
                                             modifier = Modifier.weight(1f)
                                         )
                                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                            Box(
+                                            RemoteTactileSurface(
+                                                onClick = { renameTargetLayer = selectedLayer },
+                                                shape = RoundedCornerShape(4.dp),
+                                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                                borderColor = Color.Transparent,
+                                                highlightBorderColor = ZroCobalt,
                                                 modifier = Modifier
                                                     .size(24.dp)
-                                                    .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(4.dp))
-                                                    .clickable { renameTargetLayer = selectedLayer }
-                                                    .testTag("remote_rename_selected_layer_btn"),
-                                                contentAlignment = Alignment.Center
+                                                    .testTag("remote_rename_selected_layer_btn")
                                             ) {
-                                                Icon(Icons.Rounded.Edit, contentDescription = "Rename selected layer", tint = Color.White, modifier = Modifier.size(13.dp))
+                                                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                                                    Icon(Icons.Rounded.Edit, contentDescription = "Rename selected layer", tint = Color.White, modifier = Modifier.size(13.dp))
+                                                }
                                             }
-                                            Box(
+                                            RemoteTactileSurface(
+                                                onClick = { onToggleLayerVisibility(selectedLayer.id) },
+                                                shape = RoundedCornerShape(4.dp),
+                                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                                borderColor = Color.Transparent,
+                                                highlightBorderColor = ZroEmerald,
                                                 modifier = Modifier
                                                     .size(24.dp)
-                                                    .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(4.dp))
-                                                    .clickable { onToggleLayerVisibility(selectedLayer.id) }
-                                                    .testTag("remote_vis_selected_layer_btn"),
-                                                contentAlignment = Alignment.Center
+                                                    .testTag("remote_vis_selected_layer_btn")
                                             ) {
-                                                Icon(
-                                                    if (selectedLayer.visible) Icons.Rounded.Visibility else Icons.Rounded.VisibilityOff,
-                                                    contentDescription = "Toggle visibility",
-                                                    tint = if (selectedLayer.visible) ZroEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    modifier = Modifier.size(13.dp)
-                                                )
+                                                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                                                    Icon(
+                                                        if (selectedLayer.visible) Icons.Rounded.Visibility else Icons.Rounded.VisibilityOff,
+                                                        contentDescription = "Toggle visibility",
+                                                        tint = if (selectedLayer.visible) ZroEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        modifier = Modifier.size(13.dp)
+                                                    )
+                                                }
                                             }
-                                            Box(
+                                            RemoteTactileSurface(
+                                                onClick = { onToggleLayerLock(selectedLayer.id) },
+                                                shape = RoundedCornerShape(4.dp),
+                                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                                borderColor = Color.Transparent,
+                                                highlightBorderColor = ZroAmber,
                                                 modifier = Modifier
                                                     .size(24.dp)
-                                                    .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(4.dp))
-                                                    .clickable { onToggleLayerLock(selectedLayer.id) }
-                                                    .testTag("remote_lock_selected_layer_btn"),
-                                                contentAlignment = Alignment.Center
+                                                    .testTag("remote_lock_selected_layer_btn")
                                             ) {
-                                                Icon(
-                                                    if (selectedLayer.locked) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
-                                                    contentDescription = "Toggle lock",
-                                                    tint = if (selectedLayer.locked) ZroAmber else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    modifier = Modifier.size(13.dp)
-                                                )
+                                                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                                                    Icon(
+                                                        if (selectedLayer.locked) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
+                                                        contentDescription = "Toggle lock",
+                                                        tint = if (selectedLayer.locked) ZroAmber else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        modifier = Modifier.size(13.dp)
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -759,28 +780,36 @@ fun DualPhoneStudioScreen(
                         trailing = {
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 if (editDeckMode) {
-                                    Box(
-                                        modifier = Modifier
-                                            .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(6.dp))
-                                            .clickable(onClick = onResetRemoteDeck)
-                                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                                            .testTag("remote_deck_reset_btn")
+                                    RemoteTactileSurface(
+                                        onClick = onResetRemoteDeck,
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = MaterialTheme.colorScheme.surfaceContainer,
+                                        borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f),
+                                        highlightBorderColor = ZroCobalt,
+                                        modifier = Modifier.testTag("remote_deck_reset_btn")
                                     ) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
                                             Icon(Icons.Rounded.RestartAlt, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
                                             Spacer(modifier = Modifier.width(3.dp))
                                             Text("Default", fontSize = 10.sp, color = Color.White)
                                         }
                                     }
                                 }
-                                Box(
-                                    modifier = Modifier
-                                        .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(6.dp))
-                                        .clickable { editDeckMode = !editDeckMode }
-                                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                                        .testTag("remote_deck_customize_btn")
+                                RemoteTactileSurface(
+                                    onClick = { editDeckMode = !editDeckMode },
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.surfaceContainer,
+                                    borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f),
+                                    highlightBorderColor = ZroCobalt,
+                                    modifier = Modifier.testTag("remote_deck_customize_btn")
                                 ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
                                         Icon(Icons.Rounded.Tune, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
                                         Spacer(modifier = Modifier.width(3.dp))
                                         Text(if (editDeckMode) "Done" else "Customize", fontSize = 10.sp, color = Color.White)
@@ -983,11 +1012,12 @@ fun DualPhoneStudioScreen(
 
                         Spacer(modifier = Modifier.height(4.dp))
                         val teamLive = audioSettings.teamVoiceToLive
-                        Surface(
+                        RemoteTactileSurface(
                             onClick = onToggleTeamVoiceToLive,
                             shape = RoundedCornerShape(6.dp),
                             color = if (teamLive) ZroEmerald.copy(alpha = 0.16f) else ZroAmber.copy(alpha = 0.14f),
-                            border = BorderStroke(1.dp, if (teamLive) ZroEmerald else ZroAmber),
+                            borderColor = if (teamLive) ZroEmerald else ZroAmber,
+                            highlightBorderColor = Color.White,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("remote_team_voice_mute_btn")
@@ -1552,12 +1582,39 @@ private fun RemoteDeckButton(
         else -> tileId.shortLabel
     }
 
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed && !editMode) 0.96f else 1f,
+        animationSpec = tween(durationMillis = 75),
+        label = "remote_deck_press_scale"
+    )
+    val effectiveBgColor = if (isPressed && !editMode) {
+        Color.White.copy(alpha = 0.16f).compositeOver(bgColor)
+    } else {
+        bgColor
+    }
+    val effectiveBorderColor = if (isPressed && !editMode) {
+        if (semanticColor == MaterialTheme.colorScheme.onSurface || semanticColor == MaterialTheme.colorScheme.onSurfaceVariant) {
+            ZroCobalt
+        } else {
+            Color.White.copy(alpha = 0.92f)
+        }
+    } else {
+        borderColor
+    }
+
     Surface(
         onClick = { if (!editMode) onClick() },
+        interactionSource = interactionSource,
         shape = RoundedCornerShape(8.dp),
-        color = bgColor,
-        border = BorderStroke(1.dp, borderColor),
+        color = effectiveBgColor,
+        border = BorderStroke(1.dp, effectiveBorderColor),
         modifier = modifier
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            }
             .height(if (editMode) 82.dp else 64.dp)
             .testTag("remote_tile_${tileId.name.lowercase()}")
     ) {
@@ -1604,4 +1661,48 @@ private fun RemoteDeckButton(
             }
         }
     }
+}
+
+/**
+ * Tactile studio button wrapper preserving exact layout/dimensions while adding:
+ * - 0.96f smooth press-down scale animation
+ * - 1dp bright active border flash + brief surface brighten on touch down
+ * - Clean Material ripple effect via Surface interactionSource
+ */
+@Composable
+private fun RemoteTactileSurface(
+    onClick: () -> Unit,
+    shape: Shape,
+    color: Color,
+    borderColor: Color,
+    highlightBorderColor: Color = ZroCobalt,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed) 0.96f else 1f,
+        animationSpec = tween(durationMillis = 75),
+        label = "remote_tactile_scale"
+    )
+    val effectiveColor = if (isPressed) {
+        Color.White.copy(alpha = 0.14f).compositeOver(color)
+    } else {
+        color
+    }
+    val effectiveBorder = if (isPressed) highlightBorderColor else borderColor
+
+    Surface(
+        onClick = onClick,
+        interactionSource = interactionSource,
+        shape = shape,
+        color = effectiveColor,
+        border = BorderStroke(1.dp, effectiveBorder),
+        modifier = modifier.graphicsLayer {
+            scaleX = pressScale
+            scaleY = pressScale
+        },
+        content = content
+    )
 }

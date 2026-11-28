@@ -433,7 +433,7 @@ class StreamingLayerChromaVerificationTest {
         assertTrue(LayerSourceType.VIDEO_OVERLAY.supportsChromaKey())
         assertTrue(LayerSourceType.WEBCAM.supportsChromaKey())
         assertFalse(LayerSourceType.TEXT.supportsChromaKey())
-        assertFalse(LayerSourceType.BROWSER_WEB.supportsChromaKey())
+        assertTrue(LayerSourceType.BROWSER_WEB.supportsChromaKey())
     }
 
     // --- 7. PERSISTENCE ROUND-TRIP ACROSS RESTARTS ---

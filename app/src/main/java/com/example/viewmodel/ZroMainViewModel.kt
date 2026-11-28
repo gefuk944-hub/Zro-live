@@ -73,6 +73,7 @@ import com.example.studio.SceneTransitionType
 import com.example.studio.StudioMediaStore
 import com.example.studio.StudioWorkspaceReducer
 import com.example.studio.StudioWorkspaceState
+import com.example.studio.WebLayerManager
 import com.example.telemetry.ActiveLiveSessionSnapshot
 import com.example.telemetry.AppConnectivitySnapshot
 import com.example.telemetry.ConnectivityStatusMonitor
@@ -1612,7 +1613,7 @@ class ZroMainViewModel(
         ZroStreamCoordinator.updateStudioWorkspace(newState)
         if (persist) {
             val mode = activeBroadcastMode()
-            viewModelScope.launch { settingsStore.saveStudioWorkspace(newState, mode) }
+            viewModelScope.launch(Dispatchers.IO) { settingsStore.saveStudioWorkspace(newState, mode) }
         }
     }
 
@@ -1624,7 +1625,7 @@ class ZroMainViewModel(
         _studioState.value = prev
         ZroStreamCoordinator.updateStudioWorkspace(prev)
         val mode = activeBroadcastMode()
-        viewModelScope.launch { settingsStore.saveStudioWorkspace(prev, mode) }
+        viewModelScope.launch(Dispatchers.IO) { settingsStore.saveStudioWorkspace(prev, mode) }
         showMessage("Undid last Studio change")
     }
 
@@ -2087,7 +2088,7 @@ class ZroMainViewModel(
         dragSnapshotPushed = false
         val snapshot = _studioState.value
         val mode = activeBroadcastMode()
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             settingsStore.saveStudioWorkspace(snapshot, mode)
             if (snapshot.autoRestoreLastLayout) {
                 settingsStore.saveAuthorizedDeviceLayout(snapshot, mode)
@@ -2273,6 +2274,9 @@ class ZroMainViewModel(
         }
         val next = StudioWorkspaceReducer.deleteLayer(cur, layerId)
         commitStudioState(next)
+        if (target?.type == LayerSourceType.BROWSER_WEB) {
+            WebLayerManager.releaseLayer(layerId)
+        }
         val removedUri = target?.mediaUri
         if (!removedUri.isNullOrBlank()) {
             val stillReferenced = next.scenes.values.any { scene ->

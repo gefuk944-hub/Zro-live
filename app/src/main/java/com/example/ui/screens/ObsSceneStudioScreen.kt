@@ -108,6 +108,7 @@ import com.example.studio.SceneLayer
 import com.example.studio.SceneSlot
 import com.example.studio.SceneTransitionType
 import com.example.studio.StudioWorkspaceState
+import com.example.studio.WebViewportPreset
 import androidx.compose.material.icons.rounded.Refresh
 import com.example.ui.components.BrowserUrlValidator
 import com.example.ui.components.GlassCard
@@ -645,6 +646,79 @@ fun ObsSceneStudioScreen(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
+                    // Quick Resize | Crop segmented toggle pill
+                    Surface(
+                        shape = RoundedCornerShape(5.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .background(
+                                        if (!cropModeActive) ZroCobalt.copy(alpha = 0.34f) else Color.Transparent,
+                                        RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp)
+                                    )
+                                    .clickable {
+                                        cropModeActive = false
+                                        webInteractLayerId = null
+                                    }
+                                    .padding(horizontal = 6.dp, vertical = 3.dp)
+                                    .testTag("studio_mode_pill_resize")
+                            ) {
+                                Text(
+                                    text = "Resize",
+                                    fontSize = 9.sp,
+                                    fontWeight = if (!cropModeActive) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (!cropModeActive) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .background(
+                                        if (cropModeActive) ZroAmber.copy(alpha = 0.34f) else Color.Transparent,
+                                        RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)
+                                    )
+                                    .clickable {
+                                        cropModeActive = true
+                                        webInteractLayerId = null
+                                    }
+                                    .padding(horizontal = 6.dp, vertical = 3.dp)
+                                    .testTag("studio_mode_pill_crop")
+                            ) {
+                                Text(
+                                    text = "Crop",
+                                    fontSize = 9.sp,
+                                    fontWeight = if (cropModeActive) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (cropModeActive) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                    if (selectedLayer.type.supportsChromaKey()) {
+                        val chromaOn = selectedLayer.graphicAdjustment.chromaKey.enabled
+                        Surface(
+                            onClick = {
+                                dockTab = StudioDockTab.GRAPHICS
+                                graphicCategory = GraphicCategoryTab.CHROMA_KEY
+                            },
+                            shape = RoundedCornerShape(5.dp),
+                            color = if (chromaOn) ZroEmerald.copy(alpha = 0.24f) else MaterialTheme.colorScheme.surfaceContainer,
+                            border = BorderStroke(
+                                1.dp,
+                                if (chromaOn) ZroEmerald else MaterialTheme.colorScheme.outline.copy(alpha = 0.7f)
+                            ),
+                            modifier = Modifier.testTag("studio_quick_chroma_btn")
+                        ) {
+                            Text(
+                                text = if (chromaOn) "Key ON" else "Chroma",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (chromaOn) ZroEmerald else Color.White,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
                     if (selectedLayer.type == LayerSourceType.BROWSER_WEB) {
                         Surface(
                             onClick = {
@@ -1605,7 +1679,7 @@ fun ObsSceneStudioScreen(
                                             label = "Crop Left",
                                             valueText = "${(selectedLayer.cropLeft * 100).toInt()}%",
                                             value = selectedLayer.cropLeft,
-                                            range = 0f..0.80f,
+                                            range = 0f..0.95f,
                                             onChange = { v -> onSetLayerCropLive(selectedLayer.id, v, null, null, null) },
                                             onChangeFinished = onDragFinished,
                                             sliderModifier = Modifier.testTag("crop_slider_left")
@@ -1614,7 +1688,7 @@ fun ObsSceneStudioScreen(
                                             label = "Crop Right",
                                             valueText = "${(selectedLayer.cropRight * 100).toInt()}%",
                                             value = selectedLayer.cropRight,
-                                            range = 0f..0.80f,
+                                            range = 0f..0.95f,
                                             onChange = { v -> onSetLayerCropLive(selectedLayer.id, null, null, v, null) },
                                             onChangeFinished = onDragFinished,
                                             sliderModifier = Modifier.testTag("crop_slider_right")
@@ -1623,7 +1697,7 @@ fun ObsSceneStudioScreen(
                                             label = "Crop Top",
                                             valueText = "${(selectedLayer.cropTop * 100).toInt()}%",
                                             value = selectedLayer.cropTop,
-                                            range = 0f..0.80f,
+                                            range = 0f..0.95f,
                                             onChange = { v -> onSetLayerCropLive(selectedLayer.id, null, v, null, null) },
                                             onChangeFinished = onDragFinished,
                                             sliderModifier = Modifier.testTag("crop_slider_top")
@@ -1632,7 +1706,7 @@ fun ObsSceneStudioScreen(
                                             label = "Crop Bottom",
                                             valueText = "${(selectedLayer.cropBottom * 100).toInt()}%",
                                             value = selectedLayer.cropBottom,
-                                            range = 0f..0.80f,
+                                            range = 0f..0.95f,
                                             onChange = { v -> onSetLayerCropLive(selectedLayer.id, null, null, null, v) },
                                             onChangeFinished = onDragFinished,
                                             sliderModifier = Modifier.testTag("crop_slider_bottom")
@@ -1858,6 +1932,35 @@ fun ObsSceneStudioScreen(
                                                         fontSize = 11.sp,
                                                         color = Color.White
                                                     )
+                                                }
+                                                Text(
+                                                    text = "Fixed Virtual Viewport (${selectedLayer.webViewportPreset.widthPx}×${selectedLayer.webViewportPreset.heightPx}) — zero reflow on crop",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
+                                                    WebViewportPreset.entries.forEach { preset ->
+                                                        val isSelected = selectedLayer.webViewportPreset == preset
+                                                        FilterChip(
+                                                            selected = isSelected,
+                                                            onClick = {
+                                                                onUpdateLayerProps(selectedLayer.id) {
+                                                                    it.copy(webViewportPreset = preset)
+                                                                }
+                                                            },
+                                                            label = { Text(preset.label, fontSize = 10.sp, maxLines = 1) },
+                                                            colors = FilterChipDefaults.filterChipColors(
+                                                                selectedContainerColor = ZroCobalt.copy(alpha = 0.25f),
+                                                                selectedLabelColor = Color.White
+                                                            ),
+                                                            modifier = Modifier
+                                                                .weight(1f)
+                                                                .testTag("web_viewport_${preset.name.lowercase()}")
+                                                        )
+                                                    }
                                                 }
                                             }
                                         }

@@ -4,6 +4,9 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import com.example.streaming.RtmpPublisher
+import com.example.streaming.ZroStreamCoordinator
+import com.example.studio.StudioPersistence
+import com.example.studio.StudioWorkspaceState
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -183,6 +186,7 @@ data class CrashLogEntry(
 object CrashRecoveryStore {
     private const val TAG = "CrashRecoveryStore"
     private const val LOG_FILE_NAME = "zro_crash_logs.json"
+    private const val WORKSPACE_BACKUP_FILE = "zro_crash_workspace_backup.json"
     private const val MAX_LOGS = 25
 
     private val handlerInstalled = AtomicBoolean(false)
@@ -201,6 +205,10 @@ object CrashRecoveryStore {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             runCatching {
+                // Synchronously persist the active studio workspace before delegating so user layers/crops/URLs are never lost.
+                saveEmergencyWorkspaceBackup(appCtx, ZroStreamCoordinator.activeStudioWorkspace.value)
+            }
+            runCatching {
                 recordEvent(
                     context = appCtx,
                     category = "CRASH",
@@ -209,6 +217,33 @@ object CrashRecoveryStore {
                 )
             }
             previous?.uncaughtException(thread, throwable)
+        }
+    }
+
+    fun saveEmergencyWorkspaceBackup(context: Context, workspace: StudioWorkspaceState): Boolean = synchronized(fileLock) {
+        runCatching {
+            val serialized = StudioPersistence.serializeWorkspace(workspace)
+            File(context.filesDir, WORKSPACE_BACKUP_FILE).writeText(serialized)
+            true
+        }.getOrElse { e ->
+            Log.w(TAG, "Unable to persist emergency workspace backup: ${e.message}")
+            false
+        }
+    }
+
+    fun readEmergencyWorkspaceBackup(context: Context): StudioWorkspaceState? = synchronized(fileLock) {
+        val file = File(context.filesDir, WORKSPACE_BACKUP_FILE)
+        if (!file.exists()) return null
+        return runCatching {
+            val raw = file.readText()
+            if (raw.isBlank()) null else StudioPersistence.deserializeWorkspace(raw)
+        }.getOrNull()
+    }
+
+    fun clearEmergencyWorkspaceBackup(context: Context) = synchronized(fileLock) {
+        runCatching {
+            val file = File(context.filesDir, WORKSPACE_BACKUP_FILE)
+            if (file.exists()) file.delete()
         }
     }
 

@@ -65,16 +65,21 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.ImageLoader
 import coil.compose.SubcomposeAsyncImage
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
 import coil.request.ImageRequest
+import com.example.streaming.GlChromaShaderSpec
+import com.example.streaming.GlTextureSurfaceRenderer
 import com.example.studio.ChromaKeyProcessor
 import com.example.studio.LayerChromaKeySettings
 import com.example.studio.LayerScaleMode
 import com.example.studio.SceneLayer
 import com.example.studio.StudioMediaStore
+import com.example.studio.WebLayerManager
+import com.example.studio.WebViewportPreset
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.ZroAmber
 import com.example.ui.theme.ZroCobalt
@@ -275,17 +280,19 @@ fun StudioVideoLayerView(
         }
         while (isActive) {
             val tv = textureViewRef
-            if (tv != null && tv.isAvailable && tv.width > 0 && tv.height > 0) {
+            if (tv != null && tv.isAttachedToWindow && tv.isAvailable && tv.width > 0 && tv.height > 0) {
                 val sampleW = tv.width.coerceIn(160, 480)
                 val sampleH = tv.height.coerceIn(90, 360)
                 val frame = runCatching { tv.getBitmap(sampleW, sampleH) }.getOrNull()
                 if (frame != null) {
                     val keyed = withContext(Dispatchers.Default) {
-                        val out = ChromaKeyProcessor.applyChromaKey(frame, chroma)
-                        frame.recycle()
+                        val out = runCatching { ChromaKeyProcessor.applyChromaKey(frame, chroma) }.getOrNull()
+                        if (!frame.isRecycled) frame.recycle()
                         out
                     }
-                    keyedVideoFrame = keyed
+                    if (keyed != null) {
+                        keyedVideoFrame = keyed
+                    }
                 }
             }
             delay(66L) // ~15 FPS smooth preview without bogging down encoder
@@ -526,12 +533,17 @@ fun CameraXChromaFacecamView(
 }
 
 /**
- * Real OBS-style Browser / Website source rendered cleanly inside the Studio canvas:
- * - Validates HTTPS/HTTP schemes and rejects dangerous schemes & SSL errors
- * - Fits webpage cleanly into canvas bounds with useWideViewPort + loadWithOverviewMode
- * - Live loading progress bar, clear error state, reload trigger via reloadNonce
- * - Non-blocking touch handling when editing in Studio canvas so drag/resize stay smooth
- * - Full WebView teardown on dispose
+ * Persistent, Fixed-Viewport OBS-Style Browser / Website Source with 60fps Non-Destructive
+ * GPU UV Cropping (`uCropRect`) and Real-Time OpenGL ES Chroma Key Shader support.
+ *
+ * - Retains active WebView instances in [WebLayerManager] across tab switches, settings navigation,
+ *   UI refreshes, app minimize, and background streaming — ZERO accidental reloads!
+ * - Renders WebView at its fixed virtual canvas preset (`1920x1080`, `1280x720`, or `800x800`) and
+ *   NEVER resizes internal WebView layout during crop drags, eliminating vertical page reflow.
+ * - Drives [GlTextureSurfaceRenderer] (`uCropRect` + `uChromaEnabled` + `uKeyColor` + `uSimilarity`
+ *   + `uSmoothness` + `uSpillReduction`) for live preview, with an automatic Compose Canvas fallback
+ *   when hardware GL is unavailable.
+ * - Seamlessly attaches the exact same pooled WebView when [allowPageInteraction] is toggled ON.
  */
 @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
 @Composable
@@ -540,33 +552,43 @@ fun StudioWebSourceView(
     reloadNonce: Int = 0,
     interactiveEditing: Boolean = true,
     allowPageInteraction: Boolean = false,
+    layerId: String = "web_inline_${url.hashCode()}",
+    viewportPreset: WebViewportPreset = WebViewportPreset.P1080,
+    cropLeft: Float = 0f,
+    cropTop: Float = 0f,
+    cropRight: Float = 0f,
+    cropBottom: Float = 0f,
+    chromaKey: LayerChromaKeySettings = LayerChromaKeySettings.DEFAULT,
+    opacity: Float = 1.0f,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val validatedUrl = remember(url) { BrowserUrlValidator.normalizeAndValidate(url) }
-    var loadProgress by remember(validatedUrl, reloadNonce) { mutableIntStateOf(0) }
-    var isLoading by remember(validatedUrl, reloadNonce) { mutableStateOf(validatedUrl != null) }
-    var errorText by remember(validatedUrl, reloadNonce) { mutableStateOf<String?>(null) }
-    val webViewHolder = remember { arrayOfNulls<WebView>(1) }
-    var lastLoadedUrl by remember { mutableStateOf<String?>(null) }
-    var lastReloadNonce by remember { mutableIntStateOf(-1) }
+    val runtimeState by remember(layerId) {
+        WebLayerManager.observeLayerState(layerId)
+    }.collectAsStateWithLifecycle()
 
-    DisposableEffect(Unit) {
-        onDispose {
-            runCatching {
-                webViewHolder[0]?.stopLoading()
-                webViewHolder[0]?.loadUrl("about:blank")
-                webViewHolder[0]?.clearHistory()
-                webViewHolder[0]?.removeAllViews()
-                webViewHolder[0]?.destroy()
-                webViewHolder[0] = null
-            }
-        }
-    }
+    var glAvailable by remember(layerId) { mutableStateOf(true) }
+    var softwareFrame by remember(layerId) { mutableStateOf<Bitmap?>(null) }
+    val glRendererHolder = remember(layerId) { arrayOfNulls<GlTextureSurfaceRenderer>(1) }
+    val surfaceSizeHolder = remember(layerId) { intArrayOf(0, 0) }
+    val glTextureViewHolder = remember(layerId) { arrayOfNulls<TextureView>(1) }
+
+    // Keep latest crop/chroma parameters available inside frame refresh loop without restarting effects
+    val latestCrop = remember { FloatArray(4) }
+    latestCrop[0] = cropLeft
+    latestCrop[1] = cropTop
+    latestCrop[2] = cropRight
+    latestCrop[3] = cropBottom
+    val latestChroma = remember { arrayOf(chromaKey) }
+    latestChroma[0] = chromaKey
+    val latestOpacity = remember { floatArrayOf(opacity) }
+    latestOpacity[0] = opacity
 
     if (validatedUrl == null) {
         Box(
             modifier = modifier
-                .background(Color(0xCC0D1017))
+                .background(Color(0xCC0B0D10))
                 .padding(8.dp),
             contentAlignment = Alignment.Center
         ) {
@@ -590,148 +612,249 @@ fun StudioWebSourceView(
         return
     }
 
-    Box(modifier = modifier.testTag("studio_web_source_container")) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                WebView(ctx).apply {
-                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    isClickable = allowPageInteraction
-                    isFocusable = allowPageInteraction
-                    isFocusableInTouchMode = allowPageInteraction
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.useWideViewPort = true
-                    settings.loadWithOverviewMode = true
-                    settings.mediaPlaybackRequiresUserGesture = false
-                    settings.allowFileAccess = false
-                    settings.allowContentAccess = false
-                    settings.setSupportZoom(true)
-                    settings.builtInZoomControls = true
-                    settings.displayZoomControls = false
-                    isVerticalScrollBarEnabled = allowPageInteraction
-                    isHorizontalScrollBarEnabled = allowPageInteraction
-                    runCatching {
-                        android.webkit.CookieManager.getInstance().setAcceptCookie(true)
-                    }
+    // Acquire or update the pooled fixed-viewport WebView (never reloads unless URL or reloadNonce changed!)
+    LaunchedEffect(layerId, validatedUrl, viewportPreset, reloadNonce) {
+        WebLayerManager.obtainWebView(
+            context = context,
+            layerId = layerId,
+            validatedUrl = validatedUrl,
+            viewport = viewportPreset,
+            reloadNonce = reloadNonce
+        )
+    }
 
-                    // In Interact Mode: let user click, scroll, and interact directly inside the webpage
-                    // (preventing parent LazyColumn from stealing vertical scroll).
-                    // In Layout Edit Mode: never consume touch events so Compose drag/resize/crop handles work.
-                    setOnTouchListener { v, event ->
-                        if (allowPageInteraction) {
-                            if (event.action == android.view.MotionEvent.ACTION_DOWN ||
-                                event.action == android.view.MotionEvent.ACTION_MOVE
-                            ) {
-                                v.parent?.requestDisallowInterceptTouchEvent(true)
-                            }
-                            false
-                        } else {
-                            false
-                        }
-                    }
-
-                    webChromeClient = object : WebChromeClient() {
-                        override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                            loadProgress = newProgress
-                            isLoading = newProgress in 1..99
-                        }
-                    }
-
-                    webViewClient = object : WebViewClient() {
-                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                            val scheme = request?.url?.scheme?.lowercase()
-                            return scheme != "https" && scheme != "http"
-                        }
-
-                        override fun onPageFinished(view: WebView?, loadedUrl: String?) {
-                            isLoading = false
-                            loadProgress = 100
-                        }
-
-                        override fun onReceivedError(
-                            view: WebView?,
-                            request: WebResourceRequest?,
-                            error: WebResourceError?
-                        ) {
-                            if (request?.isForMainFrame == true) {
-                                isLoading = false
-                                val desc = error?.description?.toString().orEmpty()
-                                errorText = when {
-                                    desc.contains("CLEARTEXT", ignoreCase = true) ->
-                                        "Insecure HTTP blocked. Change URL to https://"
-                                    desc.isNotBlank() -> desc
-                                    else -> "Unable to load website"
-                                }
-                            }
-                        }
-
-                        override fun onReceivedSslError(
-                            view: WebView?,
-                            handler: SslErrorHandler?,
-                            error: SslError?
-                        ) {
-                            // Security: never bypass SSL certificate errors
-                            handler?.cancel()
-                            isLoading = false
-                            errorText = "Blocked insecure SSL certificate"
-                        }
-                    }
-
-                    webViewHolder[0] = this
-                    lastLoadedUrl = validatedUrl
-                    lastReloadNonce = reloadNonce
-                    loadUrl(validatedUrl)
+    // Immediate GPU uniform redraw whenever crop bounds or Chroma Key sliders move (zero WebView relayout!)
+    LaunchedEffect(cropLeft, cropTop, cropRight, cropBottom, chromaKey, opacity, allowPageInteraction) {
+        if (allowPageInteraction) return@LaunchedEffect
+        val frame = WebLayerManager.getLatestFrame(layerId) ?: WebLayerManager.captureLayerFrameOnMainThread(layerId)
+        val tv = glTextureViewHolder[0]
+        val renderer = glRendererHolder[0]
+        if (glAvailable && renderer != null && tv != null && tv.isAttachedToWindow && tv.isAvailable &&
+            surfaceSizeHolder[0] > 0 && surfaceSizeHolder[1] > 0
+        ) {
+            renderer.renderBitmapFrame(
+                bitmap = frame,
+                viewportWidth = surfaceSizeHolder[0],
+                viewportHeight = surfaceSizeHolder[1],
+                cropLeft = cropLeft,
+                cropTop = cropTop,
+                cropRight = cropRight,
+                cropBottom = cropBottom,
+                opacity = opacity,
+                chroma = chromaKey
+            )
+        } else if (frame != null && !frame.isRecycled) {
+            softwareFrame = if (chromaKey.enabled) {
+                withContext(Dispatchers.Default) {
+                    runCatching { ChromaKeyProcessor.applyChromaKey(frame, chromaKey) }.getOrDefault(frame)
                 }
-            },
-            update = { webView ->
-                webView.isClickable = allowPageInteraction
-                webView.isFocusable = allowPageInteraction
-                webView.isFocusableInTouchMode = allowPageInteraction
-                webView.isVerticalScrollBarEnabled = allowPageInteraction
-                webView.isHorizontalScrollBarEnabled = allowPageInteraction
-                webView.setOnTouchListener { v, event ->
-                    if (allowPageInteraction) {
-                        if (event.action == android.view.MotionEvent.ACTION_DOWN ||
-                            event.action == android.view.MotionEvent.ACTION_MOVE
-                        ) {
-                            v.parent?.requestDisallowInterceptTouchEvent(true)
-                        }
-                        false
-                    } else {
-                        false
+            } else {
+                frame
+            }
+        }
+    }
+
+    // Periodic frame refresh loop (~20 FPS) pumping animated webpage content into GPU shader / software preview
+    LaunchedEffect(layerId, validatedUrl, allowPageInteraction) {
+        if (allowPageInteraction) return@LaunchedEffect
+        while (isActive) {
+            val frame = WebLayerManager.captureLayerFrameOnMainThread(layerId)
+            val tv = glTextureViewHolder[0]
+            val renderer = glRendererHolder[0]
+            val renderedGl = if (glAvailable && renderer != null && tv != null && tv.isAttachedToWindow &&
+                tv.isAvailable && surfaceSizeHolder[0] > 0 && surfaceSizeHolder[1] > 0
+            ) {
+                renderer.renderBitmapFrame(
+                    bitmap = frame,
+                    viewportWidth = surfaceSizeHolder[0],
+                    viewportHeight = surfaceSizeHolder[1],
+                    cropLeft = latestCrop[0],
+                    cropTop = latestCrop[1],
+                    cropRight = latestCrop[2],
+                    cropBottom = latestCrop[3],
+                    opacity = latestOpacity[0],
+                    chroma = latestChroma[0]
+                )
+            } else {
+                false
+            }
+            if (!renderedGl && frame != null && !frame.isRecycled) {
+                val ck = latestChroma[0]
+                softwareFrame = if (ck.enabled) {
+                    withContext(Dispatchers.Default) {
+                        runCatching { ChromaKeyProcessor.applyChromaKey(frame, ck) }.getOrDefault(frame)
                     }
-                }
-                if (lastLoadedUrl != validatedUrl) {
-                    errorText = null
-                    isLoading = true
-                    loadProgress = 10
-                    lastLoadedUrl = validatedUrl
-                    lastReloadNonce = reloadNonce
-                    webView.loadUrl(validatedUrl)
-                } else if (lastReloadNonce != reloadNonce) {
-                    errorText = null
-                    isLoading = true
-                    loadProgress = 10
-                    lastReloadNonce = reloadNonce
-                    webView.reload()
+                } else {
+                    frame
                 }
             }
-        )
+            delay(50L)
+        }
+    }
 
-        // In Layout Edit Mode, cover the AndroidView WebView with a transparent Compose surface
-        // so taps and drags propagate cleanly to the parent layer's selection & drag modifiers.
-        if (!allowPageInteraction && interactiveEditing) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .testTag("studio_web_source_edit_shield")
+    // Release ONLY the GL preview TextureView surface on dispose — NEVER destroy the pooled WebView!
+    DisposableEffect(layerId) {
+        onDispose {
+            runCatching {
+                glRendererHolder[0]?.release()
+                glRendererHolder[0] = null
+                glTextureViewHolder[0] = null
+            }
+        }
+    }
+
+    Box(modifier = modifier.testTag("studio_web_source_container")) {
+        if (allowPageInteraction) {
+            // Interactive mode: attach the exact SAME pooled WebView (zero reload!) for scrolling/clicking
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    val pooled = WebLayerManager.obtainWebView(
+                        context = ctx,
+                        layerId = layerId,
+                        validatedUrl = validatedUrl,
+                        viewport = viewportPreset,
+                        reloadNonce = reloadNonce
+                    )
+                    WebLayerManager.detachFromParentSafely(pooled)
+                    android.widget.FrameLayout(ctx).apply {
+                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        if (pooled != null) {
+                            pooled.isClickable = true
+                            pooled.isFocusable = true
+                            pooled.isFocusableInTouchMode = true
+                            pooled.isVerticalScrollBarEnabled = true
+                            pooled.isHorizontalScrollBarEnabled = true
+                            pooled.setOnTouchListener { v, event ->
+                                if (event.action == android.view.MotionEvent.ACTION_DOWN ||
+                                    event.action == android.view.MotionEvent.ACTION_MOVE
+                                ) {
+                                    v.parent?.requestDisallowInterceptTouchEvent(true)
+                                }
+                                false
+                            }
+                            addView(
+                                pooled,
+                                android.widget.FrameLayout.LayoutParams(
+                                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                    android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                                )
+                            )
+                        }
+                    }
+                },
+                onRelease = { container ->
+                    // Detach cleanly back to pool without destroying or reloading!
+                    runCatching {
+                        if (container.childCount > 0) {
+                            val child = container.getChildAt(0) as? WebView
+                            container.removeAllViews()
+                            if (child != null) {
+                                child.isClickable = false
+                                child.isFocusable = false
+                                child.isVerticalScrollBarEnabled = false
+                                child.isHorizontalScrollBarEnabled = false
+                            }
+                        }
+                    }
+                }
             )
+        } else {
+            // Live OpenGL ES 2.0 GPU UV-Cropped + Chroma-Keyed TextureView surface (60fps, zero reflow!)
+            if (glAvailable) {
+                AndroidView(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("studio_web_gl_surface_$layerId"),
+                    factory = { ctx ->
+                        TextureView(ctx).apply {
+                            isOpaque = false
+                            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                                override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
+                                    surfaceSizeHolder[0] = w
+                                    surfaceSizeHolder[1] = h
+                                    val renderer = GlTextureSurfaceRenderer()
+                                    if (renderer.initialize(st)) {
+                                        glRendererHolder[0] = renderer
+                                        val frame = WebLayerManager.getLatestFrame(layerId)
+                                            ?: WebLayerManager.captureLayerFrameOnMainThread(layerId)
+                                        renderer.renderBitmapFrame(
+                                            bitmap = frame,
+                                            viewportWidth = w,
+                                            viewportHeight = h,
+                                            cropLeft = latestCrop[0],
+                                            cropTop = latestCrop[1],
+                                            cropRight = latestCrop[2],
+                                            cropBottom = latestCrop[3],
+                                            opacity = latestOpacity[0],
+                                            chroma = latestChroma[0]
+                                        )
+                                    } else {
+                                        glAvailable = false
+                                    }
+                                }
+
+                                override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {
+                                    surfaceSizeHolder[0] = w
+                                    surfaceSizeHolder[1] = h
+                                }
+
+                                override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+                                    runCatching {
+                                        glRendererHolder[0]?.release()
+                                        glRendererHolder[0] = null
+                                    }
+                                    return true
+                                }
+
+                                override fun onSurfaceTextureUpdated(st: SurfaceTexture) = Unit
+                            }
+                            glTextureViewHolder[0] = this
+                        }
+                    }
+                )
+            }
+
+            // Software Compose Canvas fallback (zero bitmap cropping allocation; draws cropped srcRect directly)
+            val fallbackBmp = softwareFrame
+            if (!glAvailable && fallbackBmp != null && !fallbackBmp.isRecycled && fallbackBmp.width > 0 && fallbackBmp.height > 0) {
+                val imgBmp = remember(fallbackBmp) { fallbackBmp.asImageBitmap() }
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("studio_web_canvas_fallback_$layerId")
+                ) {
+                    val uv = GlChromaShaderSpec.computeCropUvBounds(cropLeft, cropTop, cropRight, cropBottom)
+                    val srcL = (uv.uMin * imgBmp.width).toInt().coerceIn(0, imgBmp.width - 1)
+                    val srcT = (uv.vMin * imgBmp.height).toInt().coerceIn(0, imgBmp.height - 1)
+                    val srcW = ((uv.uMax - uv.uMin) * imgBmp.width).toInt().coerceIn(1, imgBmp.width - srcL)
+                    val srcH = ((uv.vMax - uv.vMin) * imgBmp.height).toInt().coerceIn(1, imgBmp.height - srcT)
+                    drawImage(
+                        image = imgBmp,
+                        srcOffset = androidx.compose.ui.unit.IntOffset(srcL, srcT),
+                        srcSize = androidx.compose.ui.unit.IntSize(srcW, srcH),
+                        dstSize = androidx.compose.ui.unit.IntSize(
+                            size.width.toInt().coerceAtLeast(1),
+                            size.height.toInt().coerceAtLeast(1)
+                        ),
+                        alpha = opacity.coerceIn(0f, 1f)
+                    )
+                }
+            }
+
+            // Edit-mode touch shield so canvas drag/resize/crop handles receive every gesture cleanly
+            if (interactiveEditing) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("studio_web_source_edit_shield")
+                )
+            }
         }
 
-        if (isLoading) {
+        if (runtimeState.isLoading) {
             LinearProgressIndicator(
-                progress = { (loadProgress / 100f).coerceIn(0.08f, 1f) },
+                progress = { (runtimeState.loadProgress / 100f).coerceIn(0.08f, 1f) },
                 color = ZroCobalt,
                 trackColor = Color(0x66000000),
                 modifier = Modifier
@@ -741,11 +864,12 @@ fun StudioWebSourceView(
             )
         }
 
-        if (errorText != null) {
+        val err = runtimeState.errorText
+        if (err != null) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0xD90B0E14))
+                    .background(Color(0xD90B0D10))
                     .padding(6.dp),
                 contentAlignment = Alignment.Center
             ) {
@@ -761,7 +885,7 @@ fun StudioWebSourceView(
                     )
                     Spacer(modifier = Modifier.height(3.dp))
                     Text(
-                        text = errorText!!,
+                        text = err,
                         fontSize = 9.sp,
                         fontFamily = JetBrainsMonoFontFamily,
                         fontWeight = FontWeight.SemiBold,

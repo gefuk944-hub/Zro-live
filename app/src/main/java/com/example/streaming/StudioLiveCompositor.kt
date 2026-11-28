@@ -23,7 +23,9 @@ import com.example.studio.LayerScaleMode
 import com.example.studio.LayerSourceType
 import com.example.studio.SceneLayer
 import com.example.studio.StudioScene
+import com.example.studio.StudioWorkspaceReducer
 import com.example.studio.StudioWorkspaceState
+import com.example.studio.WebLayerManager
 import kotlin.math.roundToInt
 
 /**
@@ -54,6 +56,7 @@ class StudioLiveCompositor(private val context: Context) {
     // Bounded decoded bitmap cache (URIs + bundled scene artwork) to prevent per-frame allocations
     private val bitmapCache = object : LruCache<String, Bitmap>(16) {}
     private val failedKeys = HashSet<String>()
+    private val lastWebRefreshMs = HashMap<String, Long>()
 
     /**
      * Renders the current [workspace] active scene onto [canvas] at full broadcast resolution.
@@ -165,9 +168,9 @@ class StudioLiveCompositor(private val context: Context) {
             canvas.clipRect(bounds)
             val hasCrop = layer.cropLeft > 0.001f || layer.cropTop > 0.001f ||
                 layer.cropRight > 0.001f || layer.cropBottom > 0.001f
-            val contentBounds = if (hasCrop) {
-                val visW = (1f - layer.cropLeft - layer.cropRight).coerceIn(0.15f, 1f)
-                val visH = (1f - layer.cropTop - layer.cropBottom).coerceIn(0.15f, 1f)
+            val contentBounds = if (hasCrop && layer.type != LayerSourceType.BROWSER_WEB) {
+                val visW = (1f - layer.cropLeft - layer.cropRight).coerceIn(StudioWorkspaceReducer.MIN_CROP_VISIBLE, 1f)
+                val visH = (1f - layer.cropTop - layer.cropBottom).coerceIn(StudioWorkspaceReducer.MIN_CROP_VISIBLE, 1f)
                 val fullW = bounds.width() / visW
                 val fullH = bounds.height() / visH
                 val fullLeft = bounds.left - fullW * layer.cropLeft
@@ -228,7 +231,7 @@ class StudioLiveCompositor(private val context: Context) {
                 LayerSourceType.WEBCAM -> drawWebcamLayer(canvas, contentBounds, layer, workspace)
                 LayerSourceType.AUDIO_VISUALIZER -> drawAudioVisualizerLayer(canvas, contentBounds, layer, audioMeters)
                 LayerSourceType.DECORATIVE_FRAME -> drawDecorativeFrameLayer(canvas, bounds, layer)
-                LayerSourceType.BROWSER_WEB -> drawWebWidgetPlaceholderLayer(canvas, contentBounds, layer)
+                LayerSourceType.BROWSER_WEB -> drawWebLayer(canvas, bounds, layer)
                 LayerSourceType.MERGED_GROUP -> {
                     canvas.clipRect(bounds)
                     for (child in layer.mergedChildren.sortedBy { it.zIndex }) {
@@ -252,6 +255,8 @@ class StudioLiveCompositor(private val context: Context) {
                 val radius = (ch * 0.014f).coerceIn(4f, 16f)
                 canvas.drawRoundRect(bounds, radius, radius, strokePaint)
             }
+        } catch (_: Throwable) {
+            // Hardware canvas/bitmap draw guard: never crash live broadcast compositor on bad layer frame
         } finally {
             canvas.restoreToCount(saveCount)
         }
@@ -596,8 +601,42 @@ class StudioLiveCompositor(private val context: Context) {
         canvas.drawRoundRect(bounds, 12f, 12f, strokePaint)
     }
 
-    private fun drawWebWidgetPlaceholderLayer(canvas: Canvas, bounds: RectF, layer: SceneLayer) {
+    private fun drawWebLayer(canvas: Canvas, bounds: RectF, layer: SceneLayer) {
         if (layer.webUrl.isBlank()) return
+        // Keep the pooled fixed-viewport WebView refreshing in background at ~10fps during live streaming
+        val now = android.os.SystemClock.elapsedRealtime()
+        val last = lastWebRefreshMs[layer.id] ?: 0L
+        if (now - last >= 100L) {
+            lastWebRefreshMs[layer.id] = now
+            WebLayerManager.requestBackgroundFrameRefresh(context, layer)
+        }
+
+        val rawFrame = WebLayerManager.getLatestFrame(layer.id)
+        if (rawFrame != null && !rawFrame.isRecycled && rawFrame.width > 0 && rawFrame.height > 0) {
+            val chroma = layer.graphicAdjustment.chromaKey
+            val drawBmp = if (layer.graphicAdjustment.enabled && chroma.enabled) {
+                runCatching { ChromaKeyProcessor.applyChromaKey(rawFrame, chroma) }.getOrDefault(rawFrame)
+            } else {
+                rawFrame
+            }
+            val uv = GlChromaShaderSpec.computeCropUvBounds(
+                cropLeft = layer.cropLeft,
+                cropTop = layer.cropTop,
+                cropRight = layer.cropRight,
+                cropBottom = layer.cropBottom
+            )
+            val l = (uv.uMin * drawBmp.width).toInt().coerceIn(0, drawBmp.width - 1)
+            val t = (uv.vMin * drawBmp.height).toInt().coerceIn(0, drawBmp.height - 1)
+            val r = (uv.uMax * drawBmp.width).toInt().coerceIn(l + 1, drawBmp.width)
+            val b = (uv.vMax * drawBmp.height).toInt().coerceIn(t + 1, drawBmp.height)
+            srcRect.set(l, t, r, b)
+            canvas.drawBitmap(drawBmp, srcRect, bounds, bitmapPaint)
+            if (drawBmp !== rawFrame && !drawBmp.isRecycled) {
+                drawBmp.recycle()
+            }
+            return
+        }
+
         fillPaint.color = Color.argb(170, 12, 18, 30)
         canvas.drawRoundRect(bounds, 8f, 8f, fillPaint)
         textPaint.color = Color.rgb(147, 197, 253)

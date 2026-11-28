@@ -205,6 +205,12 @@ object StudioPersistence {
         put("sourceMediaHeight", l.sourceMediaHeight)
         put("origWidth", l.origWidth.toDouble())
         put("origHeight", l.origHeight.toDouble())
+        put("webViewportPreset", l.webViewportPreset.name)
+        put("chromaEnabled", l.graphicAdjustment.chromaKey.enabled)
+        put("chromaColorHex", l.graphicAdjustment.chromaKey.keyColorHex)
+        put("chromaSimilarity", l.graphicAdjustment.chromaKey.similarity.toDouble())
+        put("chromaSmoothness", l.graphicAdjustment.chromaKey.smoothness.toDouble())
+        put("chromaSpillReduction", l.graphicAdjustment.chromaKey.spillReduction.toDouble())
         put("graphicAdjustment", GraphicAdjustmentJson.toJson(l.graphicAdjustment.copy(opacity = l.opacity)))
         if (l.mergedChildren.isNotEmpty()) {
             val childArr = JSONArray()
@@ -228,10 +234,10 @@ object StudioPersistence {
         height = o.optDouble("height", 0.2).toFloat().coerceIn(0.05f, 1.0f),
         rotationDeg = o.optDouble("rotationDeg", 0.0).toFloat().coerceIn(-180f, 360f),
         opacity = o.optDouble("opacity", 1.0).toFloat().coerceIn(0.05f, 1.0f),
-        cropLeft = o.optDouble("cropLeft", 0.0).toFloat().coerceIn(0f, 0.80f),
-        cropTop = o.optDouble("cropTop", 0.0).toFloat().coerceIn(0f, 0.80f),
-        cropRight = o.optDouble("cropRight", 0.0).toFloat().coerceIn(0f, 0.80f),
-        cropBottom = o.optDouble("cropBottom", 0.0).toFloat().coerceIn(0f, 0.80f),
+        cropLeft = o.optDouble("cropLeft", 0.0).toFloat().coerceIn(0f, 0.95f),
+        cropTop = o.optDouble("cropTop", 0.0).toFloat().coerceIn(0f, 0.95f),
+        cropRight = o.optDouble("cropRight", 0.0).toFloat().coerceIn(0f, 0.95f),
+        cropBottom = o.optDouble("cropBottom", 0.0).toFloat().coerceIn(0f, 0.95f),
         lockAspectRatio = o.optBoolean("lockAspectRatio", false),
         scaleMode = LayerScaleMode.fromName(o.optString("scaleMode")),
         borderWidthDp = o.optDouble("borderWidthDp", 0.0).toFloat().coerceIn(0f, 8f),
@@ -268,6 +274,7 @@ object StudioPersistence {
         sourceMediaHeight = o.optInt("sourceMediaHeight", 0).coerceAtLeast(0),
         origWidth = o.optDouble("origWidth", 0.0).toFloat().coerceIn(0f, 1f),
         origHeight = o.optDouble("origHeight", 0.0).toFloat().coerceIn(0f, 1f),
+        webViewportPreset = WebViewportPreset.fromName(o.optString("webViewportPreset")),
         graphicAdjustment = GraphicAdjustmentJson.fromJson(
             o.optJSONObject("graphicAdjustment"),
             fallbackOpacity = o.optDouble("opacity", 1.0).toFloat().coerceIn(0.05f, 1.0f)

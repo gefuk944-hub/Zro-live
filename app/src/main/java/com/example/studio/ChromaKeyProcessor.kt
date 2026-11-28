@@ -69,19 +69,21 @@ object ChromaKeyProcessor {
         val keyR = ((keyColor shr 16) and 0xFF) / 255f
         val keyG = ((keyColor shr 8) and 0xFF) / 255f
         val keyB = (keyColor and 0xFF) / 255f
+        val keyLuma = 0.299f * keyR + 0.587f * keyG + 0.114f * keyB
+        val isBlackLumaKey = settings.preset == ChromaKeyPreset.BLACK_LUMA || (keyR < 0.08f && keyG < 0.08f && keyB < 0.08f)
         val keyCb = rgbToCb(keyR, keyG, keyB)
         val keyCr = rgbToCr(keyR, keyG, keyB)
 
-        // Normalize similarity & smoothness into YCbCr chroma radius space (max chroma distance ~0.72)
-        val simRadius = settings.similarity * 0.52f
+        // Normalize similarity & smoothness into YCbCr chroma radius space (or luma space for Black/Luma key)
+        val simRadius = if (isBlackLumaKey) settings.similarity * 0.65f else settings.similarity * 0.52f
         val smoothBand = max(0.004f, settings.smoothness * 0.45f)
         val spillAmount = settings.spillReduction
         val edgeCleanup = settings.edgeCleanup
         val opacityScale = settings.opacity
 
         // Identify dominant channel of key color for targeted despill
-        val keyIsGreenDominant = keyG >= keyR && keyG >= keyB
-        val keyIsBlueDominant = keyB > keyG && keyB >= keyR
+        val keyIsGreenDominant = !isBlackLumaKey && keyG >= keyR && keyG >= keyB
+        val keyIsBlueDominant = !isBlackLumaKey && keyB > keyG && keyB >= keyR
 
         val alphaPass = FloatArray(pixels.size)
 
@@ -96,9 +98,14 @@ object ChromaKeyProcessor {
             val g = ((px shr 8) and 0xFF) / 255f
             val b = (px and 0xFF) / 255f
 
-            val cb = rgbToCb(r, g, b)
-            val cr = rgbToCr(r, g, b)
-            val dist = hypot((cb - keyCb).toDouble(), (cr - keyCr).toDouble()).toFloat()
+            val dist = if (isBlackLumaKey) {
+                val luma = 0.299f * r + 0.587f * g + 0.114f * b
+                kotlin.math.abs(luma - keyLuma)
+            } else {
+                val cb = rgbToCb(r, g, b)
+                val cr = rgbToCr(r, g, b)
+                hypot((cb - keyCb).toDouble(), (cr - keyCr).toDouble()).toFloat()
+            }
 
             // Base matte alpha via smoothstep ramp
             val rawMask = when {

@@ -10,9 +10,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -22,17 +24,21 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Colorize
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.RestartAlt
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
@@ -63,8 +69,10 @@ import com.example.studio.ChromaKeyProcessor
 import com.example.studio.GraphicPresetId
 import com.example.studio.LayerChromaKeySettings
 import com.example.studio.LayerGraphicAdjustment
+import com.example.studio.LayerSourceType
 import com.example.studio.SceneLayer
 import com.example.studio.StudioMediaStore
+import com.example.studio.WebLayerManager
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.ZroAmber
 import com.example.ui.theme.ZroCobalt
@@ -140,7 +148,7 @@ fun ChromaKeyControlsSection(
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = "Select an Image, Logo, Video, Facecam/Camera, Background, or Gameplay layer to remove a green/blue screen background.",
+                        text = "Select a Website/Browser, Image, GIF, Logo, Video, Facecam/Camera, Background, or Gameplay layer to remove a Green, Blue, Black/Luma, Magenta, or Custom background.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -150,23 +158,33 @@ fun ChromaKeyControlsSection(
         return
     }
 
-    // Load preview source bitmap (real media bitmap if available, mirrored frame for gameplay, or chroma reference card)
-    var sourcePreviewBitmap by remember(selectedLayer.id, selectedLayer.mediaUri) { mutableStateOf<Bitmap?>(null) }
-    var keyedPreviewBitmap by remember(selectedLayer.id, selectedLayer.mediaUri) { mutableStateOf<Bitmap?>(null) }
+    // Load preview source bitmap (live WebView frame, real media bitmap, mirrored frame, or chroma reference card)
+    var sourcePreviewBitmap by remember(selectedLayer.id, selectedLayer.mediaUri, selectedLayer.webUrl) { mutableStateOf<Bitmap?>(null) }
+    var keyedPreviewBitmap by remember(selectedLayer.id, selectedLayer.mediaUri, selectedLayer.webUrl) { mutableStateOf<Bitmap?>(null) }
 
-    LaunchedEffect(selectedLayer.id, selectedLayer.mediaUri, mirroredFrame, chroma.preset) {
+    LaunchedEffect(selectedLayer.id, selectedLayer.mediaUri, selectedLayer.webUrl, mirroredFrame, chroma.preset) {
         val src = withContext(Dispatchers.IO) {
             when {
+                selectedLayer.type == LayerSourceType.BROWSER_WEB -> {
+                    val webBmp = WebLayerManager.getLatestFrame(selectedLayer.id)
+                    if (webBmp != null && !webBmp.isRecycled && webBmp.width > 0 && webBmp.height > 0) {
+                        runCatching { Bitmap.createScaledBitmap(webBmp, 320, 180, true) }.getOrNull()
+                            ?: createReferenceChromaSample(chroma.keyColorHex)
+                    } else {
+                        createReferenceChromaSample(chroma.keyColorHex)
+                    }
+                }
                 !selectedLayer.mediaUri.isNullOrBlank() -> {
                     StudioMediaStore.decodeScaledBitmap(
                         context = context,
                         uriString = selectedLayer.mediaUri,
-                        isVideo = selectedLayer.type == com.example.studio.LayerSourceType.VIDEO_OVERLAY,
+                        isVideo = selectedLayer.type == LayerSourceType.VIDEO_OVERLAY,
                         maxDimensionPx = 320
                     ) ?: createReferenceChromaSample(chroma.keyColorHex)
                 }
-                mirroredFrame != null -> {
-                    Bitmap.createScaledBitmap(mirroredFrame, 320, 180, true)
+                mirroredFrame != null && !mirroredFrame.isRecycled -> {
+                    runCatching { Bitmap.createScaledBitmap(mirroredFrame, 320, 180, true) }.getOrNull()
+                        ?: createReferenceChromaSample(chroma.keyColorHex)
                 }
                 else -> createReferenceChromaSample(chroma.keyColorHex)
             }
@@ -229,9 +247,11 @@ fun ChromaKeyControlsSection(
 
     Spacer(modifier = Modifier.height(8.dp))
 
-    // Presets: Green Screen / Blue Screen / Custom
+    // Quick Presets: Green (#00FF00), Blue (#0000FF), Black / Luma (#000000), Magenta (#FF00FF), Custom
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         ChromaKeyPreset.entries.forEach { preset ->
@@ -240,12 +260,12 @@ fun ChromaKeyControlsSection(
                 selected = selected,
                 enabled = controlsEnabled,
                 onClick = {
-                    val keyHex = when (preset) {
-                        ChromaKeyPreset.GREEN_SCREEN -> 0xFF00B140L
-                        ChromaKeyPreset.BLUE_SCREEN -> 0xFF0047BBL
-                        ChromaKeyPreset.CUSTOM -> chroma.keyColorHex
+                    val nextSettings = if (preset == ChromaKeyPreset.CUSTOM) {
+                        chroma.copy(enabled = true, preset = ChromaKeyPreset.CUSTOM)
+                    } else {
+                        LayerChromaKeySettings.forPreset(preset)
                     }
-                    updateChroma { it.copy(enabled = true, preset = preset, keyColorHex = keyHex) }
+                    updateChroma { nextSettings }
                     onCommitAdjustment()
                 },
                 label = { Text(preset.label, fontSize = 10.sp, maxLines = 1) },
@@ -253,9 +273,7 @@ fun ChromaKeyControlsSection(
                     selectedContainerColor = ZroEmerald.copy(alpha = 0.22f),
                     selectedLabelColor = Color.White
                 ),
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("chroma_preset_${preset.name.lowercase()}")
+                modifier = Modifier.testTag("chroma_preset_${preset.name.lowercase()}")
             )
         }
     }
@@ -473,14 +491,59 @@ fun ChromaKeyControlsSection(
                     )
                     .clickable(enabled = controlsEnabled) {
                         val preset = when (hex) {
-                            0xFF00B140L -> ChromaKeyPreset.GREEN_SCREEN
-                            0xFF0047BBL -> ChromaKeyPreset.BLUE_SCREEN
+                            0xFF00FF00L, 0xFF00B140L -> ChromaKeyPreset.GREEN_SCREEN
+                            0xFF0000FFL, 0xFF0047BBL -> ChromaKeyPreset.BLUE_SCREEN
+                            0xFF000000L -> ChromaKeyPreset.BLACK_LUMA
+                            0xFFFF00FFL -> ChromaKeyPreset.MAGENTA_KEY
                             else -> ChromaKeyPreset.CUSTOM
                         }
                         updateChroma { it.copy(enabled = true, preset = preset, keyColorHex = hex) }
                         onCommitAdjustment()
                     }
             )
+        }
+    }
+
+    Spacer(modifier = Modifier.height(6.dp))
+    // Custom Hex #RRGGBB Input
+    var hexDraft by remember(selectedLayer.id, hexString) { mutableStateOf(hexString) }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        OutlinedTextField(
+            value = hexDraft,
+            onValueChange = { raw ->
+                val filtered = raw.uppercase().filter { it == '#' || it in '0'..'9' || it in 'A'..'F' }.take(7)
+                hexDraft = filtered
+            },
+            label = { Text("Custom Hex (#RRGGBB)", fontSize = 10.sp) },
+            singleLine = true,
+            enabled = controlsEnabled,
+            modifier = Modifier
+                .weight(1f)
+                .testTag("chroma_hex_input")
+        )
+        Button(
+            onClick = {
+                val clean = hexDraft.removePrefix("#").trim()
+                if (clean.length == 6) {
+                    val rgb = clean.toLongOrNull(16)
+                    if (rgb != null) {
+                        val fullHex = 0xFF000000L or rgb
+                        updateChroma { it.copy(enabled = true, preset = ChromaKeyPreset.CUSTOM, keyColorHex = fullHex) }
+                        onCommitAdjustment()
+                    }
+                }
+            },
+            enabled = controlsEnabled && hexDraft.removePrefix("#").length == 6,
+            colors = ButtonDefaults.buttonColors(containerColor = ZroCobalt, contentColor = Color.White),
+            shape = RoundedCornerShape(6.dp),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+            modifier = Modifier.testTag("chroma_hex_apply_btn")
+        ) {
+            Text("Apply Hex", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
         }
     }
 
@@ -503,13 +566,13 @@ fun ChromaKeyControlsSection(
 
     Spacer(modifier = Modifier.height(6.dp))
 
-    // Real-time Chroma Key sliders
+    // Real-time Chroma Key sliders (0.00..1.00 normalized -> 0%..100% display)
     ChromaSliderRow(
         label = "Similarity",
-        valueText = "${chroma.similarity.roundToInt()}%",
+        valueText = "${(chroma.similarity * 100f).roundToInt()}%",
         value = chroma.similarity,
-        defaultValue = 40f,
-        range = 1f..100f,
+        defaultValue = 0.40f,
+        range = 0.0f..1.0f,
         enabled = keyControlsActive,
         tag = "chroma_slider_similarity",
         onChange = { v -> updateChroma { it.copy(similarity = v) } },
@@ -517,10 +580,10 @@ fun ChromaKeyControlsSection(
     )
     ChromaSliderRow(
         label = "Smoothness",
-        valueText = "${chroma.smoothness.roundToInt()}%",
+        valueText = "${(chroma.smoothness * 100f).roundToInt()}%",
         value = chroma.smoothness,
-        defaultValue = 18f,
-        range = 0f..100f,
+        defaultValue = 0.12f,
+        range = 0.0f..1.0f,
         enabled = keyControlsActive,
         tag = "chroma_slider_smoothness",
         onChange = { v -> updateChroma { it.copy(smoothness = v) } },
@@ -528,10 +591,10 @@ fun ChromaKeyControlsSection(
     )
     ChromaSliderRow(
         label = "Spill Reduction",
-        valueText = "${chroma.spillReduction.roundToInt()}%",
+        valueText = "${(chroma.spillReduction * 100f).roundToInt()}%",
         value = chroma.spillReduction,
-        defaultValue = 35f,
-        range = 0f..100f,
+        defaultValue = 0.35f,
+        range = 0.0f..1.0f,
         enabled = keyControlsActive,
         tag = "chroma_slider_spill",
         onChange = { v -> updateChroma { it.copy(spillReduction = v) } },
@@ -539,10 +602,10 @@ fun ChromaKeyControlsSection(
     )
     ChromaSliderRow(
         label = "Edge Cleanup",
-        valueText = "${chroma.edgeCleanup.roundToInt()}%",
+        valueText = "${(chroma.edgeCleanup * 100f).roundToInt()}%",
         value = chroma.edgeCleanup,
-        defaultValue = 15f,
-        range = 0f..100f,
+        defaultValue = 0.15f,
+        range = 0.0f..1.0f,
         enabled = keyControlsActive,
         tag = "chroma_slider_edge",
         onChange = { v -> updateChroma { it.copy(edgeCleanup = v) } },

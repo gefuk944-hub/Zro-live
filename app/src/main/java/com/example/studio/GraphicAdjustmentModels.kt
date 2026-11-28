@@ -23,9 +23,11 @@ enum class GraphicPresetId(val label: String) {
 }
 
 enum class ChromaKeyPreset(val label: String, val defaultColorHex: Long) {
-    GREEN_SCREEN("Green Screen", 0xFF00B140L),
-    BLUE_SCREEN("Blue Screen", 0xFF0047BBL),
-    CUSTOM("Custom Color", 0xFF00B140L);
+    GREEN_SCREEN("Green", 0xFF00FF00L),
+    BLUE_SCREEN("Blue", 0xFF0000FFL),
+    BLACK_LUMA("Black / Luma", 0xFF000000L),
+    MAGENTA_KEY("Magenta", 0xFFFF00FFL),
+    CUSTOM("Custom", 0xFF00FF00L);
 
     companion object {
         fun fromName(raw: String?): ChromaKeyPreset =
@@ -40,22 +42,22 @@ enum class ChromaKeyPreviewMode(val label: String) {
 }
 
 /**
- * Per-layer Chroma Key (green/blue/custom screen removal) configuration.
+ * Per-layer Chroma Key (green/blue/black-luma/magenta/custom screen removal) configuration.
  * Persisted independently for every layer alongside its graphic adjustments.
  */
 data class LayerChromaKeySettings(
     val enabled: Boolean = false,
     val preset: ChromaKeyPreset = ChromaKeyPreset.GREEN_SCREEN,
-    val keyColorHex: Long = 0xFF00B140L,
-    val similarity: Float = 0.40f,       // 0.01..1.00
-    val smoothness: Float = 0.12f,       // 0.00..0.60
+    val keyColorHex: Long = 0xFF00FF00L,
+    val similarity: Float = 0.40f,       // 0.00..1.00
+    val smoothness: Float = 0.12f,       // 0.00..1.00
     val spillReduction: Float = 0.35f,   // 0.00..1.00
     val edgeCleanup: Float = 0.15f,      // 0.00..1.00
     val opacity: Float = 1.0f            // 0.05..1.00
 ) {
     fun clamped(): LayerChromaKeySettings = copy(
-        similarity = similarity.coerceIn(0.01f, 1.0f),
-        smoothness = smoothness.coerceIn(0.0f, 0.60f),
+        similarity = similarity.coerceIn(0.0f, 1.0f),
+        smoothness = smoothness.coerceIn(0.0f, 1.0f),
         spillReduction = spillReduction.coerceIn(0.0f, 1.0f),
         edgeCleanup = edgeCleanup.coerceIn(0.0f, 1.0f),
         opacity = opacity.coerceIn(0.05f, 1.0f)
@@ -68,7 +70,7 @@ data class LayerChromaKeySettings(
             ChromaKeyPreset.GREEN_SCREEN -> LayerChromaKeySettings(
                 enabled = true,
                 preset = ChromaKeyPreset.GREEN_SCREEN,
-                keyColorHex = 0xFF00B140L,
+                keyColorHex = 0xFF00FF00L,
                 similarity = 0.40f,
                 smoothness = 0.12f,
                 spillReduction = 0.38f,
@@ -78,7 +80,27 @@ data class LayerChromaKeySettings(
             ChromaKeyPreset.BLUE_SCREEN -> LayerChromaKeySettings(
                 enabled = true,
                 preset = ChromaKeyPreset.BLUE_SCREEN,
-                keyColorHex = 0xFF0047BBL,
+                keyColorHex = 0xFF0000FFL,
+                similarity = 0.38f,
+                smoothness = 0.14f,
+                spillReduction = 0.35f,
+                edgeCleanup = 0.15f,
+                opacity = 1.0f
+            )
+            ChromaKeyPreset.BLACK_LUMA -> LayerChromaKeySettings(
+                enabled = true,
+                preset = ChromaKeyPreset.BLACK_LUMA,
+                keyColorHex = 0xFF000000L,
+                similarity = 0.28f,
+                smoothness = 0.15f,
+                spillReduction = 0.10f,
+                edgeCleanup = 0.12f,
+                opacity = 1.0f
+            )
+            ChromaKeyPreset.MAGENTA_KEY -> LayerChromaKeySettings(
+                enabled = true,
+                preset = ChromaKeyPreset.MAGENTA_KEY,
+                keyColorHex = 0xFFFF00FFL,
                 similarity = 0.38f,
                 smoothness = 0.14f,
                 spillReduction = 0.35f,

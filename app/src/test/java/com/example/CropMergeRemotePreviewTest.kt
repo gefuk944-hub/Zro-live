@@ -51,7 +51,7 @@ class CropMergeRemotePreviewTest {
         assertEquals(0f, afterEdge.cropRight, 0.01f)
         assertEquals(0f, afterEdge.cropBottom, 0.01f)
 
-        // Safe clamping prevents cropLeft + cropRight from exceeding 0.85f
+        // Safe clamping prevents cropLeft + cropRight from exceeding 0.95f (minimum 5% visible)
         val overCropped = StudioWorkspaceReducer.setLayerCrop(
             edgeCropped,
             id,
@@ -59,7 +59,7 @@ class CropMergeRemotePreviewTest {
             cropRight = 0.60f
         )
         val clamped = overCropped.activeScene.layers.first { it.id == id }
-        assertTrue(clamped.cropLeft + clamped.cropRight <= 0.851f)
+        assertTrue(clamped.cropLeft + clamped.cropRight <= 0.951f)
 
         // Aspect ratio preset 1:1 applies balanced horizontal crop on 16:9 layer
         val square = StudioWorkspaceReducer.applyCropAspectPreset(initial, id, CropAspectPreset.RATIO_1_1)

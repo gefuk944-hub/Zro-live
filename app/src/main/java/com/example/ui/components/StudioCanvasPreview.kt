@@ -60,6 +60,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -121,6 +122,7 @@ import com.example.studio.ResizeCorner
 import com.example.studio.SceneLayer
 import com.example.studio.SceneTransitionType
 import com.example.studio.StudioScene
+import com.example.studio.StudioWorkspaceReducer
 import com.example.studio.StudioWorkspaceState
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.SpaceGroteskFontFamily
@@ -170,6 +172,7 @@ fun StudioCanvasPreview(
     val resolvedLocalFrame = localCapturedFrame ?: liveLocalFrame
     val activeScene = workspace.activeScene
     val aspect = if (activeScene.isVertical) 9f / 16f else 16f / 9f
+    var isActivelyDraggingLayer by remember { mutableStateOf(false) }
     val borderColor = when {
         workspace.brbActive -> ZroAmber.copy(alpha = 0.85f)
         activeScene.sceneLocked -> ZroAmber.copy(alpha = 0.7f)
@@ -268,12 +271,27 @@ fun StudioCanvasPreview(
                             chatTextSizeSp = workspace.chatTextSizeSp,
                             reducedMotion = reducedMotion,
                             onSelect = { onSelectLayer(layer.id) },
-                            onMoveBy = { dx, dy -> onMoveLayerBy(layer.id, dx, dy) },
-                            onMoveTo = onMoveLayerTo?.let { cb -> { rx, ry -> cb(layer.id, rx, ry) } },
-                            onResizeCorner = { corner, dx, dy ->
-                                onResizeLayerCorner(layer.id, corner, dx, dy, layer.lockAspectRatio)
+                            onMoveBy = { dx, dy ->
+                                isActivelyDraggingLayer = true
+                                onMoveLayerBy(layer.id, dx, dy)
                             },
-                            onDragFinished = onDragFinished,
+                            onMoveTo = onMoveLayerTo?.let { cb ->
+                                { rx, ry ->
+                                    isActivelyDraggingLayer = true
+                                    cb(layer.id, rx, ry)
+                                }
+                            },
+                            onResizeCorner = { corner, dx, dy ->
+                                val isCorner = corner == ResizeCorner.TOP_LEFT ||
+                                    corner == ResizeCorner.TOP_RIGHT ||
+                                    corner == ResizeCorner.BOTTOM_LEFT ||
+                                    corner == ResizeCorner.BOTTOM_RIGHT
+                                onResizeLayerCorner(layer.id, corner, dx, dy, if (isCorner) layer.lockAspectRatio else false)
+                            },
+                            onDragFinished = {
+                                isActivelyDraggingLayer = false
+                                onDragFinished()
+                            },
                             onReconnectPeer = onReconnectPeer,
                             bypassGraphicAdjustment = beforePreviewLayerId == layer.id,
                             cropModeActive = cropModeActive && workspace.selectedLayerId == layer.id,
@@ -282,12 +300,20 @@ fun StudioCanvasPreview(
                     }
                 }
 
-                // Selectable Grid Overlay (2x6 default, 4x4, or Grid Off) + Safe Area + Center Guides
+                // Selectable Grid Overlay (2x6 default, 4x4, or Grid Off) + Safe Area + Illuminated 1dp Center Snap Guides
+                val selectedLayer = sortedLayers.firstOrNull { it.id == workspace.selectedLayerId && it.visible }
+                val snapGuideState = remember(selectedLayer, isActivelyDraggingLayer, workspace.showSnapGuides) {
+                    if (selectedLayer != null && isActivelyDraggingLayer && workspace.showSnapGuides) {
+                        StudioWorkspaceReducer.computeCenterSnapGuides(selectedLayer)
+                    } else {
+                        com.example.studio.SnapGuideState()
+                    }
+                }
                 val gridMode = if (workspace.showGrid) workspace.gridMode else CanvasGridMode.OFF
                 if (gridMode != CanvasGridMode.OFF || workspace.showSafeArea || workspace.showSnapGuides) {
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         if (gridMode != CanvasGridMode.OFF && gridMode.cols > 0 && gridMode.rows > 0) {
-                            val gridColor = Color.White.copy(alpha = 0.16f)
+                            val gridColor = Color.White.copy(alpha = 0.14f)
                             for (c in 1 until gridMode.cols) {
                                 val x = size.width * (c.toFloat() / gridMode.cols)
                                 drawLine(gridColor, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1f)
@@ -298,18 +324,20 @@ fun StudioCanvasPreview(
                             }
                         }
                         if (workspace.showSnapGuides) {
-                            val guideColor = ZroCobalt.copy(alpha = 0.28f)
+                            val oneDpPx = 1.dp.toPx()
+                            val vGuideColor = if (snapGuideState.snappedCenterX) ZroCobalt else ZroCobalt.copy(alpha = 0.24f)
+                            val hGuideColor = if (snapGuideState.snappedCenterY) ZroCobalt else ZroCobalt.copy(alpha = 0.24f)
                             drawLine(
-                                guideColor,
+                                vGuideColor,
                                 Offset(size.width / 2f, 0f),
                                 Offset(size.width / 2f, size.height),
-                                strokeWidth = 1f
+                                strokeWidth = if (snapGuideState.snappedCenterX) oneDpPx * 1.35f else oneDpPx
                             )
                             drawLine(
-                                guideColor,
+                                hGuideColor,
                                 Offset(0f, size.height / 2f),
                                 Offset(size.width, size.height / 2f),
-                                strokeWidth = 1f
+                                strokeWidth = if (snapGuideState.snappedCenterY) oneDpPx * 1.35f else oneDpPx
                             )
                         }
                         if (workspace.showSafeArea) {
@@ -327,7 +355,6 @@ fun StudioCanvasPreview(
 
                 // Top-most OBS Selection Box & 8 Draggable Transform Handles OR 4-Edge Crop Handles
                 // Completely hidden when deselected (selectedLayerId == null) or when interacting directly inside a WebView
-                val selectedLayer = sortedLayers.firstOrNull { it.id == workspace.selectedLayerId && it.visible }
                 val webInteractingSelected = selectedLayer != null &&
                     selectedLayer.type == LayerSourceType.BROWSER_WEB &&
                     webInteractLayerId == selectedLayer.id
@@ -348,7 +375,17 @@ fun StudioCanvasPreview(
                             canvasWidthPx = canvasWidthPx,
                             canvasHeightPx = canvasHeightPx,
                             onResizeCorner = { corner, dx, dy ->
-                                onResizeLayerCorner(selectedLayer.id, corner, dx, dy, selectedLayer.lockAspectRatio)
+                                val isCorner = corner == ResizeCorner.TOP_LEFT ||
+                                    corner == ResizeCorner.TOP_RIGHT ||
+                                    corner == ResizeCorner.BOTTOM_LEFT ||
+                                    corner == ResizeCorner.BOTTOM_RIGHT
+                                onResizeLayerCorner(
+                                    selectedLayer.id,
+                                    corner,
+                                    dx,
+                                    dy,
+                                    if (isCorner) selectedLayer.lockAspectRatio else false
+                                )
                             },
                             onDragFinished = onDragFinished
                         )
@@ -567,17 +604,17 @@ private fun StudioLayerNode(
         ) {
             val hasCrop = layer.cropLeft > 0.001f || layer.cropTop > 0.001f ||
                 layer.cropRight > 0.001f || layer.cropBottom > 0.001f
+            // BROWSER_WEB handles fixed-viewport GPU UV clipping directly inside StudioWebSourceView
+            // so the WebView internal layout is NEVER resized during crop drags (zero vertical reflow!).
+            val useLayoutProjection = hasCrop && layer.type != LayerSourceType.BROWSER_WEB
 
-            // Exact visible-box crop projection: the outer Box is strictly (x, y, width, height) = the visible
-            // cropped area with ZERO empty margins. When cropped, inner content (Image, GIF, Video, WebView, etc.)
-            // is measured at its virtual uncropped dimensions and offset cleanly inside a clipToBounds viewport.
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .clipToBounds()
             ) {
                 Box(
-                    modifier = if (hasCrop) {
+                    modifier = if (useLayoutProjection) {
                         Modifier.croppedContentProjection(
                             cropLeft = layer.cropLeft,
                             cropTop = layer.cropTop,
@@ -819,8 +856,8 @@ private fun Modifier.croppedContentProjection(
     cropRight: Float,
     cropBottom: Float
 ): Modifier = this.layout { measurable, constraints ->
-    val visW = (1f - cropLeft - cropRight).coerceIn(0.15f, 1f)
-    val visH = (1f - cropTop - cropBottom).coerceIn(0.15f, 1f)
+    val visW = (1f - cropLeft - cropRight).coerceIn(StudioWorkspaceReducer.MIN_CROP_VISIBLE, 1f)
+    val visH = (1f - cropTop - cropBottom).coerceIn(StudioWorkspaceReducer.MIN_CROP_VISIBLE, 1f)
     val boxW = constraints.maxWidth.coerceAtLeast(1)
     val boxH = constraints.maxHeight.coerceAtLeast(1)
     val fullW = (boxW / visW).roundToInt().coerceAtLeast(boxW)
@@ -1325,6 +1362,18 @@ private fun LayerContentVisual(
                 reloadNonce = layer.webReloadNonce,
                 interactiveEditing = interactiveEditing,
                 allowPageInteraction = allowWebPageInteraction,
+                layerId = layer.id,
+                viewportPreset = layer.webViewportPreset,
+                cropLeft = layer.cropLeft,
+                cropTop = layer.cropTop,
+                cropRight = layer.cropRight,
+                cropBottom = layer.cropBottom,
+                chromaKey = if (bypassGraphicAdjustment || !layer.graphicAdjustment.enabled) {
+                    com.example.studio.LayerChromaKeySettings.DEFAULT
+                } else {
+                    layer.graphicAdjustment.chromaKey
+                },
+                opacity = if (bypassGraphicAdjustment) 1.0f else layer.opacity,
                 modifier = Modifier.fillMaxSize()
             )
         }

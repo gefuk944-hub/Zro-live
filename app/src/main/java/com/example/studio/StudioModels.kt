@@ -190,13 +190,28 @@ enum class LayerSourceType(val label: String, val category: String) {
     MERGED_GROUP("Merged Layer", "Composite");
 
     fun supportsChromaKey(): Boolean = when (this) {
-        IMAGE, LOGO, VIDEO_OVERLAY, WEBCAM, GAMEPLAY_SCREEN, BACKGROUND -> true
+        IMAGE, LOGO, GIF, VIDEO_OVERLAY, WEBCAM, GAMEPLAY_SCREEN, BACKGROUND, BROWSER_WEB -> true
         else -> false
     }
 
     companion object {
         fun fromName(raw: String?): LayerSourceType =
             entries.firstOrNull { it.name == raw } ?: TEXT
+    }
+}
+
+/**
+ * Fixed virtual viewport presets for Browser / Website overlay layers.
+ * Keeps WebView layout locked at a fixed virtual canvas so cropping never triggers vertical text/layout reflow.
+ */
+enum class WebViewportPreset(val label: String, val shortLabel: String, val widthPx: Int, val heightPx: Int) {
+    P1080("1080p (1920×1080)", "1080p", 1920, 1080),
+    P720("720p (1280×720)", "720p", 1280, 720),
+    SQUARE_800("Square Widget (800×800)", "800×800", 800, 800);
+
+    companion object {
+        fun fromName(raw: String?): WebViewportPreset =
+            entries.firstOrNull { it.name == raw } ?: P1080
     }
 }
 
@@ -268,7 +283,8 @@ data class SceneLayer(
     val sourceMediaHeight: Int = 0,
     val origWidth: Float = 0f,
     val origHeight: Float = 0f,
-    val webReloadNonce: Int = 0
+    val webReloadNonce: Int = 0,
+    val webViewportPreset: WebViewportPreset = WebViewportPreset.P1080
 )
 
 data class StudioScene(
